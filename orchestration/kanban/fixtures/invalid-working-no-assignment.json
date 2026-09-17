@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "revision": 1,
+  "workflow": {
+    "goal": "Test invalid state",
+    "tier": "T2",
+    "state": "executing",
+    "classification": {
+      "initialTier": "T2",
+      "confirmedTier": "T2",
+      "confidence": "high",
+      "reason": "Fixture",
+      "riskSignals": []
+    }
+  },
+  "scheduler": {
+    "maxWorkers": 3
+  },
+  "tasks": [
+    {
+      "id": "api",
+      "title": "Implement API",
+      "description": "Implement something.",
+      "status": "working",
+      "phase": "implementation",
+      "dependsOn": [],
+      "paths": [],
+      "acceptance": [],
+      "modifying": true,
+      "attempts": 1,
+      "assignment": null,
+      "blocker": null,
+      "result": null
+    }
+  ],
+  "createdAt": "2026-09-17T12:00:00.000Z",
+  "updatedAt": "2026-09-17T12:00:00.000Z"
+}
