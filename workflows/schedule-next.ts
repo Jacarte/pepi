@@ -2,9 +2,9 @@
 //
 // args: { expectedRevision: number }
 //
-// The scheduler is the sole assignment authority. Worker capacity counts only
-// implementation/fix phases. Parallel modifying work is additionally admitted
-// only when declared path ownership does not overlap.
+// Worker capacity counts only implementation/fix phases. Path ownership is
+// stricter: every non-terminal working modifying task keeps its declared paths
+// reserved through implementation, verification, review, fix, and integration.
 
 const expectedRevision = args.expectedRevision;
 if (!Number.isInteger(expectedRevision) || expectedRevision < 1) {
@@ -36,6 +36,9 @@ function dependenciesDone(board, task) {
 function isWorkerActive(task) {
   return task.status === "working" && (task.phase === "implementation" || task.phase === "fix");
 }
+function isPathOwner(task) {
+  return task.status === "working" && task.modifying === true;
+}
 function normalizePath(value) {
   return String(value).replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/+$/, "");
 }
@@ -56,6 +59,15 @@ if (workerActive.length > maxWorkers) {
   throw new Error(`active worker count ${workerActive.length} exceeds scheduler.maxWorkers ${maxWorkers}`);
 }
 
+const pathOwners = current.tasks.filter(isPathOwner);
+for (let i = 0; i < pathOwners.length; i += 1) {
+  for (let j = i + 1; j < pathOwners.length; j += 1) {
+    if (modifyingTasksConflict(pathOwners[i], pathOwners[j])) {
+      throw new Error(`active modifying path leases overlap: ${pathOwners[i].id} and ${pathOwners[j].id}`);
+    }
+  }
+}
+
 const availableCapacity = maxWorkers - workerActive.length;
 if (availableCapacity === 0) {
   return {
@@ -72,7 +84,7 @@ const allReady = current.tasks.filter(
 );
 const selected = [];
 const deferredConflictTaskIds = [];
-const ownership = [...workerActive];
+const ownership = [...pathOwners];
 
 for (const candidate of allReady) {
   if (selected.length >= availableCapacity) break;
@@ -82,7 +94,7 @@ for (const candidate of allReady) {
     continue;
   }
   selected.push(candidate);
-  ownership.push(candidate);
+  if (candidate.modifying === true) ownership.push(candidate);
 }
 
 if (selected.length === 0) {
@@ -102,9 +114,7 @@ if (selected.length === 0) {
     availableCapacity,
     workerActiveTaskIds: workerActive.map((task) => task.id),
   };
-  if (deferredConflictTaskIds.length > 0) {
-    response.deferredConflictTaskIds = deferredConflictTaskIds;
-  }
+  if (deferredConflictTaskIds.length > 0) response.deferredConflictTaskIds = deferredConflictTaskIds;
   return response;
 }
 
@@ -151,7 +161,5 @@ const response = {
     ...claims.map((claim) => claim.taskId),
   ],
 };
-if (deferredConflictTaskIds.length > 0) {
-  response.deferredConflictTaskIds = deferredConflictTaskIds;
-}
+if (deferredConflictTaskIds.length > 0) response.deferredConflictTaskIds = deferredConflictTaskIds;
 return response;
