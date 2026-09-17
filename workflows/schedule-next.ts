@@ -1,12 +1,14 @@
-// Claim at most one ready Kanban task. This v1 scheduler is intentionally serial.
+// Claim ready Kanban tasks up to configured worker capacity.
 //
 // args:
 // {
 //   expectedRevision: number
 // }
 //
-// It does not launch a worker. It only persists the task claim that a later
-// worker-launch workflow will consume.
+// This workflow persists assignments only. It does not launch workers.
+// Worker capacity counts only tasks whose current phase actively requires a
+// worker process (`implementation` or `fix`), not tasks waiting in verification
+// or review.
 
 const expectedRevision = args.expectedRevision;
 
@@ -40,6 +42,12 @@ if (!Array.isArray(current.tasks)) {
   throw new Error("kanban tasks are invalid");
 }
 
+const maxWorkers = current.scheduler?.maxWorkers;
+
+if (!Number.isInteger(maxWorkers) || maxWorkers < 1 || maxWorkers > 16) {
+  throw new Error("kanban scheduler.maxWorkers must be an integer from 1 to 16");
+}
+
 function taskById(board, id) {
   return board.tasks.find((task) => task.id === id);
 }
@@ -51,23 +59,38 @@ function dependenciesDone(board, task) {
   });
 }
 
-const active = current.tasks.filter((task) => task.status === "working");
+function isWorkerActive(task) {
+  return (
+    task.status === "working" &&
+    (task.phase === "implementation" || task.phase === "fix")
+  );
+}
 
-// Serial scheduler v1: never claim a second task while one is active, even if
-// scheduler.maxWorkers is configured above 1 for a future parallel scheduler.
-if (active.length > 0) {
+const workerActive = current.tasks.filter(isWorkerActive);
+
+if (workerActive.length > maxWorkers) {
+  throw new Error(
+    `active worker count ${workerActive.length} exceeds scheduler.maxWorkers ${maxWorkers}`,
+  );
+}
+
+const availableCapacity = maxWorkers - workerActive.length;
+
+if (availableCapacity === 0) {
   return {
     status: "busy",
     revision: current.revision,
-    activeTaskIds: active.map((task) => task.id),
+    maxWorkers,
+    availableCapacity: 0,
+    workerActiveTaskIds: workerActive.map((task) => task.id),
   };
 }
 
-const ready = current.tasks.find(
-  (task) => task.status === "todo" && dependenciesDone(current, task),
-);
+const ready = current.tasks
+  .filter((task) => task.status === "todo" && dependenciesDone(current, task))
+  .slice(0, availableCapacity);
 
-if (!ready) {
+if (ready.length === 0) {
   const unfinished = current.tasks.filter(
     (task) => task.status !== "done" && task.status !== "cancelled",
   );
@@ -76,26 +99,47 @@ if (!ready) {
     status: "idle",
     reason: unfinished.length === 0 ? "no-unfinished-tasks" : "no-ready-task",
     revision: current.revision,
+    maxWorkers,
+    availableCapacity,
+    workerActiveTaskIds: workerActive.map((task) => task.id),
   };
 }
 
 const next = JSON.parse(JSON.stringify(current));
-const task = taskById(next, ready.id);
-const attempt = task.attempts + 1;
-const workerKey = `worker-${task.id}-${attempt}`;
 const startedAt = new Date().toISOString();
+const claims = [];
 
-task.status = "working";
-task.phase = "implementation";
-task.attempts = attempt;
-task.assignment = {
-  workerKey,
-  runId: null,
-  attempt,
-  startedAt,
-};
-task.blocker = null;
-task.result = null;
+for (const readyTask of ready) {
+  const task = taskById(next, readyTask.id);
+  const attempt = task.attempts + 1;
+  const workerKey = `worker-${task.id}-${attempt}`;
+
+  task.status = "working";
+  task.phase = "implementation";
+  task.attempts = attempt;
+  task.assignment = {
+    workerKey,
+    runId: null,
+    attempt,
+    startedAt,
+  };
+  task.blocker = null;
+  task.result = null;
+
+  claims.push({
+    taskId: task.id,
+    workerKey,
+    attempt,
+    task: {
+      id: task.id,
+      title: task.title,
+      description: task.description,
+      paths: [...task.paths],
+      acceptance: [...task.acceptance],
+      modifying: task.modifying,
+    },
+  });
+}
 
 next.revision += 1;
 next.updatedAt = startedAt;
@@ -105,15 +149,11 @@ await state.set("kanban", next);
 return {
   status: "claimed",
   revision: next.revision,
-  taskId: task.id,
-  workerKey,
-  attempt,
-  task: {
-    id: task.id,
-    title: task.title,
-    description: task.description,
-    paths: [...task.paths],
-    acceptance: [...task.acceptance],
-    modifying: task.modifying,
-  },
+  maxWorkers,
+  availableBeforeClaim: availableCapacity,
+  claims,
+  workerActiveTaskIds: [
+    ...workerActive.map((task) => task.id),
+    ...claims.map((claim) => claim.taskId),
+  ],
 };
