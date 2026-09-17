@@ -1,23 +1,43 @@
-// Launch all currently claimed worker slots concurrently.
+// Run the claimed worker pool with rolling refill.
 //
 // args: { expectedRevision: number }
 //
-// This workflow does not claim new tasks. The scheduler must persist claims first.
-// It launches every unlaunched working task in implementation/fix, waits for the
-// batch, then persists successful worker handoffs in one board revision.
+// The scheduler remains the sole assignment policy. This workflow consumes the
+// currently persisted claims, launches them concurrently, and whenever one
+// worker finishes successfully it atomically persists that completion plus any
+// newly claimed ready work that fits the freed capacity. New workers are then
+// launched immediately without waiting for the rest of the batch.
 
 const expectedRevision = args.expectedRevision;
 if (!Number.isInteger(expectedRevision) || expectedRevision < 1) {
   throw new Error("args.expectedRevision must be a positive integer");
 }
 
-function requireBoard(board) {
+function requireBoard(board, revision) {
   if (!board || typeof board !== "object") throw new Error("kanban state is not initialized");
-  if (board.revision !== expectedRevision) {
-    throw new Error(`stale kanban revision: expected ${expectedRevision}, got ${board.revision}`);
+  if (!Number.isInteger(board.revision)) throw new Error("kanban revision is invalid");
+  if (board.revision !== revision) {
+    throw new Error(`stale kanban revision: expected ${revision}, got ${board.revision}`);
   }
   if (board.workflow?.state !== "executing") throw new Error("kanban workflow must be executing");
   if (!Array.isArray(board.tasks)) throw new Error("kanban tasks are invalid");
+  if (!Number.isInteger(board.scheduler?.maxWorkers) || board.scheduler.maxWorkers < 1 || board.scheduler.maxWorkers > 16) {
+    throw new Error("kanban scheduler.maxWorkers is invalid");
+  }
+}
+
+function taskById(board, id) {
+  return board.tasks.find((task) => task.id === id);
+}
+
+function dependenciesDone(board, task) {
+  return task.dependsOn.every((dependencyId) => taskById(board, dependencyId)?.status === "done");
+}
+
+function workerActive(board) {
+  return board.tasks.filter(
+    (task) => task.status === "working" && ["implementation", "fix"].includes(task.phase),
+  );
 }
 
 function boundedSummary(output) {
@@ -30,21 +50,7 @@ function firstArtifactPath(result) {
   return result.artifactPaths.find((value) => typeof value === "string" && value.length > 0) ?? null;
 }
 
-const current = await state.get("kanban");
-requireBoard(current);
-
-const launchable = current.tasks.filter((task) =>
-  task.status === "working" &&
-  ["implementation", "fix"].includes(task.phase) &&
-  task.assignment &&
-  task.assignment.runId === null,
-);
-
-if (launchable.length === 0) {
-  return { status: "idle", revision: current.revision, launched: 0 };
-}
-
-const launched = launchable.map((task) => {
+function workerPrompt(task) {
   const paths = task.paths.length ? task.paths.map((p) => `- ${p}`).join("\n") : "- no path hints supplied";
   const acceptance = task.acceptance.length ? task.acceptance.map((a) => `- ${a}`).join("\n") : "- no explicit acceptance criteria supplied";
   const previousHandoff = task.phase === "fix" ? task.result?.outputReference ?? null : null;
@@ -57,7 +63,7 @@ const launched = launchable.map((task) => {
       ].join("\n")
     : "Implement only this approved task in the managed isolated worktree. Make the smallest coherent change and run focused checks.";
 
-  const taskPrompt = [
+  return [
     "Execute this already-approved Kanban task.",
     `Task ID: ${task.id}`,
     `Title: ${task.title}`,
@@ -68,72 +74,136 @@ const launched = launchable.map((task) => {
     "Repository boundary: stay inside the repository/worktree; do not scan parents/home/root; do not push or publish refs.",
     "Return a concise implementation summary and checks run.",
   ].join("\n\n");
+}
 
-  return {
-    taskId: task.id,
-    workerKey: task.assignment.workerKey,
-    attempt: task.assignment.attempt,
-    promise: runs.run(task.assignment.workerKey, {
-      agent: "worker",
-      context: "fresh",
-      task: taskPrompt,
-      worktree: task.modifying === true,
-    }),
-  };
-});
+function claimReady(board, count, at) {
+  if (count <= 0) return [];
+  const ready = board.tasks.filter(
+    (task) => task.status === "todo" && dependenciesDone(board, task),
+  ).slice(0, count);
 
-const settled = await Promise.all(launched.map(async (entry) => ({ ...entry, result: await entry.promise })));
+  const claims = [];
+  for (const task of ready) {
+    const attempt = task.attempts + 1;
+    const workerKey = `worker-${task.id}-${attempt}`;
+    task.status = "working";
+    task.phase = "implementation";
+    task.attempts = attempt;
+    task.assignment = { workerKey, runId: null, attempt, startedAt: at };
+    task.blocker = null;
+    task.result = null;
+    claims.push(task.id);
+  }
+  return claims;
+}
 
-const latest = await state.get("kanban");
-requireBoard(latest);
-const next = JSON.parse(JSON.stringify(latest));
+let board = await state.get("kanban");
+requireBoard(board, expectedRevision);
+let knownRevision = board.revision;
+
+const initialActive = workerActive(board);
+if (initialActive.length > board.scheduler.maxWorkers) {
+  throw new Error(
+    `kanban worker capacity exceeded: active ${initialActive.length}, max ${board.scheduler.maxWorkers}`,
+  );
+}
+
+const inFlight = new Map();
 const completed = [];
 const failed = [];
+let launchedCount = 0;
 
-for (const entry of settled) {
-  const task = next.tasks.find((candidate) => candidate.id === entry.taskId);
-  if (!task || task.status !== "working" || !["implementation", "fix"].includes(task.phase)) {
-    throw new Error(`task ${entry.taskId} changed while worker batch was running`);
+function launchTask(task) {
+  if (inFlight.has(task.id)) return;
+  if (!task.assignment || task.assignment.runId !== null) return;
+  const workerKey = task.assignment.workerKey;
+  const attempt = task.assignment.attempt;
+  const promise = runs.run(workerKey, {
+    agent: "worker",
+    context: "fresh",
+    task: workerPrompt(task),
+    worktree: task.modifying === true,
+  }).then(
+    (result) => ({ taskId: task.id, workerKey, attempt, result }),
+    (error) => ({ taskId: task.id, workerKey, attempt, result: { ok: false, error: String(error) } }),
+  );
+  inFlight.set(task.id, { promise, workerKey, attempt });
+  launchedCount += 1;
+}
+
+for (const task of initialActive) {
+  launchTask(task);
+}
+
+if (inFlight.size === 0) {
+  return { status: "idle", revision: board.revision, launched: 0, completed: [], failed: [] };
+}
+
+while (inFlight.size > 0) {
+  const settled = await Promise.race([...inFlight.values()].map((entry) => entry.promise));
+  inFlight.delete(settled.taskId);
+
+  const latest = await state.get("kanban");
+  requireBoard(latest, knownRevision);
+  const latestTask = taskById(latest, settled.taskId);
+  if (!latestTask || latestTask.status !== "working" || !["implementation", "fix"].includes(latestTask.phase)) {
+    throw new Error(`task ${settled.taskId} changed while worker pool was running`);
   }
-  if (task.assignment?.workerKey !== entry.workerKey || task.assignment?.attempt !== entry.attempt || task.assignment?.runId !== null) {
-    throw new Error(`task ${entry.taskId} assignment changed while worker batch was running`);
+  if (
+    latestTask.assignment?.workerKey !== settled.workerKey ||
+    latestTask.assignment?.attempt !== settled.attempt ||
+    latestTask.assignment?.runId !== null
+  ) {
+    throw new Error(`task ${settled.taskId} assignment changed while worker pool was running`);
   }
 
-  if (!entry.result || entry.result.ok === false || typeof entry.result.runId !== "string" || entry.result.runId.length === 0) {
-    failed.push(entry.taskId);
+  const result = settled.result;
+  const outputReference = firstArtifactPath(result);
+  const success =
+    result &&
+    result.ok !== false &&
+    typeof result.runId === "string" &&
+    result.runId.length > 0 &&
+    (latestTask.modifying !== true || Boolean(outputReference));
+
+  if (!success) {
+    failed.push(settled.taskId);
     continue;
   }
 
-  const outputReference = firstArtifactPath(entry.result);
-  if (task.modifying === true && !outputReference) {
-    failed.push(entry.taskId);
-    continue;
-  }
-
-  task.assignment.runId = entry.result.runId;
+  const next = JSON.parse(JSON.stringify(latest));
+  const task = taskById(next, settled.taskId);
+  task.assignment.runId = result.runId;
   task.phase = "verification";
   task.result = {
-    summary: boundedSummary(entry.result.output),
+    summary: boundedSummary(result.output),
     verification: "pending",
     review: "pending",
-    runId: entry.result.runId,
+    runId: result.runId,
     outputReference,
   };
-  completed.push(entry.taskId);
-}
+  completed.push(task.id);
 
-if (completed.length === 0) {
-  return { status: "no-successful-workers", revision: latest.revision, launched: launched.length, failed };
-}
+  const at = new Date().toISOString();
+  const activeAfterCompletion = workerActive(next).length;
+  const available = next.scheduler.maxWorkers - activeAfterCompletion;
+  const newlyClaimed = claimReady(next, available, at);
 
-next.revision += 1;
-next.updatedAt = new Date().toISOString();
-await state.set("kanban", next);
+  next.revision += 1;
+  next.updatedAt = at;
+  await state.set("kanban", next);
+  knownRevision = next.revision;
+  board = next;
+
+  for (const taskId of newlyClaimed) {
+    launchTask(taskById(board, taskId));
+  }
+}
 
 return {
   status: failed.length ? "partial" : "complete",
-  revision: next.revision,
-  launched: launched.length,
+  revision: knownRevision,
+  launched: launchedCount,
   completed,
   failed,
 };
