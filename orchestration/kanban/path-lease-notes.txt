@@ -1,0 +1,1 @@
+Modifying tasks retain declared-path ownership through integration.
