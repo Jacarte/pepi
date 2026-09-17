@@ -89,7 +89,7 @@ if (selected.length === 0) {
   const unfinished = current.tasks.filter(
     (task) => task.status !== "done" && task.status !== "cancelled",
   );
-  return {
+  const response = {
     status: "idle",
     reason:
       allReady.length > 0 && deferredConflictTaskIds.length > 0
@@ -101,8 +101,11 @@ if (selected.length === 0) {
     maxWorkers,
     availableCapacity,
     workerActiveTaskIds: workerActive.map((task) => task.id),
-    deferredConflictTaskIds,
   };
+  if (deferredConflictTaskIds.length > 0) {
+    response.deferredConflictTaskIds = deferredConflictTaskIds;
+  }
+  return response;
 }
 
 const next = JSON.parse(JSON.stringify(current));
@@ -137,15 +140,18 @@ next.revision += 1;
 next.updatedAt = startedAt;
 await state.set("kanban", next);
 
-return {
+const response = {
   status: "claimed",
   revision: next.revision,
   maxWorkers,
   availableBeforeClaim: availableCapacity,
   claims,
-  deferredConflictTaskIds,
   workerActiveTaskIds: [
     ...workerActive.map((task) => task.id),
     ...claims.map((claim) => claim.taskId),
   ],
 };
+if (deferredConflictTaskIds.length > 0) {
+  response.deferredConflictTaskIds = deferredConflictTaskIds;
+}
+return response;
