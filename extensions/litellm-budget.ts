@@ -4,15 +4,18 @@
  * Shows LiteLLM gateway spend / remaining budget in the footer status line,
  * refreshed on session start, when the agent settles, and periodically.
  *
- * Port of the opencode `trustly.tsx` sidebar budget widget.
+ * Ported from an opencode sidebar budget widget.
  *
  * Commands:
  *   /budget          Show full budget details (and force a refresh)
  *   /budget refresh  Same as above
  *
- * Config resolution order:
- *   API key : LITELLM_API_KEY -> TRUSTLY_LLM_GATEWAY_API_KEY -> auth.json (litellm.key)
- *   Base URL: LITELLM_BASE_URL -> auth.json (litellm.env.LITELLM_BASE_URL) -> default
+ * Config resolution order (no hardcoded gateway; nothing org-specific here):
+ *   API key : LITELLM_API_KEY -> LLM_GATEWAY_API_KEY -> TRUSTLY_LLM_GATEWAY_API_KEY
+ *             -> auth.json (litellm.key)
+ *   Base URL: LITELLM_BASE_URL -> LLM_GATEWAY_URL -> auth.json (litellm.env.LITELLM_BASE_URL)
+ *
+ * If no base URL resolves, the extension stays silent rather than guessing a host.
  */
 
 import { readFileSync } from "node:fs";
@@ -21,7 +24,6 @@ import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 const STATUS_ID = "litellm-budget";
-const DEFAULT_BASE_URL = "https://gateway.prd.devtools.trustly.cloud";
 const REFRESH_MS = 60_000;
 const MIN_REFRESH_MS = 15_000;
 const FETCH_TIMEOUT_MS = 10_000;
@@ -58,11 +60,26 @@ function readAuthEntry(): { key?: string; baseUrl?: string } {
 	}
 }
 
+/** Treat empty/whitespace env values as absent so a blank export doesn't win. */
+function cleanEnv(value: string | undefined): string | undefined {
+	const trimmed = value?.trim();
+	return trimmed ? trimmed : undefined;
+}
+
 function resolveConfig(): { apiKey: string; baseUrl: string } {
 	const auth = readAuthEntry();
 	const apiKey =
-		process.env.LITELLM_API_KEY ?? process.env.TRUSTLY_LLM_GATEWAY_API_KEY ?? auth.key ?? "";
-	const baseUrl = process.env.LITELLM_BASE_URL ?? auth.baseUrl ?? DEFAULT_BASE_URL;
+		cleanEnv(process.env.LITELLM_API_KEY) ??
+		cleanEnv(process.env.LLM_GATEWAY_API_KEY) ??
+		// Legacy name, kept so existing shells keep working.
+		cleanEnv(process.env.TRUSTLY_LLM_GATEWAY_API_KEY) ??
+		auth.key ??
+		"";
+	const baseUrl =
+		cleanEnv(process.env.LITELLM_BASE_URL) ??
+		cleanEnv(process.env.LLM_GATEWAY_URL) ??
+		auth.baseUrl ??
+		"";
 	return { apiKey, baseUrl };
 }
 
@@ -187,6 +204,11 @@ export default function (pi: ExtensionAPI) {
 			renderStatus(ctx);
 			return;
 		}
+		if (!baseUrl) {
+			lastError = "no gateway URL";
+			renderStatus(ctx);
+			return;
+		}
 
 		running = true;
 		try {
@@ -238,7 +260,14 @@ export default function (pi: ExtensionAPI) {
 			const { apiKey, baseUrl } = resolveConfig();
 			if (!apiKey) {
 				ctx.ui.notify(
-					"No LiteLLM API key found (LITELLM_API_KEY, TRUSTLY_LLM_GATEWAY_API_KEY, or auth.json)",
+					"No LiteLLM API key found. Set LITELLM_API_KEY or LLM_GATEWAY_API_KEY, or add litellm.key to auth.json.",
+					"error",
+				);
+				return;
+			}
+			if (!baseUrl) {
+				ctx.ui.notify(
+					"No LiteLLM gateway URL found. Set LITELLM_BASE_URL or LLM_GATEWAY_URL, or add litellm.env.LITELLM_BASE_URL to auth.json.",
 					"error",
 				);
 				return;

@@ -6,6 +6,49 @@ Clone this to `~/.pi/agent` and pi picks everything up on next start.
 
 ---
 
+## Required environment variables
+
+No hostnames or credentials are hardcoded in this repo — `mcp.json` reads everything
+via `{env:VAR}`. Export these in your shell profile (`~/.zshrc`) before starting pi:
+
+```bash
+# Required
+export LLM_GATEWAY_URL="https://your-litellm-gateway.example.com"  # no trailing slash
+export LLM_GATEWAY_API_KEY="sk-..."
+export GITHUB_TOKEN_READONLY="ghp_..."
+
+# Optional — only if you use the matching MCP server
+export NEO4J_PASSWORD="..."        # neo4j
+export ELEVENLABS_API_KEY="..."    # speaker (TTS)
+export CONTEXT7_API_KEY="..."      # context7 (currently disabled in mcp.json)
+```
+
+| Variable | Needed by | Required | Missing behavior |
+|---|---|---|---|
+| `LLM_GATEWAY_URL` | DevCenter MCP (`url`), `litellm-budget` | **yes** | DevCenter throws at startup |
+| `LLM_GATEWAY_API_KEY` | DevCenter MCP (`headers`), `litellm-budget` | **yes** | silent 401 |
+| `GITHUB_TOKEN_READONLY` | GitHub MCP (`headers`) | **yes** | silent 401 |
+| `NEO4J_PASSWORD` | neo4j MCP (`args`) | if using neo4j | auth rejected |
+| `ELEVENLABS_API_KEY` | speaker MCP (`env`) | if using speaker | TTS fails |
+| `CONTEXT7_API_KEY` | context7 MCP (`headers`) | no — server disabled | n/a |
+
+Gotchas, both verified against the MCP adapter source:
+
+1. **`LLM_GATEWAY_URL` must not end in `/`.** It is concatenated as
+   `{env:LLM_GATEWAY_URL}/DevCenter/mcp`, so a trailing slash yields a double slash.
+2. **Missing vars fail asymmetrically.** In a `url` they throw a clear startup error
+   (`Missing environment variable in MCP server URL: ...`) and only that one server
+   fails. In `headers`, `env`, or `args` they interpolate to an **empty string**, so the
+   server starts and then fails auth with a confusing 401. There is no default-value
+   syntax.
+
+Credentials themselves live in `auth.json` (gitignored) — see step 2 below. Note that pi
+does **not** export `auth.json`'s `env` block into the process environment, so
+`LLM_GATEWAY_URL` must be exported by your shell even if `auth.json` already has
+`LITELLM_BASE_URL`.
+
+---
+
 ## Bootstrap on a new machine
 
 ### 1. Install pi and clone the config
@@ -38,22 +81,21 @@ Or write `~/.pi/agent/auth.json` by hand:
   "litellm": {
     "type": "api_key",
     "key": "sk-...",
-    "env": { "LITELLM_BASE_URL": "https://gateway.prd.devtools.trustly.cloud" }
+    "env": { "LITELLM_BASE_URL": "https://your-litellm-gateway.example.com" }
   }
 }
 ```
 
-**Environment variables** — `mcp.json` references these via `{env:VAR}`. Unset vars
-expand to an empty string (no defaults supported), so the matching server will fail
-to authenticate rather than warn loudly. Export what you need in your shell profile:
+**Environment variables** — see [Required environment variables](#required-environment-variables)
+at the top for the full list and copy-paste block.
 
-| Variable | Used by | Required |
-|---|---|---|
-| `TRUSTLY_LLM_GATEWAY_API_KEY` | DevCenter MCP, `litellm-budget` extension (fallback) | yes |
-| `GITHUB_TOKEN_READONLY` | GitHub MCP | yes |
-| `NEO4J_PASSWORD` | neo4j MCP | if using neo4j |
-| `ELEVENLABS_API_KEY` | speaker (TTS) MCP | if using speaker |
-| `CONTEXT7_API_KEY` | context7 MCP (currently `disabled`) | no |
+The `litellm-budget` extension resolves independently of `mcp.json`, preferring the
+provider's own vars and falling back to `auth.json`:
+
+- key: `LITELLM_API_KEY` → `LLM_GATEWAY_API_KEY` → `TRUSTLY_LLM_GATEWAY_API_KEY` (legacy) → `auth.json`
+- url: `LITELLM_BASE_URL` → `LLM_GATEWAY_URL` → `auth.json`
+
+If no URL resolves it shows `budget: no gateway URL` rather than guessing a host.
 
 ### 3. Start pi — packages install themselves
 
@@ -84,11 +126,82 @@ Some MCP servers shell out to commands that must be on `PATH`:
 |---|---|---|
 | `neo4j-mcp` | neo4j | `brew install neo4j-mcp` (plus a running neo4j) |
 | `nuc-mcp` | Nucleus | internal tooling |
-| `codegraph` | codegraph | `npm i -g @vndv/codegraph` |
+| `codegraph` | codegraph MCP + `@vndv/pi-codegraph` | `npm i -g @colbymchenry/codegraph`, then `codegraph init -i` per project |
 | `tts2mic-mcp` | speaker | expects `~/tts2mic-mcp/tts2mic-mcp` |
 
 `npx`-based servers (browsermcp, playwright, Chrome) need no install. Remote servers
 (Atlassian, Datadog) use OAuth — run `/mcp` in pi to authenticate.
+
+---
+
+## Installed extensions
+
+These are the `packages` entries in `settings.json`. pi installs them automatically on
+startup — nothing to install by hand.
+
+| Package | Version | What it adds |
+|---|---|---|
+| **`pi-subagents`** | 0.68.0 | Delegation to child agents, scripted workflows, background jobs. **See below.** |
+| `pi-provider-litellm` | 3.0.1 | The LiteLLM provider — without it there are no models at all |
+| `pi-mcp-adapter` | 2.34.0 | Reads `mcp.json` and exposes every MCP server as tools |
+| `pi-web-access` | 0.29.0 | `web_search`, `fetch_content`, GitHub/PDF/YouTube extraction |
+| `@vndv/pi-codegraph` | 0.1.10 | `codegraph_*` structural code queries (symbols, callers, impact) |
+
+Plus one local extension in this repo, auto-discovered from `extensions/`:
+
+| Extension | What it adds |
+|---|---|
+| `extensions/litellm-budget.ts` | Footer gauge of LiteLLM spend + `/budget` command |
+
+### Why `pi-subagents` is the important one
+
+The other four packages extend what the agent can *reach* — more models, more servers,
+more search, more code queries. `pi-subagents` changes the **shape** of the work: it turns
+a single linear conversation into something that can fan out, run in parallel, and review
+itself.
+
+What that buys in practice:
+
+1. **Context isolation.** Each child gets a fresh context window. A scout can read 40
+   files and hand back a 20-line summary without spending the parent's context on all 40.
+   This is the difference between finishing a large task and hitting a compaction wall.
+2. **Independent review.** A fresh-context reviewer has no memory of the reasoning that
+   produced the code, so it can't rubber-stamp its own assumptions. Self-review in one
+   context is much weaker.
+3. **Parallelism.** Several reviewers or auditors run at once against the same diff, each
+   with a narrow mandate (correctness / tests / complexity).
+4. **Per-role model economics.** Cheap fast models for recon, expensive models for
+   judgment — configured in `settings.json` rather than chosen ad hoc.
+5. **Reusable workflows.** `workflows/*.ts` are committed, versioned scripts, so a
+   multi-step review pipeline is reproducible instead of re-improvised each time.
+
+This repo's `settings.json` assigns models by role, which is where most of the value is:
+
+| Agent | Model | Rationale |
+|---|---|---|
+| `oracle`, `reviewer` | `bedrock-claude-opus-5` | Judgment work — worth the cost |
+| `worker`, `scout` | `bedrock-claude-sonnet-5` | Volume work — speed and cost matter |
+| `claude-code`, `claude-code-writer` | disabled | Not used here |
+
+It also ships builtin agents usable in plain language ("use reviewer on this diff",
+"ask oracle for a second opinion"): `scout`, `worker`, `reviewer`, `oracle`, `researcher`,
+`evidence-auditor`, `delegate`, plus external-CLI bridges for Codex and Cursor that stay
+inactive unless those CLIs are on `PATH`.
+
+Committed workflows in `workflows/`:
+
+| Workflow | Purpose |
+|---|---|
+| `pr-review.ts` | PR context → parallel reviews → synthesis. Never publishes; the parent owns user ACK. |
+| `implement.ts` | Tiered implementation: T1 `worker`→verifier, up to T2/T3 adding `scout`→`oracle` plan→approval→parallel reviewers |
+
+`extensions/subagent/config.json` holds the display config (fleet view above the editor,
+inline tool summaries) and short model aliases used in child output.
+
+**Honest caveat:** the *most load-bearing* package is `pi-provider-litellm` — remove it
+and nothing runs, since every model in `settings.json` is served through the LiteLLM
+gateway. `pi-subagents` is the highest-*leverage* one: it changes how work gets done
+rather than whether it can run at all.
 
 ---
 
