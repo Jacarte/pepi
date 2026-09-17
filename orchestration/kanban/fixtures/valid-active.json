@@ -1,0 +1,89 @@
+{
+  "schemaVersion": 1,
+  "revision": 7,
+  "workflow": {
+    "goal": "Implement refresh token rotation",
+    "tier": "T2",
+    "state": "executing",
+    "classification": {
+      "initialTier": "T1",
+      "confirmedTier": "T2",
+      "confidence": "high",
+      "reason": "Repository discovery found a public authentication contract.",
+      "riskSignals": ["api-contract"]
+    }
+  },
+  "scheduler": {
+    "maxWorkers": 2
+  },
+  "tasks": [
+    {
+      "id": "shared-types",
+      "title": "Update shared token types",
+      "description": "Introduce the data structures required for refresh token rotation.",
+      "status": "done",
+      "phase": "complete",
+      "dependsOn": [],
+      "paths": ["internal/auth/types.go"],
+      "acceptance": ["The refresh token representation is available to API consumers."],
+      "modifying": true,
+      "attempts": 1,
+      "assignment": null,
+      "blocker": null,
+      "result": {
+        "summary": "Added refresh token data structures.",
+        "verification": "pass",
+        "review": "pass",
+        "runId": "run-shared-types-1",
+        "outputReference": null
+      }
+    },
+    {
+      "id": "api",
+      "title": "Implement refresh API",
+      "description": "Implement refresh token rotation in the HTTP API.",
+      "status": "working",
+      "phase": "implementation",
+      "dependsOn": ["shared-types"],
+      "paths": ["internal/api"],
+      "acceptance": [
+        "The refresh endpoint rotates refresh tokens.",
+        "The previous refresh token can no longer be reused."
+      ],
+      "modifying": true,
+      "attempts": 1,
+      "assignment": {
+        "workerKey": "worker-api-1",
+        "runId": "run-api-1",
+        "attempt": 1,
+        "startedAt": "2026-09-17T12:04:00.000Z"
+      },
+      "blocker": null,
+      "result": null
+    },
+    {
+      "id": "integration-tests",
+      "title": "Add integration tests",
+      "description": "Add end-to-end tests for refresh token rotation.",
+      "status": "blocked",
+      "phase": "queued",
+      "dependsOn": ["api"],
+      "paths": ["tests"],
+      "acceptance": [
+        "Rotation succeeds.",
+        "Reusing an old refresh token fails."
+      ],
+      "modifying": true,
+      "attempts": 0,
+      "assignment": null,
+      "blocker": {
+        "kind": "dependency",
+        "reason": "Waiting for the refresh API implementation.",
+        "taskIds": ["api"]
+      },
+      "result": null
+    }
+  ],
+  "createdAt": "2026-09-17T12:00:00.000Z",
+  "updatedAt": "2026-09-17T12:05:00.000Z"
+}
