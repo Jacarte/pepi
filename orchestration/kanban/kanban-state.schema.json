@@ -1,0 +1,175 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local/kanban-state.schema.json",
+  "title": "Pi Kanban State",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "revision", "workflow", "scheduler", "tasks", "createdAt", "updatedAt"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "revision": { "type": "integer", "minimum": 1 },
+    "workflow": { "$ref": "#/$defs/workflow" },
+    "scheduler": { "$ref": "#/$defs/scheduler" },
+    "tasks": {
+      "type": "array",
+      "maxItems": 64,
+      "items": { "$ref": "#/$defs/task" }
+    },
+    "createdAt": { "type": "string", "format": "date-time" },
+    "updatedAt": { "type": "string", "format": "date-time" }
+  },
+  "$defs": {
+    "tier": { "type": "string", "enum": ["T0", "T1", "T1R", "T2", "T3"] },
+    "workflow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["goal", "tier", "state", "classification"],
+      "properties": {
+        "goal": { "type": "string", "minLength": 1, "maxLength": 1000 },
+        "tier": { "$ref": "#/$defs/tier" },
+        "state": {
+          "type": "string",
+          "enum": ["initializing", "planning", "waiting_approval", "executing", "blocked", "completed", "failed", "cancelled"]
+        },
+        "classification": { "$ref": "#/$defs/classification" }
+      }
+    },
+    "classification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["initialTier", "confirmedTier", "confidence", "reason", "riskSignals"],
+      "properties": {
+        "initialTier": { "$ref": "#/$defs/tier" },
+        "confirmedTier": { "$ref": "#/$defs/tier" },
+        "confidence": { "type": "string", "enum": ["low", "medium", "high"] },
+        "reason": { "type": "string", "minLength": 1, "maxLength": 1000 },
+        "riskSignals": {
+          "type": "array",
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1, "maxLength": 128 }
+        }
+      }
+    },
+    "scheduler": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["maxWorkers"],
+      "properties": {
+        "maxWorkers": { "type": "integer", "minimum": 1, "maximum": 16 }
+      }
+    },
+    "taskStatus": {
+      "type": "string",
+      "enum": ["init", "todo", "working", "blocked", "done", "cancelled"]
+    },
+    "taskPhase": {
+      "type": "string",
+      "enum": ["queued", "implementation", "verification", "review", "fix", "integration", "complete"]
+    },
+    "task": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "title", "description", "status", "phase", "dependsOn", "paths", "acceptance", "modifying", "attempts", "assignment", "blocker", "result"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,63}$" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "description": { "type": "string", "minLength": 1, "maxLength": 2000 },
+        "status": { "$ref": "#/$defs/taskStatus" },
+        "phase": { "$ref": "#/$defs/taskPhase" },
+        "dependsOn": {
+          "type": "array",
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,63}$" }
+        },
+        "paths": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1, "maxLength": 512 }
+        },
+        "acceptance": {
+          "type": "array",
+          "maxItems": 32,
+          "items": { "type": "string", "minLength": 1, "maxLength": 1000 }
+        },
+        "modifying": { "type": "boolean" },
+        "attempts": { "type": "integer", "minimum": 0 },
+        "assignment": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/assignment" }
+          ]
+        },
+        "blocker": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/blocker" }
+          ]
+        },
+        "result": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/result" }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "status": { "const": "working" } }, "required": ["status"] },
+          "then": { "properties": { "assignment": { "$ref": "#/$defs/assignment" } } }
+        },
+        {
+          "if": { "properties": { "status": { "const": "blocked" } }, "required": ["status"] },
+          "then": { "properties": { "blocker": { "$ref": "#/$defs/blocker" } } }
+        },
+        {
+          "if": { "properties": { "status": { "const": "done" } }, "required": ["status"] },
+          "then": { "properties": { "phase": { "const": "complete" } } }
+        }
+      ]
+    },
+    "assignment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workerKey", "attempt", "startedAt"],
+      "properties": {
+        "workerKey": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "runId": { "type": ["string", "null"] },
+        "attempt": { "type": "integer", "minimum": 1 },
+        "startedAt": { "type": "string", "format": "date-time" }
+      }
+    },
+    "blocker": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "reason", "taskIds"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["dependency", "human_decision", "technical", "infrastructure", "integration"]
+        },
+        "reason": { "type": "string", "minLength": 1, "maxLength": 2000 },
+        "taskIds": {
+          "type": "array",
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,63}$" }
+        }
+      }
+    },
+    "result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["summary", "verification", "review"],
+      "properties": {
+        "summary": { "type": "string", "minLength": 1, "maxLength": 2000 },
+        "verification": { "type": "string", "enum": ["pending", "pass", "fail", "blocked"] },
+        "review": { "type": "string", "enum": ["pending", "pass", "fail", "blocked"] },
+        "runId": { "type": ["string", "null"] },
+        "outputReference": { "type": ["string", "null"] }
+      }
+    }
+  }
+}
