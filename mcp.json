@@ -1,0 +1,91 @@
+{
+  "mcpServers": {
+    "context7": {
+      "url": "https://mcp.context7.com/mcp",
+      "headers": {
+        "CONTEXT7_API_KEY": "{env:CONTEXT7_API_KEY}"
+      },
+      "disabled": true
+    },
+    "browsermcp": {
+      "command": "npx",
+      "args": [
+        "@browsermcp/mcp@0.1.3"
+      ]
+    },
+    "playwright": {
+      "command": "npx",
+      "args": [
+        "@playwright/mcp@0.0.68"
+      ]
+    },
+    "speaker": {
+      "command": "{env:HOME}/tts2mic-mcp/tts2mic-mcp",
+      "env": {
+        "TTS_CACHE_DIR": ".tts2mic-cache",
+        "TTS_PROVIDER_NAME": "elevenlabs",
+        "TTS_PROVIDER": "elevenlabs",
+        "TTS_LANG": "en-US",
+        "ELEVENLABS_VOICE_ID": "CwhRBWXzGAHq8TQ4Fs17",
+        "ELEVENLABS_API_KEY": "{env:ELEVENLABS_API_KEY}",
+        "TTS2MIC_MACOS_DEBUG_AFPLAY": "1"
+      }
+    },
+    "github": {
+      "url": "https://api.githubcopilot.com/mcp",
+      "oauth": false,
+      "headers": {
+        "Authorization": "Bearer {env:GITHUB_TOKEN_READONLY}"
+      }
+    },
+    "neo4j": {
+      "command": "neo4j-mcp",
+      "args": [
+        "--neo4j-uri",
+        "bolt://localhost:7687",
+        "--neo4j-username",
+        "neo4j",
+        "--neo4j-password",
+        "{env:NEO4J_PASSWORD}",
+        "--neo4j-database",
+        "neo4j",
+        "--neo4j-read-only",
+        "true",
+        "--neo4j-telemetry",
+        "false"
+      ]
+    },
+    "Chrome": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "chrome-devtools-mcp@latest"
+      ],
+      "disabled": true
+    },
+    "Nucleus": {
+      "command": "nuc-mcp"
+    },
+    "Atlassian": {
+      "url": "https://mcp.atlassian.com/v1/mcp",
+      "auth": "oauth"
+    },
+    "DevCenter": {
+      "url": "https://gateway.prd.devtools.trustly.cloud/DevCenter/mcp",
+      "headers": {
+        "x-litellm-api-key": "Bearer {env:TRUSTLY_LLM_GATEWAY_API_KEY}"
+      }
+    },
+    "Datadog": {
+      "url": "https://mcp.datadoghq.eu/api/unstable/mcp-server/mcp",
+      "auth": "oauth"
+    },
+    "codegraph": {
+      "command": "codegraph",
+      "args": [
+        "serve",
+        "--mcp"
+      ]
+    }
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "modelResponseAliases": {
+    "litellm/bedrock-claude-sonnet-5": [
+      "claude-sonnet-5"
+    ],
+    "litellm/bedrock-claude-opus-5": [
+      "claude-opus-5"
+    ]
+  },
+  "inlineToolDisplay": "summary",
+  "fleetView": true,
+  "asyncWidget": false,
+  "fleetViewPlacement": "aboveEditor"
+}

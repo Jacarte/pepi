@@ -1,0 +1,39 @@
+{
+  "lastChangelogVersion": "0.85.1",
+  "theme": "dark",
+  "packages": [
+    "npm:pi-provider-litellm",
+    "npm:pi-web-access",
+    "npm:pi-subagents",
+    "npm:pi-mcp-adapter",
+    "npm:@vndv/pi-codegraph"
+  ],
+  "defaultModel": "bedrock-claude-opus-5",
+  "defaultProvider": "litellm",
+  "defaultThinkingLevel": "high",
+  "subagents": {
+    "projectRootResolution": "git-root",
+    "defaultModel": "bedrock-claude-opus-5",
+    "defaultProvider": "litellm",
+    "agentOverrides": {
+      "claude-code": {
+        "disabled": true
+      },
+      "claude-code-writer": {
+        "disabled": true
+      },
+      "oracle": {
+        "model": "bedrock-claude-opus-5"
+      },
+      "worker": {
+        "model": "bedrock-claude-sonnet-5"
+      },
+      "scout": {
+        "model": "bedrock-claude-sonnet-5"
+      },
+      "reviewer": {
+        "model": "bedrock-claude-opus-5"
+      }
+    }
+  }
+}

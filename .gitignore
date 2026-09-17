@@ -1,0 +1,60 @@
+# ---------------------------------------------------------------------------
+# pi agent config repo
+#
+# Rule of thumb: track what YOU author, ignore what pi generates or downloads,
+# and never track credentials.
+#
+# NOTE: git does not support trailing inline comments on pattern lines.
+# Keep every comment on its own line.
+# ---------------------------------------------------------------------------
+
+# --- Secrets: NEVER commit -------------------------------------------------
+# provider API keys (litellm, openai, ...)
+auth.json
+auth.json.bak
+# per-machine project trust decisions, embeds local paths
+trust.json
+.env
+.env.*
+
+# --- Installed packages: regenerated from settings.json on startup ---------
+# pi auto-installs `packages` from settings.json, so none of this belongs in git
+npm/
+git/
+
+# --- Downloaded binaries ---------------------------------------------------
+# e.g. bundled `fd`; re-fetched by pi as needed
+bin/
+
+# --- Model catalogs / caches: large, machine-specific, auto-refreshed ------
+# ~8 MB catalog snapshot
+litellm-models-dev.json
+# resolved model catalog cache
+models-store.json
+# MCP tool metadata cache
+mcp-cache.json
+web-search-cache/
+
+# --- Session & run state: private conversation content ---------------------
+# session paths embed local directory names; JSONL holds full transcripts
+sessions/
+missions/
+run-history.jsonl
+# runtime state, includes identity-key
+litellm-mcp-pauses/
+
+# --- npm stubs at repo root (pi writes an empty {} here) -------------------
+# NOTE: these are root-anchored so npm/package.json is unaffected
+/package.json
+/package-lock.json
+node_modules/
+
+# --- Logs / scratch -------------------------------------------------------
+*.log
+logs/
+tmp/
+*.tmp
+
+# --- OS noise -------------------------------------------------------------
+.DS_Store
+Thumbs.db
