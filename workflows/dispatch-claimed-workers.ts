@@ -1,33 +1,28 @@
-// Run the claimed worker pool with rolling refill and path-conflict admission.
+// Run the claimed worker pool with rolling refill and lifecycle-wide path leases.
 // args: { expectedRevision: number }
 
 const expectedRevision = args.expectedRevision;
-if (!Number.isInteger(expectedRevision) || expectedRevision < 1) {
-  throw new Error("args.expectedRevision must be a positive integer");
-}
+if (!Number.isInteger(expectedRevision) || expectedRevision < 1) throw new Error("args.expectedRevision must be a positive integer");
 
 function requireBoard(board, revision) {
   if (!board || typeof board !== "object") throw new Error("kanban state is not initialized");
   if (!Number.isInteger(board.revision)) throw new Error("kanban revision is invalid");
-  if (board.revision !== revision) {
-    throw new Error(`stale kanban revision: expected ${revision}, got ${board.revision}`);
-  }
+  if (board.revision !== revision) throw new Error(`stale kanban revision: expected ${revision}, got ${board.revision}`);
   if (board.workflow?.state !== "executing") throw new Error("kanban workflow must be executing");
   if (!Array.isArray(board.tasks)) throw new Error("kanban tasks are invalid");
   if (!Number.isInteger(board.scheduler?.maxWorkers) || board.scheduler.maxWorkers < 1 || board.scheduler.maxWorkers > 16) {
     throw new Error("kanban scheduler.maxWorkers is invalid");
   }
 }
-function taskById(board, id) {
-  return board.tasks.find((task) => task.id === id);
-}
+function taskById(board, id) { return board.tasks.find((task) => task.id === id); }
 function dependenciesDone(board, task) {
   return task.dependsOn.every((dependencyId) => taskById(board, dependencyId)?.status === "done");
 }
 function workerActive(board) {
-  return board.tasks.filter(
-    (task) => task.status === "working" && ["implementation", "fix"].includes(task.phase),
-  );
+  return board.tasks.filter((task) => task.status === "working" && ["implementation", "fix"].includes(task.phase));
+}
+function pathOwners(board) {
+  return board.tasks.filter((task) => task.status === "working" && task.modifying === true);
 }
 function normalizePath(value) {
   return String(value).replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/+$/, "");
@@ -77,14 +72,12 @@ function workerPrompt(task) {
 }
 function claimReady(board, count, at) {
   if (count <= 0) return [];
-  const ready = board.tasks.filter(
-    (task) => task.status === "todo" && dependenciesDone(board, task),
-  );
-  const ownership = [...workerActive(board)];
+  const ready = board.tasks.filter((task) => task.status === "todo" && dependenciesDone(board, task));
+  const ownership = [...pathOwners(board)];
   const claims = [];
   for (const task of ready) {
     if (claims.length >= count) break;
-    if (ownership.some((running) => modifyingTasksConflict(task, running))) continue;
+    if (ownership.some((owner) => modifyingTasksConflict(task, owner))) continue;
     const attempt = task.attempts + 1;
     const workerKey = `worker-${task.id}-${attempt}`;
     task.status = "working";
@@ -94,7 +87,7 @@ function claimReady(board, count, at) {
     task.blocker = null;
     task.result = null;
     claims.push(task.id);
-    ownership.push(task);
+    if (task.modifying === true) ownership.push(task);
   }
   return claims;
 }
@@ -106,10 +99,11 @@ const initialActive = workerActive(board);
 if (initialActive.length > board.scheduler.maxWorkers) {
   throw new Error(`kanban worker capacity exceeded: active ${initialActive.length}, max ${board.scheduler.maxWorkers}`);
 }
-for (let i = 0; i < initialActive.length; i += 1) {
-  for (let j = i + 1; j < initialActive.length; j += 1) {
-    if (modifyingTasksConflict(initialActive[i], initialActive[j])) {
-      throw new Error(`active modifying tasks overlap paths: ${initialActive[i].id} and ${initialActive[j].id}`);
+const initialOwners = pathOwners(board);
+for (let i = 0; i < initialOwners.length; i += 1) {
+  for (let j = i + 1; j < initialOwners.length; j += 1) {
+    if (modifyingTasksConflict(initialOwners[i], initialOwners[j])) {
+      throw new Error(`active modifying path leases overlap: ${initialOwners[i].id} and ${initialOwners[j].id}`);
     }
   }
 }
@@ -118,17 +112,12 @@ const inFlight = new Map();
 const completed = [];
 const failed = [];
 let launchedCount = 0;
-
 function launchTask(task) {
-  if (inFlight.has(task.id)) return;
-  if (!task.assignment || task.assignment.runId !== null) return;
+  if (inFlight.has(task.id) || !task.assignment || task.assignment.runId !== null) return;
   const workerKey = task.assignment.workerKey;
   const attempt = task.assignment.attempt;
   const promise = runs.run(workerKey, {
-    agent: "worker",
-    context: "fresh",
-    task: workerPrompt(task),
-    worktree: task.modifying === true,
+    agent: "worker", context: "fresh", task: workerPrompt(task), worktree: task.modifying === true,
   }).then(
     (result) => ({ taskId: task.id, workerKey, attempt, result }),
     (error) => ({ taskId: task.id, workerKey, attempt, result: { ok: false, error: String(error) } }),
@@ -136,11 +125,8 @@ function launchTask(task) {
   inFlight.set(task.id, { promise, workerKey, attempt });
   launchedCount += 1;
 }
-
 for (const task of initialActive) launchTask(task);
-if (inFlight.size === 0) {
-  return { status: "idle", revision: board.revision, launched: 0, completed: [], failed: [] };
-}
+if (inFlight.size === 0) return { status: "idle", revision: board.revision, launched: 0, completed: [], failed: [] };
 
 while (inFlight.size > 0) {
   const settled = await Promise.race([...inFlight.values()].map((entry) => entry.promise));
@@ -152,17 +138,14 @@ while (inFlight.size > 0) {
     throw new Error(`task ${settled.taskId} changed while worker pool was running`);
   }
   if (
-    latestTask.assignment?.workerKey !== settled.workerKey ||
-    latestTask.assignment?.attempt !== settled.attempt ||
-    latestTask.assignment?.runId !== null
+    latestTask.assignment?.workerKey !== settled.workerKey || latestTask.assignment?.attempt !== settled.attempt || latestTask.assignment?.runId !== null
   ) {
     throw new Error(`task ${settled.taskId} assignment changed while worker pool was running`);
   }
 
   const result = settled.result;
   const outputReference = firstArtifactPath(result);
-  const success =
-    result && result.ok !== false && typeof result.runId === "string" && result.runId.length > 0 &&
+  const success = result && result.ok !== false && typeof result.runId === "string" && result.runId.length > 0 &&
     (latestTask.modifying !== true || Boolean(outputReference));
   if (!success) {
     failed.push(settled.taskId);
@@ -174,11 +157,7 @@ while (inFlight.size > 0) {
   task.assignment.runId = result.runId;
   task.phase = "verification";
   task.result = {
-    summary: boundedSummary(result.output),
-    verification: "pending",
-    review: "pending",
-    runId: result.runId,
-    outputReference,
+    summary: boundedSummary(result.output), verification: "pending", review: "pending", runId: result.runId, outputReference,
   };
   completed.push(task.id);
 
@@ -190,14 +169,7 @@ while (inFlight.size > 0) {
   await state.set("kanban", next);
   knownRevision = next.revision;
   board = next;
-
   for (const taskId of newlyClaimed) launchTask(taskById(board, taskId));
 }
 
-return {
-  status: failed.length ? "partial" : "complete",
-  revision: knownRevision,
-  launched: launchedCount,
-  completed,
-  failed,
-};
+return { status: failed.length ? "partial" : "complete", revision: knownRevision, launched: launchedCount, completed, failed };
