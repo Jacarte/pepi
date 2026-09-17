@@ -1,13 +1,13 @@
-// Request-only workflow triage.
+// Two-stage workflow triage.
 //
 // args:
 // {
 //   task: string
 // }
 //
-// This first pass intentionally does not inspect the repository. If repository
-// evidence is needed to classify safely, it returns needsScout=true. A later
-// workflow stage may then scout and confirm/revise the tier.
+// The first pass is request-only. When it cannot classify safely from the
+// request alone, a bounded scout inspects only the current repository and a
+// fresh oracle confirms or revises the tier from that evidence.
 
 const task = typeof args.task === "string" ? args.task.trim() : "";
 
@@ -48,7 +48,7 @@ const classificationSchema = {
   additionalProperties: false
 };
 
-const result = await runs.run("triage", {
+const initialResult = await runs.run("triage", {
   agent: "oracle",
   context: "fresh",
   task: [
@@ -100,8 +100,100 @@ const result = await runs.run("triage", {
   outputSchema: classificationSchema
 });
 
-if (!result || !result.structuredOutput) {
+if (!initialResult || !initialResult.structuredOutput) {
   throw new Error("triage returned no structured output");
 }
 
-return result.structuredOutput;
+const initial = initialResult.structuredOutput;
+
+if (!initial.needsScout) {
+  return {
+    initial,
+    confirmed: initial,
+    scoutUsed: false
+  };
+}
+
+const scoutResult = await runs.run("triage-scout", {
+  agent: "scout",
+  context: "fresh",
+  task: [
+    "Inspect repository evidence only to support workflow classification.",
+    "",
+    "Repository boundary:",
+    "- the current working directory is the repository root",
+    "- restrict all discovery to the current working directory",
+    "- never inspect parent directories",
+    "- never inspect $HOME or ~",
+    "- never inspect /Users, /home, /tmp, or filesystem root",
+    "- never use .. to escape the current working directory",
+    "- do not search for other repositories",
+    "- if a required fact is not available under cwd, report it as unknown",
+    "",
+    "Safety:",
+    "- do not modify application, test, configuration, documentation, or VCS files",
+    "- use read-only inspection only",
+    "- do not run builds, tests, formatters, generators, migrations, or mutating VCS commands",
+    "",
+    "Request:",
+    task,
+    "",
+    "Initial classification:",
+    JSON.stringify(initial),
+    "",
+    "Determine only the repository facts needed to classify safely:",
+    "- likely affected components and approximate change scope",
+    "- public or cross-service contract boundaries",
+    "- persistence or migration impact",
+    "- security boundaries",
+    "- concurrency or data-integrity risk",
+    "- deployment or infrastructure impact",
+    "- whether the request is a bounded repair of an existing failing check",
+    "",
+    "Return concise evidence with exact paths/symbols where available. Do not implement anything."
+  ].join("\n")
+});
+
+if (!scoutResult || typeof scoutResult.output !== "string" || !scoutResult.output.trim()) {
+  throw new Error("triage scout returned no evidence");
+}
+
+const confirmedResult = await runs.run("triage-confirm", {
+  agent: "oracle",
+  context: "fresh",
+  task: [
+    "Confirm or revise the workflow classification using only the supplied request and repository evidence.",
+    "",
+    "Do NOT inspect the repository, filesystem, shell, project files, or external sources in this step.",
+    "Do not perform another scout. Use only the evidence below.",
+    "",
+    "Request:",
+    task,
+    "",
+    "Initial classification:",
+    JSON.stringify(initial),
+    "",
+    "Repository evidence:",
+    scoutResult.output,
+    "",
+    "Use the same T0/T1/T1R/T2/T3 policy as the initial triage.",
+    "Choose the cheapest safe tier justified by concrete evidence.",
+    "Unknown implementation details are not themselves a reason to promote.",
+    "Promote only when repository evidence demonstrates a higher-risk or broader boundary.",
+    "Demote when repository evidence proves the request is narrower than initially assumed.",
+    "Set needsScout=false when the evidence is sufficient.",
+    "If a material classification fact remains unavailable, keep needsScout=true and state the exact gap; do not search again.",
+    "Keep reason concise and factual."
+  ].join("\n"),
+  outputSchema: classificationSchema
+});
+
+if (!confirmedResult || !confirmedResult.structuredOutput) {
+  throw new Error("triage confirmation returned no structured output");
+}
+
+return {
+  initial,
+  confirmed: confirmedResult.structuredOutput,
+  scoutUsed: true
+};
