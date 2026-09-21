@@ -6,7 +6,8 @@
     "npm:pi-web-access",
     "npm:pi-subagents",
     "npm:pi-mcp-adapter",
-    "npm:@vndv/pi-codegraph"
+    "npm:@vndv/pi-codegraph",
+    "npm:@amaster.ai/pi-memory-mem0"
   ],
   "defaultModel": "bedrock-claude-opus-5",
   "defaultProvider": "litellm",
@@ -26,14 +27,20 @@
         "model": "bedrock-claude-opus-5"
       },
       "worker": {
-        "model": "bedrock-claude-sonnet-5"
+        "model": "bedrock-claude-haiku-4.5"
       },
       "scout": {
-        "model": "bedrock-claude-sonnet-5"
+        "model": "bedrock-claude-haiku-4.5"
       },
       "reviewer": {
         "model": "bedrock-claude-opus-5"
       }
     }
+  },
+  "pi-memory-mem0": {
+    "mode": "self-hosted",
+    "baseUrl": "http://localhost:8000",
+    "userId": "default-user",
+    "userIdScope": "exact"
   }
 }
