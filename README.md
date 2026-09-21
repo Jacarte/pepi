@@ -21,6 +21,9 @@ export GITHUB_TOKEN_READONLY="ghp_..."
 export NEO4J_PASSWORD="..."        # neo4j
 export ELEVENLABS_API_KEY="..."    # speaker (TTS)
 export CONTEXT7_API_KEY="..."      # context7 (currently disabled in mcp.json)
+
+# Optional — consumed by the hippocampus stack, not by pi itself
+export OPENAI_API_KEY="sk-..."     # mem0 fact extraction; see Semantic memory below
 ```
 
 | Variable | Needed by | Required | Missing behavior |
@@ -31,6 +34,7 @@ export CONTEXT7_API_KEY="..."      # context7 (currently disabled in mcp.json)
 | `NEO4J_PASSWORD` | neo4j MCP (`args`) | if using neo4j | auth rejected |
 | `ELEVENLABS_API_KEY` | speaker MCP (`env`) | if using speaker | TTS fails |
 | `CONTEXT7_API_KEY` | context7 MCP (`headers`) | no — server disabled | n/a |
+| `OPENAI_API_KEY` | hippocampus server (mem0 extraction) | if using semantic memory | writes silently store nothing |
 
 Gotchas, both verified against the MCP adapter source:
 
@@ -146,6 +150,7 @@ startup — nothing to install by hand.
 | `pi-mcp-adapter` | 2.34.0 | Reads `mcp.json` and exposes every MCP server as tools |
 | `pi-web-access` | 0.29.0 | `web_search`, `fetch_content`, GitHub/PDF/YouTube extraction |
 | `@vndv/pi-codegraph` | 0.1.10 | `codegraph_*` structural code queries (symbols, callers, impact) |
+| `@amaster.ai/pi-memory-mem0` | 0.1.16 | Semantic memory — `mem0_memory` tool, `/mem0` command, automatic capture and recall. **See below.** |
 
 Plus one local extension in this repo, auto-discovered from `extensions/`:
 
@@ -203,6 +208,119 @@ and nothing runs, since every model in `settings.json` is served through the Lit
 gateway. `pi-subagents` is the highest-*leverage* one: it changes how work gets done
 rather than whether it can run at all.
 
+### Semantic memory: `pi-memory-mem0` → hippocampus
+
+`@amaster.ai/pi-memory-mem0` gives pi memory that survives across sessions. It runs in
+**`self-hosted` mode** against [**hippocampus**](https://github.com/Jacarte/hippocampus) —
+my own FastAPI backend over [`mem0ai`](https://github.com/mem0ai/mem0) — so no
+conversation data goes to Mem0 Cloud.
+
+```
+  pi  ── mem0_memory tool / automatic capture+recall
+   │
+   │    POST /search, POST /memories, GET /memories, DELETE /memories/{id}
+   ▼
+  hippocampus  (localhost:8000, FastAPI + mem0ai 2.0.7)
+   ├─ pgvector   vectors + payloads   (postgres:5432)
+   ├─ LLM        fact extraction      (LiteLLM gateway or OpenAI)
+   ├─ embedder   ollama or OpenAI
+   └─ CMS        admin UI             (localhost:8080)
+```
+
+The extension has three backend modes — `platform` (Mem0 Cloud), `embedded` (in-process
+SQLite), and `self-hosted`. This config uses the third:
+
+```json
+"pi-memory-mem0": {
+  "mode": "self-hosted",
+  "baseUrl": "http://localhost:8000",
+  "userId": "default-user",
+  "userIdScope": "exact"
+}
+```
+
+| Field | Why this value |
+|---|---|
+| `mode` | `self-hosted` keeps memory traffic on my own infrastructure |
+| `baseUrl` | hippocampus' documented local default; it serves `/memories` and `/search`, **not** the Platform `/v1` paths |
+| `userId` | the memory scope — all reads and writes land here |
+| `userIdScope` | `exact` uses `userId` verbatim. The default `project` appends a cwd hash, which silos memories per directory |
+
+Defaults that are not set explicitly, and therefore apply: `memoryMode: hybrid`
+(auto-capture + auto-recall + tool all on), `topK: 5`, `recallFrequency: user-input`,
+`requestTimeoutMs: 30000`.
+
+**What it adds to a session**
+
+| Surface | Usage |
+|---|---|
+| `mem0_memory` tool | `search` / `add` / `get_all` / `delete` — agent-initiated |
+| `/mem0` command | `status`, `search <q>`, `profile`, `add <text>`, `dedup [--apply]`, `delete <id>` |
+| Automatic capture | each user+assistant turn is sent for fact extraction |
+| Automatic recall | matching memories are injected before the agent starts |
+
+Recalled text arrives on the **user channel wrapped as `[UNTRUSTED MEMORY DATA]`**, never
+in the system prompt, and entries matching prompt-injection patterns are replaced with
+`[BLOCKED UNTRUSTED MEMORY: ...]`. Credentials are redacted before storage. Treat recalled
+content as untrusted input — it is data, not instruction.
+
+#### Running the backend
+
+The extension is a **client only**. With no server reachable at `baseUrl`, every memory
+operation fails and the rest of pi keeps working.
+
+```bash
+git clone git@github.com:Jacarte/hippocampus.git ~/DEV/hippocampus
+cd ~/DEV/hippocampus
+cp .env.example .env     # set OPENAI_API_KEY; review the rest
+./start.sh               # docker compose up
+curl localhost:8000/health
+```
+
+| Service | Port | Purpose |
+|---|---|---|
+| server | 8000 | API — `/docs`, `/health`, `/metrics` |
+| CMS | 8080 | admin UI for browsing/editing memories |
+| postgres | 5432 | pgvector store |
+| prometheus | 9090 | metrics scrape |
+| grafana | 3000 | dashboards |
+
+The compose stack has **no authentication** on its admin endpoints — run it on a trusted
+network only.
+
+#### Version coupling
+
+hippocampus pins `mem0ai==2.0.7`. The 2.0 series made entity IDs (`user_id`, `agent_id`,
+`run_id`) live **inside** the `filters` dict on `get_all`/`search` rather than as top-level
+kwargs, and this extension sends the nested form — matching current upstream, where the
+top-level fields are deprecated. A server that accepts only the old flat shape returns:
+
+```
+400  filters must contain at least one of: user_id, agent_id, run_id
+```
+
+If you see that, the server predates the fix; `SearchRequest`/`RetrieveRequest` must
+promote nested entity IDs to the top level. Verify with:
+
+```bash
+curl -s localhost:8000/search -H 'Content-Type: application/json' \
+  -d '{"query":"test","filters":{"user_id":"default-user"}}'
+```
+
+#### Troubleshooting
+
+| Symptom | Cause |
+|---|---|
+| `Mem0 request failed (400)` | server rejects nested `filters` entity IDs — see above |
+| `Mem0 request failed` / timeout | nothing listening on `baseUrl`; check `docker ps` and `/health` |
+| `/mem0 profile` empty but data exists | `userId` points at a different scope. Compare against `GET /admin/scopes` |
+| `add` returns "No memory was extracted" | LLM extraction failed server-side. mem0 swallows the error and returns an empty success — check server logs for `LLM extraction failed`, usually a bad or expired `OPENAI_API_KEY` |
+| Recall returns more than `topK` | the server caps result counts itself; `top_k` in the request body is advisory |
+
+Because a failed extraction still returns HTTP 200 with an empty result set, **a broken
+extraction key looks like a successful write**. If memories stop accumulating, check the
+server log before assuming the client is at fault.
+
 ---
 
 ## What's in here
@@ -221,7 +339,8 @@ rather than whether it can run at all.
 ### Current defaults
 
 - Provider `litellm`, model `bedrock-claude-opus-5`, thinking level `high`
-- Subagents: opus for `oracle`/`reviewer`, sonnet for `worker`/`scout`, `claude-code*` disabled
+- Subagents: opus for `oracle`/`reviewer`, haiku for `worker`/`scout`, `claude-code*` disabled
+- Semantic memory: `self-hosted` against `http://localhost:8000` (hippocampus), scope `default-user`, `hybrid` mode
 
 ### Skills are not yet in this repo
 
@@ -277,8 +396,13 @@ git update-index --skip-worktree settings.json   # then unset when intentionally
 pi -p "say OK"     # packages install, provider auth resolves
 /mcp               # inside pi: server connection status
 /budget            # LiteLLM spend (from the bundled extension)
+/mem0 status       # semantic memory: backend, capture/recall/tool state
 pi list            # packages match settings.json
 ```
+
+`/mem0 status` reporting `Mem0 is not active` means the extension failed to initialize.
+If it reports active but `/mem0 profile` errors, the extension is fine and the
+hippocampus backend is unreachable — check `curl localhost:8000/health`.
 
 ## Security
 
