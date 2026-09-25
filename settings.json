@@ -1,5 +1,5 @@
 {
-  "lastChangelogVersion": "0.85.1",
+  "lastChangelogVersion": "0.87.1",
   "theme": "dark",
   "packages": [
     "npm:pi-provider-litellm",
@@ -9,12 +9,12 @@
     "npm:@vndv/pi-codegraph",
     "npm:@amaster.ai/pi-memory-mem0"
   ],
-  "defaultModel": "bedrock-claude-opus-5",
+  "defaultModel": "bedrock-claude-opus-5-5",
   "defaultProvider": "litellm",
   "defaultThinkingLevel": "high",
   "subagents": {
     "projectRootResolution": "git-root",
-    "defaultModel": "bedrock-claude-opus-5",
+    "defaultModel": "bedrock-claude-opus-5-5",
     "defaultProvider": "litellm",
     "agentOverrides": {
       "claude-code": {
@@ -24,16 +24,16 @@
         "disabled": true
       },
       "oracle": {
-        "model": "bedrock-claude-opus-5"
+        "model": "bedrock-claude-opus-5-5"
       },
       "worker": {
-        "model": "bedrock-claude-haiku-4.5"
+        "model": "bedrock-claude-haiku-4-5"
       },
       "scout": {
-        "model": "bedrock-claude-haiku-4.5"
+        "model": "bedrock-claude-haiku-4-5"
       },
       "reviewer": {
-        "model": "bedrock-claude-opus-5"
+        "model": "bedrock-claude-opus-5-5"
       }
     }
   },
@@ -41,6 +41,6 @@
     "mode": "self-hosted",
     "baseUrl": "http://localhost:8000",
     "userId": "default-user",
-    "userIdScope": "exact"
+    "userIdScope": "userIdScope"
   }
 }

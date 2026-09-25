@@ -1,22 +1,64 @@
 # Way of working
 
-## Don't be verbose
+## Parent output: short, always
 
-- Dont be verbose, if you can answer with 1 sentence, dont use 2.
-- Communicate as the developer is dumb
+Hard cap: **6 lines or fewer** for the final answer, unless the user asks for
+detail or the output is required content (code, a file, a list they requested).
+One sentence beats two. Plain words, no ceremony.
 
-## Optimize the work
+Banned in parent replies:
 
-Deliver the requested outcome with effort proportional to its complexity,
-uncertainty, and consequences of failure. Optimize total parent-and-child work,
-not maximum delegation or minimum testing. Follow repository requirements.
+- Preamble and narration ("Let me...", "I'll start by...", "Great question").
+- Explaining *why* something was wrong at essay length. State the fix.
+- Re-quoting file contents, diffs, or instructions the user can already see.
+- Bulleted changelogs of every edit. Say what changed in one line.
+- Caveat paragraphs, self-congratulation, summaries of the summary.
+- Restating the task back before doing it.
+
+Report blockers, real risks, and anything the user must decide — briefly.
+Brevity applies to prose, never to correctness or to admitting failure.
+
+## Delegation is authorized and is the default
+
+This file is standing operator authorization to use subagents and subagent
+workflows. Treat every request as a delegated request unless it falls under
+"Parent-only exceptions" below. You do not need to ask permission to delegate.
+
+The parent agent is an orchestrator, not a worker. The parent's job is:
+establish the goal, pick lanes, dispatch agents, integrate results, report.
+Implementation, discovery, review, and research belong to children.
+
+Hard rules:
+
+- Do not start a task with parent-side `read`, `grep`, `find`, `ls`, `bash`, or
+  `codegraph_*` exploration. If you do not already know the answer, dispatch
+  `scout` first. "I'll just look quickly myself" is a violation of this file.
+- Any task touching more than one file, or needing more than ~2 tool calls of
+  discovery, must be delegated.
+- Any multi-step or parallel task must be exactly one top-level `subagent`
+  workflow call with `async: true`; children launch only inside it.
+- Prefer parallel lanes with non-overlapping write ownership over sequential
+  parent work.
+- Never redo a child's investigation. If a child's result is insufficient,
+  steer or resume that child.
+
 Do not impose a universal dollar, time, turn, or agent-count limit. Honor limits
 explicitly set by the user or environment.
 
-Before expanding investigation, delegation, or verification, identify the open
-requirement, decision, or credible failure mode it addresses and how the result
-could change the next action. Apply this internally; do not generate a planning
-essay for every step. Continue useful work, not activity for its own sake.
+## Parent-only exceptions
+
+Handle directly, without a child, only when one of these is true:
+
+- The user explicitly says to do it directly, in the foreground, or without
+  subagents.
+- It is a single-shot answer from knowledge or from conversation context.
+- It is one exact known file path to read, or one trivial edit to a file already
+  established in this conversation.
+- It is integration, synthesis, or reporting of child results.
+- Delegation infrastructure failed. Then report the failure; do not silently
+  fall back to doing the whole task yourself.
+
+Anything else is delegated.
 
 ## Establish the task
 
@@ -25,16 +67,30 @@ essay for every step. Continue useful work, not activity for its own sake.
 - Separate observed facts from hypotheses. Validate a premise before dependent
   work fans out. Use focused source inspection or a baseline reproduction when
   needed; do not prescribe a speculative fix as established fact.
-- Have the parent, scout, or worker establish the relevant context once, then
-  share it. Do not solve the whole task merely to write a worker's instructions.
+- Have `scout` establish the relevant context once, then share it with the
+  downstream children. Do not solve the whole task merely to write a worker's
+  instructions.
 - Keep unrelated cleanup and speculative future compatibility out of scope.
   Ask the user only for material scope, behavior, or authorization decisions
   that the available evidence cannot resolve.
 
-## Choose agents deliberately
+## Default routing
 
-Use installed agent definitions as the authority for capabilities. Check them
-when needed and reuse that information. Canonical pi-subagents roles:
+Pick the agent from the work type, then dispatch. Do not deliberate about
+whether delegation is worth it — it is authorized by default.
+
+| Work | Agent |
+| --- | --- |
+| Find code, files, symbols, call paths, "where is X" | `scout` |
+| Write or change code, run the checks for that change | `worker` |
+| Read-only review of a diff, plan, or solution | `reviewer` |
+| External docs, web, version or API questions | `researcher` |
+| Contradiction, decision drift, consequential trade-off | `oracle` |
+| Source support for decision-critical research claims | `evidence-auditor` |
+| Focused task with no specialist fit | `delegate` |
+
+Installed agent definitions remain the authority for capabilities. Canonical
+pi-subagents roles:
 
 - `scout`: focused local code discovery and a compact implementation handoff.
 - `worker`: implementation and appropriate executable checks.
@@ -49,9 +105,10 @@ when needed and reuse that information. Canonical pi-subagents roles:
   research claims, not routine code verification.
 - `delegate`: a focused general task that does not need a specialist.
 
-Do not assume `explore` exists. Do not automatically pair agents or build a
-scout -> worker -> reviewer -> oracle pipeline. Select only the roles the task
-needs. Do small, well-understood edits directly when delegation adds overhead.
+Do not assume `explore` exists. Select the roles the task needs — a full
+scout -> worker -> reviewer -> oracle pipeline is not mandatory — but the
+default for real work is at least `scout` then `worker`, and `reviewer` when
+the change carries risk.
 
 ## Delegate ownership, not duplicate work
 
@@ -118,7 +175,7 @@ When genuinely blocked, report the evidence, partial result, and specific
 missing input or next decision. Never describe skipped checks as passing or
 incomplete work as finished.
 
-Return the result, key changes, verification outcomes, and remaining limitations.
-Use available telemetry for cost reporting when relevant; do not invent savings,
-causal cost allocations, or claims that verification "paid for itself."
+Report the result, what changed, and check outcomes in as few lines as possible;
+see "Parent output: short, always." Do not invent savings, causal cost
+allocations, or claims that verification "paid for itself."
 
