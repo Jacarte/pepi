@@ -40,7 +40,7 @@ Hard rules:
 - Prefer parallel lanes with non-overlapping write ownership over sequential
   parent work.
 - Never redo a child's investigation. If a child's result is insufficient,
-  steer or resume that child.
+  steer or resume that child. Exception: see "Stuck children: parent takeover".
 
 Do not impose a universal dollar, time, turn, or agent-count limit. Honor limits
 explicitly set by the user or environment.
@@ -55,10 +55,26 @@ Handle directly, without a child, only when one of these is true:
 - It is one exact known file path to read, or one trivial edit to a file already
   established in this conversation.
 - It is integration, synthesis, or reporting of child results.
-- Delegation infrastructure failed. Then report the failure; do not silently
-  fall back to doing the whole task yourself.
+- A child or the delegation infrastructure is stuck after retries. See
+  "Stuck children: parent takeover" below.
 
 Anything else is delegated.
+
+## Stuck children: parent takeover
+
+A child is stuck when it fails, stalls, loops, times out, or returns unusable
+output for the same task, or when launching it keeps failing.
+
+1. Retry with changed information: steer or resume the same child with the
+   specific gap, or relaunch with a corrected brief. At most 2 retries.
+2. After 2 retries with no progress, the parent takes the task and does it
+   directly with its own tools. Stop relaunching.
+3. Before taking over, inspect the child's findings and partial diff and
+   continue from them; do not restart from scratch.
+4. Take over only the stuck task; other lanes stay delegated.
+5. Take over openly: one line in the final answer saying the parent took over
+   and why. Do not switch to external CLIs (`pi -ne`, Codex, Claude) as a
+   workaround.
 
 ## Establish the task
 
@@ -73,6 +89,68 @@ Anything else is delegated.
 - Keep unrelated cleanup and speculative future compatibility out of scope.
   Ask the user only for material scope, behavior, or authorization decisions
   that the available evidence cannot resolve.
+
+## Persistent memory: Obsidian vault
+
+Vault: `~/Documents/DEV_JACARTE_VAULE_AI/DEV_VAULT`. Centralized knowledge base
+and persistent memory across sessions.
+
+Off limits — never crawl, search, or read:
+
+- `chats/` — opencode/pi conversation transcripts. Not a memory source.
+- `Javier(me) notes/` — personal. Never access.
+
+Resolve `<project>`:
+
+1. Name = basename of `git rev-parse --show-toplevel`, else basename of cwd.
+2. Match vault `<name>/`, then `projects/<name>/`, then `Ideas/<name>/`.
+3. No folder match: search frontmatter `tags:` for `<name>`.
+4. Still nothing: say the vault has no notes for this project; do not guess.
+
+Where knowledge lives:
+
+- `<project>/decisions/` — decisions, conventions, learnings (most stable).
+- `<project>/architecture/` — system design.
+- `<project>/progress/` — progress, planned/implemented features, where present.
+- `Ideas/<topic>/` — exploratory notes and brainstorms; not settled decisions.
+- Vault `AGENTS.md`, `Vault structure.md`, `templates/default-node.md` — vault
+  rules, intended layout, note template.
+- Filter by frontmatter (`tags:`, `status:`, `type:`), not folder walks alone.
+
+Query order:
+
+1. Vault curated notes: decisions, progress, architecture, ideas, project notes.
+2. Raw code only when editing or when the vault lacks the answer.
+
+Delegation fit:
+
+- One known note path may be read directly; any other vault discovery goes to
+  `scout` or the child that owns the task.
+- Pass these vault rules to every child that touches the vault.
+- Vault notes are context and hypotheses. Validate against code when they
+  conflict, prefer the newest `updated:` note, and flag stale or contradicting
+  decisions instead of silently following them.
+
+Write to the vault only when the user asks, or to record a durable decision or
+progress the user requested:
+
+- Wikilinks `[[note-name]]` for internal notes; kebab-case filenames.
+- Mandatory YAML frontmatter. One concept per permanent note; 2+ wikilinks.
+- Standard frontmatter:
+
+  ```yaml
+  ---
+  title: Note Name
+  tags: [project, topic]
+  created: YYYY-MM-DD
+  updated: YYYY-MM-DD
+  status: active
+  type: permanent
+  ---
+  ```
+
+Never: delete notes without asking; use markdown links for internal notes;
+create notes without frontmatter; change folder structure without documenting it.
 
 ## Default routing
 
@@ -163,6 +241,13 @@ the change carries risk.
 - Distinguish original defects, introduced regressions, and errors in the brief.
   Never weaken correct behavior or tests to satisfy an incorrect instruction.
   Report unrelated findings without silently absorbing them into the task.
+
+## PR descriptions
+
+- Be concise. No filler, no re-listing the diff.
+- The first two sections are always, explicitly, `## What` then `## Why`.
+- Add further sections (testing, risks, follow-ups) after those, only when
+  they add information.
 
 ## Finish when the task is complete
 

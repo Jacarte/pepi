@@ -33,7 +33,10 @@
         "model": "bedrock-claude-haiku-4-5"
       },
       "reviewer": {
-        "model": "bedrock-claude-opus-5-5"
+        "model": "bedrock-claude-opus-5-5",
+        "skills": [
+          "go-reviewer"
+        ]
       }
     }
   },
