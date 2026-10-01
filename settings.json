@@ -9,12 +9,12 @@
     "npm:@vndv/pi-codegraph",
     "npm:@amaster.ai/pi-memory-mem0"
   ],
-  "defaultModel": "bedrock-claude-opus-5-5",
-  "defaultProvider": "litellm",
+  "defaultModel": "gpt-6-luna",
+  "defaultProvider": "openai-codex",
   "defaultThinkingLevel": "high",
   "subagents": {
     "projectRootResolution": "git-root",
-    "defaultModel": "bedrock-claude-opus-5-5",
+    "defaultModel": "gpt-6-luna",
     "defaultProvider": "litellm",
     "agentOverrides": {
       "claude-code": {
@@ -24,22 +24,22 @@
         "disabled": true
       },
       "oracle": {
-        "model": "bedrock-claude-opus-5-5"
+        "model": "gpt-6-astra"
       },
       "worker": {
-        "model": "bedrock-claude-haiku-4-5"
+        "model": "gpt-6-luna"
       },
       "scout": {
-        "model": "bedrock-claude-haiku-4-5"
+        "model": "gpt-6-luna"
       },
       "reviewer": {
-        "model": "bedrock-claude-opus-5-5"
+        "model": "gpt-6-astra"
       }
     }
   },
   "pi-memory-mem0": {
     "mode": "self-hosted",
-    "baseUrl": "http://localhost:8000",
+    "baseUrl": "http://192.168.0.160:18000",
     "userId": "default-user",
     "userIdScope": "userIdScope"
   }

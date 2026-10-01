@@ -37,8 +37,10 @@ Hard rules:
   discovery, must be delegated.
 - Any multi-step or parallel task must be exactly one top-level `subagent`
   workflow call with `async: true`; children launch only inside it.
-- Prefer parallel lanes with non-overlapping write ownership over sequential
-  parent work.
+- When tasks are independent, spawn their workers concurrently in the same
+  workflow rather than serializing them. Use separate managed worktrees for
+  concurrent mutating workers; never let parallel workers edit the same
+  worktree or overlapping files.
 - Never redo a child's investigation. If a child's result is insufficient,
   steer or resume that child.
 
@@ -82,7 +84,7 @@ whether delegation is worth it — it is authorized by default.
 | Work | Agent |
 | --- | --- |
 | Find code, files, symbols, call paths, "where is X" | `scout` |
-| Write or change code, run the checks for that change | `worker` |
+| Write or change code, run the checks for that change | `worker`  or parallel disjoint `worker`s|
 | Read-only review of a diff, plan, or solution | `reviewer` |
 | External docs, web, version or API questions | `researcher` |
 | Contradiction, decision drift, consequential trade-off | `oracle` |
@@ -106,15 +108,23 @@ pi-subagents roles:
 - `delegate`: a focused general task that does not need a specialist.
 
 Do not assume `explore` exists. Select the roles the task needs — a full
-scout -> worker -> reviewer -> oracle pipeline is not mandatory — but the
-default for real work is at least `scout` then `worker`, and `reviewer` when
+scout -> worker or parallel workers -> reviewer -> oracle pipeline is not mandatory — but the
+default for real work is at least `scout` then `worker` (or many disjoint `workers` in parallel), and `reviewer` when
 the change carries risk.
 
 ## Delegate ownership, not duplicate work
 
 - Delegate coherent outcomes rather than tiny fragments. Keep coupled changes
   together. Parallelize genuinely independent work with non-overlapping write
-  ownership, including shared interfaces, fixtures, generated files, and reports.
+  ownership. Treat shared interfaces, fixtures, generated files, and reports as
+  owned resources too: assign each to one worker, or finish that work before
+  dependent workers start.
+- For parallel mutating workers, use isolated managed worktrees by default
+  (`worktree: true` / `isolation: "worktree"`) and give each worker explicit
+  owned paths and acceptance checks. Do not have concurrent workers share a
+  checkout, edit the same files, or independently change a shared contract.
+  If worktree isolation is unavailable, sequence conflicting work instead of
+  risking concurrent edits. Integrate results only after the workers finish.
 - Give each child the outcome, starting paths, established facts, open questions,
   owned scope, acceptance checks, and relevant constraints. Include the
   applicable working rules; do not assume they were inherited.
