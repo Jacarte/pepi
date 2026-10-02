@@ -34,7 +34,6 @@ def sanitize_tasks(tasks: list[dict], ids: list[str], dataset: str = DATASET) ->
             raise ValueError(f"Invalid task base commit: {instance_id}")
         if dataset not in task.get("datasets", []) or task.get("split") != "test":
             raise ValueError(f"{instance_id} is not in the selected dataset's test split")
-        # Explicit allowlist: never serialize gold patches or grading tests.
         row = {key: task[key] for key in
                ("instance_id", "repo", "base_commit", "image", "problem_statement")}
         if not all(isinstance(value, str) and value.strip() for value in row.values()):
@@ -111,6 +110,9 @@ def make_profile(root: Path, build: Path, versions: dict, config_dir: Path | Non
         shutil.copyfile(config, target)
         files["extensions/subagent/config.json"] = sha256_file(config)
         used_injected = used_injected or config_dir is not None and config.is_relative_to(config_dir)
+    extension = destination / "extensions/eval-telemetry.ts"
+    extension.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(HERE / "eval-telemetry.ts", extension)
     shutil.copyfile(HERE / "Dockerfile", build / "Dockerfile")
     shutil.copyfile(HERE / "instructions.md", build / "instructions.md")
     return {"source": "injected" if used_injected else "repo", "files": files,
@@ -148,6 +150,5 @@ def prepare_run(root: Path, run: Path, tasks: list[dict], ids: list[str], versio
         write_json(run / "manifest.json", manifest)
         return manifest
     except BaseException:
-        # Only remove the new directory this function created.
         shutil.rmtree(run)
         raise
