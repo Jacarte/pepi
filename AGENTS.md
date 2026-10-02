@@ -161,8 +161,8 @@ whether delegation is worth it — it is authorized by default.
 
 | Work | Agent |
 | --- | --- |
-| Find code, files, symbols, call paths, "where is X" | `scout` |
-| Write or change code, run the checks for that change | `worker`  or parallel disjoint `worker`s|
+| Find code, files, symbols, call paths, "where is X" | `scout` (CodeGraph-first when indexed) |
+| Write or change code, run the checks for that change | `worker` |
 | Read-only review of a diff, plan, or solution | `reviewer` |
 | External docs, web, version or API questions | `researcher` |
 | Contradiction, decision drift, consequential trade-off | `oracle` |
@@ -189,6 +189,26 @@ Do not assume `explore` exists. Select the roles the task needs — a full
 scout -> worker or parallel workers -> reviewer -> oracle pipeline is not mandatory — but the
 default for real work is at least `scout` then `worker` (or many disjoint `workers` in parallel), and `reviewer` when
 the change carries risk.
+
+## Discovery: CodeGraph first
+
+If the repo has a CodeGraph index (`.codegraph/` at the git root or cwd),
+every code discovery step, by any agent, uses `codegraph_*` tools first.
+
+1. Check once per task: `.codegraph/` exists or `codegraph_status` reports an
+   index. No index: use normal discovery.
+2. Broad, flow, or architecture questions: `codegraph_explore`. Symbol lookup:
+   `codegraph_search`, then `codegraph_node`. Callers and impact:
+   `codegraph_callers`, `codegraph_impact`. Structure: `codegraph_files`.
+3. Fall back to `grep`/`find`/`read` only when CodeGraph returns nothing useful,
+   for literal text (strings, config, constants, non-code files), or to read
+   exact lines before editing. State the fallback and why in the handoff.
+4. If the index looks stale (missing recent files or symbols), say so and fall
+   back for that question.
+
+This does not override delegation: discovery still goes to `scout`. Every
+`scout` and `worker` brief must state whether the index exists and include
+this rule.
 
 ## Delegate ownership, not duplicate work
 

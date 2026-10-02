@@ -26,6 +26,12 @@
       "oracle": {
         "model": "gpt-6-astra"
       },
+      "delegate": {
+        "model": "bedrock-claude-sonnet-5-5"
+      },
+      "researcher": {
+        "model": "bedrock-claude-opus-5-5"
+      },
       "worker": {
         "model": "gpt-6-luna"
       },
@@ -33,7 +39,9 @@
         "model": "gpt-6-luna"
       },
       "reviewer": {
-        "model": "gpt-6-astra"
+        "model": "gpt-6-astra""skills": [
+          "go-reviewer"
+        ]
       }
     }
   },
