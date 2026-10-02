@@ -176,7 +176,7 @@ class RunnerTests(unittest.TestCase):
             run = prepare_fixture(Path(directory))
             (run / "builds.json").write_text(json.dumps({TASK["instance_id"]: {"image_id": "sha256:frozen"}}))
             with patch("evals.swebench.runner.Docker", return_value=FakeDocker("setup")):
-                self.assertEqual(run_tasks(run, 1, "eval", "2", "4g"), 1)
+                self.assertEqual(run_tasks(run, 1, "eval", "2", "4g"), 3)
             rows = [json.loads(line) for line in (run / "predictions.jsonl").read_text().split("\n") if line]
             self.assertEqual(len(rows), 1)
             self.assertEqual(rows[0]["model_patch"], "")
@@ -204,10 +204,10 @@ class RealGitTests(unittest.TestCase):
                 def call(self, *args, **kwargs):
                     return git(*args[args.index("git") + 1:])
             result = export_patch(LocalGitDocker(), "unused", baseline)
-            self.assertIn("+new = 2", result)
-            self.assertIn("new file.py", result)
-            self.assertIn("+added = True", result)
-            self.assertTrue(result.endswith("\n"))
+            self.assertIn(b"+new = 2", result)
+            self.assertIn(b"new file.py", result)
+            self.assertIn(b"+added = True", result)
+            self.assertTrue(result.endswith(b"\n"))
 
 
 if __name__ == "__main__":

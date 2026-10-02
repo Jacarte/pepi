@@ -27,5 +27,7 @@ ENV HOME=/home/pepi-eval
 ENV PI_CODING_AGENT_DIR=/opt/pepi-agent
 ENV PATH=/opt/pi/node_modules/.bin:/usr/local/bin:$PATH
 WORKDIR /testbed
+# auth.json is never built in: `run --secrets-dir` streams it into a tmpfs at
+# /run/pepi-secrets and symlinks them into /opt/pepi-agent at container start.
 # The controller launches Pi as UID 10101 and kills that UID before patch export.
 CMD ["sleep", "infinity"]

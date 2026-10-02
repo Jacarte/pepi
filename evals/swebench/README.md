@@ -33,8 +33,10 @@ python -m evals.swebench run evals/swebench/runs/smoke-01 \
 
 `pepi-eval` must already exist and reach your gateway. The runner does NOT build
 an egress firewall. Configure gateway-only access externally; an arbitrary named
-Docker network is not an allowlist. No host filesystem, Docker socket, personal
-auth, MCP credentials or grader files are mounted in the task container.
+Docker network is not an allowlist (`host`, `bridge`, `default` and `container:*`
+are rejected). No host filesystem, Docker socket, MCP credentials or grader files are
+mounted in the task container. With `--secrets-dir`, `auth.json` is streamed into a
+container tmpfs (see CI below): the agent can read it.
 Never use `sudo pi` or put credentials into build arguments. Build before giving
 the runtime its dedicated model key. Tool execution can read that key inside its
 sandbox, so scope/revoke it appropriately; this is not a secrets-isolation system.
@@ -49,6 +51,9 @@ into the task runtime; reference fixes, test patches and expected tests do not.
 `build` records immutable resulting image IDs. Transitive npm dependencies are
 not fully locked by direct version pins: keep the resulting image IDs/digests
 for comparisons and preserve/export images when moving between machines.
+
+Network names are resolved with `docker network inspect`, so an ID of the default
+bridge is rejected too.
 
 `run` is sequential, with an explicit Pi invocation timeout. It stops the
 entire dedicated agent UID before exporting the diff against the initial
@@ -66,15 +71,69 @@ tools, tests, stopping children and patch extraction; setup/build/grading are
 separate. A process exit is not proof of correctness; use the official grader.
 Logs and sessions may contain sensitive source or prompts. Keep runs out of Git.
 
+## CI: injected configuration and secrets
+
+Benchmark different configurations by injecting files after cloning (for example
+from GitHub secrets). Order matters: the frozen profile is hashed at `prepare`.
+
+1. **Inject config** into a directory outside the checkout, e.g. `$RUNNER_TEMP/config`:
+   `settings.json`, `AGENTS.md`, `workflows/`, `extensions/subagent/config.json`.
+   Missing files fall back to the repository copies. Do NOT put `auth.json`,
+   `mcp.json` or `.env` there: `prepare` and `build` fail if they find one.
+2. `prepare --config-dir "$RUNNER_TEMP/config" --config-label variant-b ...`
+   The manifest records the label, whether the config was `injected`/`repo`, the
+   sha256 of each non-secret source file and `dropped_features`. Predictions use
+   `model_name_or_path = <label>-<config_id>`, so runs stay comparable.
+   `pepi_revision`/`pepi_dirty` describe the runner code, not the injected config.
+3. `build` as before.
+4. **Secrets**: write `auth.json` (mode 600, otherwise the run is refused; `mcp.json`
+   is not accepted because MCP is always dropped) to a directory outside the checkout and pass `run --secrets-dir DIR`.
+   They are streamed over stdin into a 1 MB tmpfs at `/run/pepi-secrets` (owned by the
+   agent UID, `noexec`) and symlinked into the Pi agent dir. Never built into an image,
+   argv, env, the manifest or `execution.json` (which records names and presence only).
+   `LITELLM_BASE_URL`/`LITELLM_API_KEY` are still passed as environment variables.
+5. Every known secret value (the API key and every string of 8+ characters in
+   `auth.json`) is redacted from `attempts/<id>/**` and the patch; the count is
+   `secret_redactions` in `attempt.json`. Redaction fails closed: symlinks, special
+   files and files that cannot be read or redacted are deleted and listed under
+   `removed_unredactable`. It is still best-effort: it does not see secrets inside
+   binary git hunks, encoded values or partially overlapping values. The agent can
+   read its key, so use a dedicated, revocable key, and upload only `predictions.jsonl`
+   and `attempts/<id>/` directories that contain `attempt.json` (written after redaction).
+
+**MCP**: not supported in this runtime. If the config declares MCP (an MCP package,
+an `mcp` settings key or `litellm.mcp.enabled`), `prepare` fails unless `--drop-mcp`
+is given, and the removal is recorded under `dropped_features`. Stdio MCP servers need
+npm/network access that a gateway-only network blocks. Pinned MCP packages plus a host
+allowlist are a follow-up. Only the `litellm` provider is supported.
+
+**Exit codes**: `0` every attempt ran (agent failures and timeouts are benchmark
+outcomes, see `attempt.json`), `2` usage/configuration error, `3` any `setup_error` or
+`runner_error` (or a failed `docker build`), `130` interrupted. SIGTERM (CI cancel) is
+handled like Ctrl-C so containers are removed. If a runner is killed hard, clean up with
+`docker ps -aq --filter label=pepi-eval.run=<run_id> | xargs -r docker rm -f`.
+
 ## Tests
 
 ```sh
-python -m unittest discover -s evals/swebench/tests -v
+PYTHONDONTWRITEBYTECODE=1 python -m unittest discover -s evals/swebench/tests -v
 ```
 
 Tests use synthetic tasks and fake Docker calls: no credentials or model spend.
 A real one-instance smoke test is still required on the target Docker/gateway
-setup before treating a score as a benchmark result.
+setup before treating a score as a benchmark result. It must settle, at least:
+
+- the `LITELLM_BASE_URL`/`LITELLM_API_KEY` names and that `litellm.skills/mcp.enabled`
+  really disables gateway tools (check the tool list in `parent.events.jsonl`);
+- where Pi reads `auth.json`/`mcp.json`, whether it rewrites `auth.json` (OAuth refresh
+  via rename would replace the symlink), and that Docker accepts `uid=` on `--tmpfs`;
+- whether `pi install` rewrites `/opt/pepi-agent/settings.json` (the profile hash is
+  computed before it), and that `COPY --from=agent /usr/local/` keeps the task image working;
+- that `pi` accepts `--append-system-prompt <file>` and `@/input/issue.md`, that
+  `load_task_repo(path, ids)` has the assumed signature, and that `/testbed/.git` holds no
+  refs or reflog entries after the baseline commit.
+
+Python 3.10+ is checked at start-up. Run tests with `PYTHONDONTWRITEBYTECODE=1`.
 
 ## Interface references
 

@@ -10,6 +10,8 @@ from pathlib import Path
 
 DATASET = "SWE-bench/SWE-bench_Verified"
 UID = "10101"
+# Secrets are injected at run time only; they must never appear in the frozen build context.
+SECRET_FILE_NAMES = frozenset({"auth.json", "mcp.json", ".env"})
 
 
 def identifier(value: str) -> str:
@@ -59,10 +61,46 @@ def git_revision(directory: Path) -> str | None:
     return result.stdout.strip() if result.returncode == 0 else None
 
 
+def git_dirty(directory: Path) -> bool | None:
+    result = subprocess.run(["git", "-C", str(directory), "status", "--porcelain", "--", "."],
+                            capture_output=True, text=True, check=False)
+    return bool(result.stdout.strip()) if result.returncode == 0 else None
+
+
+def sha256_file(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def reject_secret_files(directory: Path) -> None:
+    for path in directory.rglob("*"):
+        if path.name in SECRET_FILE_NAMES:
+            raise ValueError(f"Secret file in the build context: {path.relative_to(directory)}; "
+                             "pass secrets with `run --secrets-dir`")
+
+
+def runtime_record(versions: dict, node_image: str, tasks: list[dict]) -> dict:
+    """Hashed copy of everything build/run take from the (unhashed) manifest."""
+    return {"versions": versions, "node_image": node_image,
+            "tasks": [{key: task[key] for key in ("instance_id", "image", "base_commit", "problem_sha256")}
+                      for task in tasks]}
+
+
+def redact_url_userinfo(value: str) -> str:
+    return re.sub(r"(?<=://)[^/@\s]+@", "<redacted>@", value)
+
+
 def read_manifest(run: Path) -> dict:
     manifest = read_json(run / "manifest.json")
     if manifest.get("schema_version") != 1:
         raise ValueError("Unsupported manifest schema")
+    reject_secret_files(run / "build")
     if fingerprint(run / "build") != manifest["profile_sha256"]:
         raise ValueError("Prepared profile was modified; prepare a new run")
+    # build_images/run_tasks use the manifest copies; they must match the hashed inputs.
+    runtime = read_json(run / "build/runtime.json")
+    if runtime != runtime_record(manifest["versions"], manifest["node_image"], manifest["tasks"]):
+        raise ValueError("Manifest versions/node image/tasks do not match the prepared build")
+    for task in manifest["tasks"]:
+        if hashlib.sha256(task["problem_statement"].encode()).hexdigest() != task["problem_sha256"]:
+            raise ValueError(f"Issue text was modified: {task['instance_id']}")
     return manifest
