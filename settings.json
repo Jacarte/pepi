@@ -26,6 +26,12 @@
       "oracle": {
         "model": "bedrock-claude-opus-5-5"
       },
+      "delegate": {
+        "model": "bedrock-claude-sonnet-5-5"
+      },
+      "researcher": {
+        "model": "bedrock-claude-opus-5-5"
+      },
       "worker": {
         "model": "bedrock-claude-haiku-4-5"
       },
@@ -33,7 +39,7 @@
         "model": "bedrock-claude-haiku-4-5"
       },
       "reviewer": {
-        "model": "bedrock-claude-opus-5-5",
+        "model": "bedrock-claude-sonnet-5-5",
         "skills": [
           "go-reviewer"
         ]
