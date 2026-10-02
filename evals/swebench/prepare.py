@@ -32,7 +32,6 @@ def sanitize_tasks(tasks: list[dict], ids: list[str], dataset: str = DATASET) ->
             raise ValueError(f"Invalid task base commit: {instance_id}")
         if dataset not in task.get("datasets", []) or task.get("split") != "test":
             raise ValueError(f"{instance_id} is not in the selected dataset's test split")
-        # Explicit allowlist: never serialize gold patches or grading tests.
         row = {key: task[key] for key in
                ("instance_id", "repo", "base_commit", "image", "problem_statement")}
         if not all(isinstance(value, str) and value.strip() for value in row.values()):
@@ -44,14 +43,13 @@ def sanitize_tasks(tasks: list[dict], ids: list[str], dataset: str = DATASET) ->
 
 def make_profile(root: Path, build: Path, versions: dict) -> None:
     settings = read_json(root / "settings.json")
-    # Copy model/role choices, not personal servers, memory, auth or package caches.
     profile = {key: copy.deepcopy(settings[key]) for key in
                ("defaultModel", "defaultProvider", "defaultThinkingLevel", "subagents")
                if key in settings}
     if profile.get("defaultProvider") != "litellm":
         raise ValueError("This first runtime supports Pepi's LiteLLM provider only")
     for override in profile.get("subagents", {}).get("agentOverrides", {}).values():
-        override.pop("skills", None)  # Personal skills are not in the snapshot.
+        override.pop("skills", None)
     profile["packages"] = [f"npm:{name}@{version(versions[name])}" for name in
                            ("pi-provider-litellm", "pi-subagents")]
     profile["litellm"] = {"skills": {"enabled": False}, "mcp": {"enabled": False}}
@@ -66,6 +64,9 @@ def make_profile(root: Path, build: Path, versions: dict) -> None:
         target = destination / "extensions/subagent/config.json"
         target.parent.mkdir(parents=True)
         shutil.copyfile(config, target)
+    extension = destination / "extensions/eval-telemetry.ts"
+    extension.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(HERE / "eval-telemetry.ts", extension)
     shutil.copyfile(HERE / "Dockerfile", build / "Dockerfile")
     shutil.copyfile(HERE / "instructions.md", build / "instructions.md")
 
@@ -93,6 +94,5 @@ def prepare_run(root: Path, run: Path, tasks: list[dict], ids: list[str], versio
         write_json(run / "manifest.json", manifest)
         return manifest
     except BaseException:
-        # Only remove the new directory this function created.
         shutil.rmtree(run)
         raise
