@@ -21,11 +21,11 @@ COPY instructions.md /opt/pepi-eval/instructions.md
 RUN apt-get update && apt-get install -y --no-install-recommends procps \
  && rm -rf /var/lib/apt/lists/* \
  && useradd --uid 10101 --create-home --shell /bin/bash pepi-eval \
- && mkdir -p /output /input \
+ && mkdir -p /output/tmp /input \
  && chown -R 10101:10101 /opt/pepi-agent /output /testbed
+ENV TMPDIR=/output/tmp
 ENV HOME=/home/pepi-eval
 ENV PI_CODING_AGENT_DIR=/opt/pepi-agent
 ENV PATH=/opt/pi/node_modules/.bin:/usr/local/bin:$PATH
 WORKDIR /testbed
-# The controller launches Pi as UID 10101 and kills that UID before patch export.
 CMD ["sleep", "infinity"]
