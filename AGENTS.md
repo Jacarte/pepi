@@ -1,5 +1,12 @@
 # Way of working
 
+## Explanations: simple and visual
+
+When the user asks for an explanation, explain it as simply as possible, in
+plain language for a beginner. Keep it concise and avoid unnecessary detail.
+Use ASCII diagrams whenever they help clarify the idea, and prefer them
+liberally when they can make the explanation easier to understand.
+
 ## Parent output: short, always
 
 Hard cap: **6 lines or fewer** for the final answer, unless the user asks for
