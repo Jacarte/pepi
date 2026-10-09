@@ -1,0 +1,18 @@
+{
+  "LOCAL": {
+    "provider": "litellm",
+    "id": "bedrock-claude-haiku-4-5"
+  },
+  "CHEAP": {
+    "provider": "litellm",
+    "id": "bedrock-claude-sonnet-5-5"
+  },
+  "FRONTIER": {
+    "provider": "litellm",
+    "id": "bedrock-claude-opus-5-5"
+  },
+  "HUMAN": {
+    "provider": "human",
+    "id": "javi"
+  }
+}

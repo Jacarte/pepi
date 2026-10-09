@@ -1,14 +1,36 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+// Import to read file and o get the root folder of this extension
+import fs from "fs";
+
+const THIS_FILE_FOLDER = fs.realpathSync(__dirname);
+const ROOT_FOLDER = fs.realpathSync(`${THIS_FILE_FOLDER}/..`);
+const LOGS_FOLDER = `${ROOT_FOLDER}/logs`;
+
+const LOG_APPEND_FILE = `${LOGS_FOLDER}/router.log`;
+// open the file and append
+let logWriter = fs.createWriteStream(LOG_APPEND_FILE, { flags: "a" });
 
 // Copy exact provider/model IDs from: pi --list-models
-const LOCAL = { provider: "litellm", id: "bedrock-claude-haiku-4-5" };
-const CHEAP = { provider: "litellm", id: "bedrock-claude-sonnet-5-5" }
-const FRONTIER = { provider: "litellm", id: "bedrock-claude-opus-5-5" };
-const HUMAN = { provider: "human", id: "javi" }
+// load from file at root models.json
+const MODELS_FILE = `${ROOT_FOLDER}/models-router.json`;
+interface Target {
+  provider: string;
+  id: string;
+}
+
+const models = fs.existsSync(MODELS_FILE)
+  ? JSON.parse(fs.readFileSync(MODELS_FILE, "utf-8")) as Record<string, Target>
+  : {};
+
+const CHEAP = models.CHEAP
+const FRONTIER = models.FRONTIER
+const LOCAL = models.LOCAL
+const HUMAN = models.HUMAN
 
 
 // Thresholds on the 0..1 scores. Checked in priority order (see pickTarget).
-const T = { human: 0.8, hard: 0.5, trivial: 0.8, routine: 0.7 };
+const T = { human: 0.8, hard: 0.5, trivial: 0.5, routine: 0.7 };
+
 
 const QUESTIONS = {
   human: {
@@ -56,7 +78,7 @@ function pickTarget(s: Scores): Target {
   if (s.human >= T.human) return HUMAN;
   if (s.hard >= T.hard) return FRONTIER;
   if (s.trivial >= T.trivial) return LOCAL;
-  if (s.routine >= T.routine) return FAST;
+  if (s.routine >= T.routine) return CHEAP;
   return DEFAULT;
 }
 
@@ -98,6 +120,9 @@ export default function(pi: ExtensionAPI) {
           answers?: Record<string, { noul?: number } | undefined>;
         };
 
+        logWriter.write("\n======================\n")
+        logWriter.write(`${JSON.stringify(data)}\n`)
+
         const scores = {} as Scores;
         for (const name of Object.keys(QUESTIONS) as (keyof Scores)[]) {
           const p = data?.answers?.[name]?.noul;
@@ -136,6 +161,8 @@ export default function(pi: ExtensionAPI) {
         const model = ctx.modelRegistry.find(c.provider, c.id);
         if (model && (await pi.setModel(model))) {
           chosen = c;
+          logWriter.write(`${JSON.stringify(chosen)}\n`)
+          logWriter.write(`${event.text}\n`)
           break;
         }
         warn(`Router: could not select ${c.provider}/${c.id}. Check the model ID and provider authentication.`);

@@ -1,5 +1,5 @@
 {
-  "lastChangelogVersion": "0.87.1",
+  "lastChangelogVersion": "1.1.0",
   "theme": "dark",
   "packages": [
     "npm:pi-provider-litellm",
@@ -14,8 +14,8 @@
   "defaultThinkingLevel": "high",
   "subagents": {
     "projectRootResolution": "git-root",
-    "defaultModel": "gpt-6-luna",
-    "defaultProvider": "litellm",
+    "defaultModel": "gpt-6.1-sol",
+    "defaultProvider": "openai-codex",
     "agentOverrides": {
       "claude-code": {
         "disabled": true
@@ -27,10 +27,10 @@
         "model": "gpt-6-astra"
       },
       "delegate": {
-        "model": "bedrock-claude-sonnet-5-5"
+        "model": "gpt-6-luna"
       },
       "researcher": {
-        "model": "bedrock-claude-opus-5-5"
+        "model": "gpt-6.1-sol"
       },
       "worker": {
         "model": "gpt-6-luna"
@@ -39,7 +39,8 @@
         "model": "gpt-6-luna"
       },
       "reviewer": {
-        "model": "gpt-6-astra""skills": [
+        "model": "gpt-6.1-sol",
+        "skills": [
           "go-reviewer"
         ]
       }

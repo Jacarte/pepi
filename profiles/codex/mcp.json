@@ -32,6 +32,13 @@
         "DEEPGRAM_API_KEY": "{env:DEEPGRAM_API_KEY}"
       }
     },
+    "voice-devtools": {
+      "command": "bash",
+      "args": [
+        "-lc",
+        "cd /Users/javcab/Documents/maelstrom/voice-devtools && export TTS2MIC_BACKEND=pipewire TTS2MIC_PULSE_SINK=tts2mic_tx TTS2MIC_SESSION_ADAPTER=maelstrom-demo && exec ./bin/tts2mic-mcp"
+      ]
+    },
     "github": {
       "url": "https://api.githubcopilot.com/mcp",
       "oauth": false,
