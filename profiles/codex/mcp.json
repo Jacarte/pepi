@@ -20,7 +20,7 @@
       ]
     },
     "speaker": {
-      "command": "{env:HOME}/tts2mic-mcp/tts2mic-mcp",
+      "command": "/Users/javcab/Documents/maelstrom/voice-devtools/tts2mic-mcp",
       "env": {
         "TTS_CACHE_DIR": ".tts2mic-cache",
         "TTS_PROVIDER_NAME": "elevenlabs",
@@ -28,14 +28,22 @@
         "TTS_LANG": "en-US",
         "ELEVENLABS_VOICE_ID": "CwhRBWXzGAHq8TQ4Fs17",
         "ELEVENLABS_API_KEY": "{env:ELEVENLABS_API_KEY}",
-        "TTS2MIC_MACOS_DEBUG_AFPLAY": "1"
+        "TTS2MIC_MACOS_DEBUG_AFPLAY": "1",
+        "DEEPGRAM_API_KEY": "{env:DEEPGRAM_API_KEY}"
       }
+    },
+    "voice-devtools": {
+      "command": "bash",
+      "args": [
+        "-lc",
+        "cd /Users/javcab/Documents/maelstrom/voice-devtools && export TTS2MIC_BACKEND=pipewire TTS2MIC_PULSE_SINK=tts2mic_tx TTS2MIC_SESSION_ADAPTER=maelstrom-demo && exec ./bin/tts2mic-mcp"
+      ]
     },
     "github": {
       "url": "https://api.githubcopilot.com/mcp",
       "oauth": false,
       "headers": {
-        "Authorization": "Bearer {env:GITHUB_TOKEN_READONLY}"
+        "Authorization": "Bearer {env:GITHUB_TOKEN}"
       }
     },
     "neo4j": {
@@ -62,23 +70,6 @@
         "chrome-devtools-mcp@latest"
       ],
       "disabled": true
-    },
-    "Nucleus": {
-      "command": "nuc-mcp"
-    },
-    "Atlassian": {
-      "url": "https://mcp.atlassian.com/v1/mcp",
-      "auth": "oauth"
-    },
-    "DevCenter": {
-      "url": "{env:LLM_GATEWAY_URL}/DevCenter/mcp",
-      "headers": {
-        "x-litellm-api-key": "Bearer {env:LLM_GATEWAY_API_KEY}"
-      }
-    },
-    "Datadog": {
-      "url": "https://mcp.datadoghq.eu/api/unstable/mcp-server/mcp",
-      "auth": "oauth"
     },
     "codegraph": {
       "command": "codegraph",
