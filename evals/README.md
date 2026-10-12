@@ -11,8 +11,18 @@ Use the interactive CLI for the full workflow:
 evals/pepi-eval.sh
 ```
 
-This prompts for required inputs or reads them from `PEPI_EVAL_*` env vars.
-Set env vars to skip prompts in CI or for automation. See `evals/pepi-eval.sh help` for all variables.
+This prompts for required inputs or reads them from env vars.
+
+**Secrets** (required for `run` step; never echoed):
+- `LITELLM_BASE_URL`: LiteLLM gateway URL
+- `LITELLM_API_KEY`: Dedicated, budget-capped API key (keep this safe)
+
+**Optional `PEPI_EVAL_*` env vars** override defaults (see `evals/pepi-eval.sh --help` for full list).
+
+**Dry-run mode** (no side effects, prints shell-quoted commands):
+```sh
+LITELLM_API_KEY=sk-dummy LITELLM_BASE_URL=https://x evals/pepi-eval.sh --dry-run -y all
+```
 
 ## Documentation
 
