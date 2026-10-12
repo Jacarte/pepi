@@ -1,7 +1,7 @@
 {
   "LOCAL": {
     "provider": "litellm",
-    "id": "bedrock-claude-haiku-4-5"
+    "id": "bedrock-claude-haiku-5-5"
   },
   "CHEAP": {
     "provider": "litellm",
