@@ -1,4 +1,5 @@
 import copy
+import hashlib
 import json
 import tempfile
 import unittest
@@ -6,7 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from evals.swebench.common import DATASET, fingerprint, read_json, write_json
+from evals.swebench.common import DATASET, fingerprint, read_json, runtime_record, write_json
 from evals.swebench.reporting import compare, distribution, file_hash, grade_run, predictions, summarize_run
 
 
@@ -17,10 +18,15 @@ class ReportingTests(unittest.TestCase):
         run = Path(temporary.name).resolve() / "run-1"
         (run / "build").mkdir(parents=True)
         tasks = [{"instance_id": f"owner__repo-{i}", "repo": "owner/repo", "base_commit": "a" * 40,
-                  "image": "example:fixed", "problem_statement": "Fix it", "problem_sha256": "b" * 64}
+                  "image": "example:fixed", "problem_statement": "Fix it",
+                  "problem_sha256": hashlib.sha256(b"Fix it").hexdigest()}
                  for i in (1, 2)]
+        versions = {"pi": "1.0.0", "pi-provider-litellm": "1.0.0", "pi-subagents": "1.0.0"}
+        # read_manifest requires build/runtime.json to match the manifest and be part of the hash.
+        write_json(run / "build/runtime.json", runtime_record(versions, "node:22-fixed", tasks))
         manifest = {"schema_version": 1, "run_id": "run-1", "config_id": "pepi-test", "dataset": DATASET,
-                    "split": "test", "profile_sha256": fingerprint(run / "build"), "tasks": tasks}
+                    "split": "test", "profile_sha256": fingerprint(run / "build"), "versions": versions,
+                    "node_image": "node:22-fixed", "tasks": tasks}
         write_json(run / "manifest.json", manifest)
         source = run / "task-source"
         source.mkdir()

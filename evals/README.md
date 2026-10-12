@@ -18,6 +18,19 @@ This prompts for required inputs or reads them from env vars.
 - `LITELLM_API_KEY`: Dedicated, budget-capped API key (keep this safe)
 
 **Optional `PEPI_EVAL_*` env vars** override defaults (see `evals/pepi-eval.sh --help` for full list).
+Each prompt prints the variable to export to skip it next time. Without a terminal, a missing value exits 2.
+
+**Benchmarking another configuration** (details in [swebench/README.md](swebench/README.md#ci-injected-configuration-and-secrets)):
+- `PEPI_EVAL_CONFIG_DIR`: directory with `settings.json`, `AGENTS.md`, `workflows/`,
+  `extensions/subagent/config.json`; missing files fall back to this checkout. It must not contain
+  `auth.json`, `mcp.json` or `.env` (the script and `prepare` both refuse them).
+- `PEPI_EVAL_CONFIG_LABEL`: name recorded in the manifest and predictions.
+- `PEPI_EVAL_DROP_MCP=1`: required when the config declares MCP (for example `profiles/bedrock/settings.json`).
+- `PEPI_EVAL_SECRETS_DIR`: directory outside the checkout with a `chmod 600` `auth.json`, injected at run time.
+  `LITELLM_BASE_URL` and `LITELLM_API_KEY` are still required for `run`.
+
+The paid `run` step asks for confirmation; non-interactively pass `-y` (or `PEPI_EVAL_YES=1`).
+Exit codes match `python -m evals.swebench`: 0 ok, 2 usage/configuration, 3 step failure, 130 interrupted.
 
 **Dry-run mode** (no side effects, prints shell-quoted commands):
 ```sh

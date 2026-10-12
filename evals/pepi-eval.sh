@@ -9,6 +9,8 @@ set -o pipefail
 export PYTHONDONTWRITEBYTECODE=1
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)" || exit 3
+# `python -m evals.swebench` must resolve from any working directory.
+export PYTHONPATH="$script_dir${PYTHONPATH:+:$PYTHONPATH}"
 eval_dir="$script_dir/evals/swebench"
 runs_dir="${PEPI_EVAL_RUNS_DIR:-$eval_dir/runs}"
 step_count=0
@@ -40,7 +42,7 @@ ask() {
     fi
     
     local answer="$default"
-    if is_tty && [[ -z "$value" ]]; then
+    if is_tty && [[ "${PEPI_EVAL_YES:-}" != "1" ]]; then
         local display_default="${default:+[$default] }"
         printf '%s' "$prompt $display_default: " >&2
         if ! read answer; then
@@ -95,11 +97,24 @@ ask_secret() {
 # Check if command exists
 has_cmd() { command -v "$1" &>/dev/null; }
 
-# Check if a module --help has a flag
-has_flag() {
-    local module=$1 flag=$2
-    $PEPI_PYTHON -m "$module" --help 2>&1 | grep -q "\-\-$flag" && return 0
-    return 1
+# `prepare` rejects auth.json, mcp.json and .env anywhere under --config-dir.
+# Fail here with the same names so the mistake is caught before prompting further.
+reject_secrets_in_config_dir() {
+    local dir=$1 found
+    [[ -d "$dir" ]] || die "Config directory not found: $dir" 2
+    found=$(find "$dir" \( -name auth.json -o -name mcp.json -o -name .env \) -print -quit 2>/dev/null)
+    if [[ -n "$found" ]]; then
+        die "Secret file in the config directory: $found. Keep auth.json in a separate directory and set PEPI_EVAL_SECRETS_DIR" 2
+    fi
+}
+
+# Map a failed child status onto this script's exit codes, the same ones as
+# `python -m evals.swebench`: 2 usage/configuration, 3 infrastructure, 130 interrupted.
+fail_step() {
+    local step=$1 status=$2
+    [[ $status -eq 130 ]] && exit 130
+    [[ $status -eq 2 ]] || status=3
+    die "$step failed" "$status"
 }
 
 # Validate name: alphanumeric, dot, dash, underscore only
@@ -198,11 +213,9 @@ check_network() {
 
 # Run command; dry-run prints shell-quoted line with key masked
 run_cmd() {
-    local cmd=("$@")
-    
     if [[ "${DRY_RUN:-}" == "1" ]]; then
-        local display_cmd=()
-        for arg in "${cmd[@]}"; do
+        local display_cmd=() arg
+        for arg in "$@"; do
             if [[ "$arg" == "$LITELLM_API_KEY" ]]; then
                 display_cmd+=("<API_KEY>")
             else
@@ -213,14 +226,7 @@ run_cmd() {
         return 0
     fi
     
-    local output
-    output=$("${cmd[@]}" 2>&1)
-    local exit_code=$?
-    if [[ $exit_code -ne 0 ]]; then
-        printf '%s\n' "$output" >&2
-        return $exit_code
-    fi
-    printf '%s\n' "$output"
+    "$@"
 }
 
 # Commands
@@ -279,10 +285,11 @@ cmd_prepare() {
     node_image=$(ask NODE_IMAGE "Node image" "node:22-bookworm-slim") || return 2
     task_repo=$(ask TASK_REPO "Task repo path" "${PEPI_EVAL_TASK_REPO:-$HOME/swe-bench-tasks}") || return 2
     
-    if [[ "${DRY_RUN:-}" != "1" ]]; then
-        mkdir -p "$run_dir" || die "Failed to create run directory" 3
-    fi
+    local drop_mcp
+    drop_mcp=$(ask DROP_MCP "Drop MCP from the profile? 1=yes 0=no (required if the config declares MCP)" "0") || return 2
+    [[ "$drop_mcp" == "0" || "$drop_mcp" == "1" ]] || die "PEPI_EVAL_DROP_MCP must be 0 or 1" 2
     
+    # `prepare` creates the run directory itself and refuses an existing one.
     local prepare_cmd=(
         "$PEPI_PYTHON" -m evals.swebench prepare
         --pepi-root "$script_dir"
@@ -295,18 +302,26 @@ cmd_prepare() {
         --node-image "$node_image"
     )
     
-    # Add optional config flags if supported
-    if has_flag evals.swebench.prepare config-dir; then
-        [[ -n "${PEPI_EVAL_CONFIG_DIR:-}" ]] && prepare_cmd+=(--config-dir "${PEPI_EVAL_CONFIG_DIR}")
-        [[ -n "${PEPI_EVAL_CONFIG_LABEL:-}" ]] && prepare_cmd+=(--config-label "${PEPI_EVAL_CONFIG_LABEL}")
+    # Injected, non-secret config; missing files fall back to the repository copies.
+    if [[ -n "${PEPI_EVAL_CONFIG_DIR:-}" ]]; then
+        reject_secrets_in_config_dir "$PEPI_EVAL_CONFIG_DIR"
+        prepare_cmd+=(--config-dir "$PEPI_EVAL_CONFIG_DIR")
     fi
-    if has_flag evals.swebench.prepare drop-mcp && [[ "${PEPI_EVAL_DROP_MCP:-}" == "1" ]]; then
-        prepare_cmd+=(--drop-mcp)
+    if [[ -n "${PEPI_EVAL_CONFIG_LABEL:-}" ]]; then
+        validate_name "$PEPI_EVAL_CONFIG_LABEL"
+        prepare_cmd+=(--config-label "$PEPI_EVAL_CONFIG_LABEL")
     fi
+    [[ "$drop_mcp" == "1" ]] && prepare_cmd+=(--drop-mcp)
     
-    run_cmd "${prepare_cmd[@]}" || die "prepare" 3
-    
-    [[ -f "$ids_file" ]] && [[ "$ids_file" =~ ^/tmp/ ]] && rm -f "$ids_file"
+    local prepare_status=0
+    run_cmd "${prepare_cmd[@]}" || prepare_status=$?
+    # The IDs file is ours (and removed) unless the user passed an existing file.
+    [[ -f "${PEPI_EVAL_IDS:-sympy__sympy-20590}" ]] || rm -f "$ids_file"
+    if [[ $prepare_status -ne 0 ]]; then
+        [[ $prepare_status -eq 2 && "$drop_mcp" != "1" ]] &&
+            tip "if the error says the config declares MCP, set PEPI_EVAL_DROP_MCP=1 to remove MCP from the frozen profile"
+        fail_step prepare "$prepare_status"
+    fi
     
     [[ "${DRY_RUN:-}" != "1" ]] && warn "Prepared run: $run_dir"
     next_step
@@ -361,7 +376,7 @@ cmd_build() {
         --platform "$platform"
     )
     
-    run_cmd "${build_cmd[@]}" || die "build" 3
+    run_cmd "${build_cmd[@]}" || fail_step build $?
     
     [[ "${DRY_RUN:-}" != "1" ]] && warn "Build complete: $run_dir/builds.json"
     next_step
@@ -437,7 +452,8 @@ cmd_run() {
         task_count=$(python3 -c "import json; m=json.load(open('$run_dir/manifest.json')); print(len(m['tasks']))" 2>/dev/null || echo "?")
         warn "⚠ Paid step: $task_count task(s) × ~\$20–50 each; timeout $timeout_s s"
         
-        ask_yes "Proceed with paid Pi run?" || return 1
+        ask_yes "Proceed with paid Pi run?" ||
+            die "Paid run not confirmed (pass -y or set PEPI_EVAL_YES=1 to confirm non-interactively)" 2
     fi
     
     export LITELLM_BASE_URL="$base_url"
@@ -452,11 +468,14 @@ cmd_run() {
         --memory "$memory"
     )
     
-    if has_flag evals.swebench.run secrets-dir && [[ -n "${PEPI_EVAL_SECRETS_DIR:-}" ]]; then
-        run_cmd+=(--secrets-dir "${PEPI_EVAL_SECRETS_DIR}")
+    # auth.json (chmod 600) is injected into a tmpfs by the runner, never via --config-dir.
+    # LITELLM_BASE_URL and LITELLM_API_KEY are still required in the environment.
+    if [[ -n "${PEPI_EVAL_SECRETS_DIR:-}" ]]; then
+        [[ -d "$PEPI_EVAL_SECRETS_DIR" ]] || die "Secrets directory not found: $PEPI_EVAL_SECRETS_DIR" 2
+        run_cmd+=(--secrets-dir "$PEPI_EVAL_SECRETS_DIR")
     fi
     
-    run_cmd "${run_cmd[@]}" || die "run" 3
+    run_cmd "${run_cmd[@]}" || fail_step run $?
     
     [[ "${DRY_RUN:-}" != "1" ]] && warn "Run complete: $run_dir/predictions.jsonl"
     next_step
@@ -499,7 +518,7 @@ cmd_report() {
     fi
     
     local telemetry_cmd=("$PEPI_PYTHON" -m evals.swebench.telemetry "$run_dir")
-    run_cmd "${telemetry_cmd[@]}" || warn "Telemetry step had warnings"
+    run_cmd "${telemetry_cmd[@]}" || fail_step telemetry $?
     
     next_step
     step_header "grade"
@@ -525,9 +544,11 @@ cmd_report() {
         --test-timeout-seconds "$timeout_grade"
     )
     
+    # Exit 2 is a validation error. Any other nonzero status is the evaluator's own
+    # and says nothing about task results; summarize then reports what is missing.
     run_cmd "${grade_cmd[@]}" || {
         local grade_exit=$?
-        [[ $grade_exit -eq 2 ]] && die "grade" 2
+        [[ $grade_exit -eq 2 || $grade_exit -eq 130 ]] && fail_step grade "$grade_exit"
         warn "Grade step exited with code $grade_exit (see grading/<id>/grader.log)"
     }
     
@@ -535,7 +556,7 @@ cmd_report() {
     step_header "summarize"
     
     local summarize_cmd=("$PEPI_PYTHON" -m evals.swebench.reporting summarize "$run_dir")
-    run_cmd "${summarize_cmd[@]}" || die "summarize" 3
+    run_cmd "${summarize_cmd[@]}" || fail_step summarize $?
     
     [[ "${DRY_RUN:-}" != "1" ]] && warn "Reports in: $run_dir/summary.{json,csv,md}"
     
@@ -598,7 +619,7 @@ cmd_compare() {
     
     if [[ "${DRY_RUN:-}" != "1" ]]; then
         local output
-        output=$(run_cmd "${compare_cmd[@]}") || die "compare" 3
+        output=$(run_cmd "${compare_cmd[@]}") || fail_step compare $?
         local out_file="/tmp/pepi-comparison-$(date +%s).json"
         printf '%s\n' "$output" > "$out_file"
         warn "Comparison written to: $out_file"
@@ -651,21 +672,24 @@ Optional PEPI_EVAL_* env vars:
   LITELLM_VERSION       LiteLLM provider version (auto-detected)
   SUBAGENTS_VERSION     Subagents version (auto-detected)
   NODE_IMAGE            Node base image (default node:22-bookworm-slim)
-  CONFIG_DIR            Injected config directory
+  CONFIG_DIR            Injected config directory (never auth.json/mcp.json/.env)
   CONFIG_LABEL          Config label for manifest
-  DROP_MCP              Set to 1 to allow MCP and drop it
+  DROP_MCP              1 removes MCP from the profile (needed if the config declares it)
   PLATFORM              Docker build platform (default linux/amd64)
   NETWORK               Docker network (default pepi-eval)
   TIMEOUT_SECONDS       Pi timeout (default 1200)
   CPUS                  CPU count (default 4)
   MEMORY                Memory (default 8g)
-  SECRETS_DIR           auth.json directory (for --secrets-dir)
+  SECRETS_DIR           Directory with a chmod-600 auth.json, injected by 'run' (--secrets-dir)
   WORKERS               Grade workers (default 1)
   TEST_TIMEOUT_SECONDS  Grading timeout (default 1800)
   BASELINE_RUN          Baseline for compare
   CANDIDATE_RUN         Candidate for compare
   RUNS_DIR              Override runs directory (default evals/swebench/runs)
   YES                   Set to 1 to auto-accept (same as --yes)
+
+Exit codes (same as python -m evals.swebench):
+  0 ok, 2 usage/configuration error, 3 step or infrastructure failure, 130 interrupted
 
 Examples:
   # Interactive smoke test

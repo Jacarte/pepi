@@ -1,9 +1,20 @@
 """Tests for evals/pepi-eval.sh: subprocess-based core functionality."""
 import os
+import shlex
+import stat
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+
+from evals.swebench.__main__ import build_parser
+
+# Stand-in for the swebench venv's python: records `-m` invocations, exits with $FAKE_STATUS.
+FAKE_PYTHON = """#!/bin/sh
+[ "$1" = "-m" ] || exit 0
+printf '%s\\n' "$*" >> "$FAKE_LOG"
+exit "${FAKE_STATUS:-0}"
+"""
 
 
 class PepiEvalTest(unittest.TestCase):
@@ -17,14 +28,29 @@ class PepiEvalTest(unittest.TestCase):
     
     def setUp(self):
         self.runs_tmpdir = tempfile.TemporaryDirectory()
+        self.fake = tempfile.TemporaryDirectory()
+        fake = Path(self.fake.name)
+        (fake / 'venv/bin').mkdir(parents=True)
+        python = fake / 'venv/bin/python'
+        python.write_text(FAKE_PYTHON)
+        python.chmod(python.stat().st_mode | stat.S_IXUSR)
+        (fake / 'bin').mkdir()
+        docker = fake / 'bin/docker'
+        docker.write_text('#!/bin/sh\nexit 0\n')
+        docker.chmod(docker.stat().st_mode | stat.S_IXUSR)
+        self.log = fake / 'calls.log'
     
     def tearDown(self):
         self.runs_tmpdir.cleanup()
+        self.fake.cleanup()
     
     def run_script(self, args, env_extra=None, stdin=None):
-        """Run the script."""
+        """Run the script against a fake venv/docker, so tests need neither."""
         env = os.environ.copy()
         env['PEPI_EVAL_RUNS_DIR'] = self.runs_tmpdir.name
+        env['PEPI_EVAL_VENV'] = str(Path(self.fake.name) / 'venv')
+        env['PATH'] = f"{Path(self.fake.name) / 'bin'}{os.pathsep}{env['PATH']}"
+        env['FAKE_LOG'] = str(self.log)
         env['PYTHONDONTWRITEBYTECODE'] = '1'
         
         if env_extra:
@@ -210,6 +236,106 @@ class PepiEvalTest(unittest.TestCase):
         # In dry-run, should not fail due to missing venv
         self.assertEqual(result.returncode, 0)
         self.assertIn('✓', result.stderr)  # checkmark printed
+
+
+    # --- integration with the runner's real CLI (flags, exit codes, secrets) ---
+
+    def printed_commands(self, result):
+        """Commands printed by --dry-run, as argv lists after `python -m evals.swebench`."""
+        commands = []
+        for line in result.stdout.splitlines():
+            if line.startswith('+ '):
+                argv = shlex.split(line[2:])
+                if argv[1:3] == ['-m', 'evals.swebench']:
+                    commands.append(argv[3:])
+        return commands
+
+    def test_dry_run_commands_parse_with_the_real_runner_cli(self):
+        """Every runner command the script prints is accepted by evals.swebench's argparse."""
+        config = Path(self.fake.name) / 'config'
+        config.mkdir()
+        secrets = Path(self.fake.name) / 'secrets'
+        secrets.mkdir()
+        env = {
+            'LITELLM_API_KEY': 'sk-SECRET-KEY-12345', 'LITELLM_BASE_URL': 'https://x',
+            'PEPI_EVAL_RUN_NAME': 'flags-run', 'PEPI_EVAL_CONFIG_DIR': str(config),
+            'PEPI_EVAL_CONFIG_LABEL': 'variant-b', 'PEPI_EVAL_DROP_MCP': '1',
+            'PEPI_EVAL_SECRETS_DIR': str(secrets), 'PEPI_EVAL_IDS': 'a__b-1,c__d-2',
+        }
+        result = self.run_script(['--dry-run', '-y', 'all'], env_extra=env, stdin='')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        parsed = {argv[0]: build_parser().parse_args(argv) for argv in self.printed_commands(result)}
+        self.assertEqual(set(parsed), {'prepare', 'build', 'run'})
+        self.assertEqual(parsed['prepare'].config_dir, config)
+        self.assertEqual(parsed['prepare'].config_label, 'variant-b')
+        self.assertTrue(parsed['prepare'].drop_mcp)
+        self.assertEqual(parsed['run'].secrets_dir, secrets)
+        self.assertNotIn('sk-SECRET-KEY-12345', result.stdout + result.stderr)
+
+    def test_optional_flags_are_omitted_when_unset(self):
+        env = {'PEPI_EVAL_RUN_NAME': 'plain-run'}
+        result = self.run_script(['--dry-run', '-y', 'prepare'], env_extra=env, stdin='')
+        (argv,) = self.printed_commands(result)
+        args = build_parser().parse_args(argv)
+        self.assertIsNone(args.config_dir)
+        self.assertIsNone(args.config_label)
+        self.assertFalse(args.drop_mcp)
+
+    def test_config_dir_with_secret_files_is_rejected_with_exit_2(self):
+        for name in ('auth.json', 'mcp.json', '.env'):
+            with self.subTest(name=name):
+                config = Path(self.fake.name) / f'config-{name}'
+                config.mkdir()
+                (config / name).write_text('{}')
+                env = {'PEPI_EVAL_RUN_NAME': 'secret-in-config', 'PEPI_EVAL_CONFIG_DIR': str(config)}
+                result = self.run_script(['-y', 'prepare'], env_extra=env, stdin='')
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn(name, result.stderr)
+                self.assertFalse(self.log.exists(), 'the runner must not be invoked')
+
+    def test_prepare_leaves_run_directory_creation_to_the_runner(self):
+        """`prepare` refuses an existing directory, so the script must not pre-create it."""
+        result = self.run_script(['-y', 'prepare'], env_extra={'PEPI_EVAL_RUN_NAME': 'fresh'}, stdin='')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((Path(self.runs_tmpdir.name) / 'fresh').exists())
+        self.assertIn('prepare', self.log.read_text())
+
+    def test_runner_exit_codes_pass_through_as_2_and_3(self):
+        for status, expected in (('2', 2), ('3', 3), ('1', 3), ('130', 130)):
+            with self.subTest(status=status):
+                result = self.run_script(['-y', 'prepare'], stdin='', env_extra={
+                    'PEPI_EVAL_RUN_NAME': f'status-{status}', 'FAKE_STATUS': status})
+                self.assertEqual(result.returncode, expected, result.stderr)
+
+    def test_prepare_exit_2_without_drop_mcp_suggests_the_flag(self):
+        result = self.run_script(['-y', 'prepare'], stdin='', env_extra={
+            'PEPI_EVAL_RUN_NAME': 'mcp-tip', 'FAKE_STATUS': '2'})
+        self.assertIn('PEPI_EVAL_DROP_MCP=1', result.stderr)
+
+    def test_paid_run_needs_confirmation_when_not_interactive(self):
+        run = Path(self.runs_tmpdir.name) / 'paid'
+        run.mkdir()
+        (run / 'manifest.json').write_text('{"tasks": []}')
+        env = {'LITELLM_API_KEY': 'sk-SECRET-KEY-12345', 'LITELLM_BASE_URL': 'https://x',
+               'PEPI_EVAL_RUN_NAME': 'paid'}
+        result = self.run_script(['run'], env_extra=env, stdin='')
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertFalse(self.log.exists(), 'no paid run without confirmation')
+        confirmed = self.run_script(['-y', 'run'], env_extra=env, stdin='')
+        self.assertEqual(confirmed.returncode, 0, confirmed.stderr)
+        call = self.log.read_text()
+        self.assertIn('evals.swebench run', call)
+        self.assertNotIn('sk-SECRET-KEY-12345', call + confirmed.stdout + confirmed.stderr)
+
+    def test_works_from_any_working_directory(self):
+        env = os.environ.copy()
+        env.update({'PEPI_EVAL_RUNS_DIR': self.runs_tmpdir.name, 'PEPI_EVAL_RUN_NAME': 'cwd',
+                    'PEPI_EVAL_VENV': str(Path(self.fake.name) / 'venv'), 'FAKE_LOG': str(self.log)})
+        with tempfile.TemporaryDirectory() as elsewhere:
+            subprocess.run(['bash', str(self.script_path), '-y', 'prepare'], cwd=elsewhere, env=env,
+                           capture_output=True, text=True, input='', timeout=5, check=True)
+        # PYTHONPATH makes `-m evals.swebench` resolvable; the fake python only logs it.
+        self.assertIn('evals.swebench prepare', self.log.read_text())
 
 
 if __name__ == '__main__':

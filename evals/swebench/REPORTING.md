@@ -2,14 +2,18 @@
 
 ## Exit codes
 
-All commands follow this convention:
-- **0**: success (summarize/compare completed; grade completed or grader returned 0)
-- **2**: validation error (invalid arguments, malformed inputs, immutability violations)
-- **nonzero from grader**: grading infrastructure failure (reported by SWE-bench evaluator; see `grading/<id>/grader.log`)
+`telemetry`, `summarize` and `compare` use the runner's convention (see the
+`Exit codes` paragraph in [README.md](README.md)) for the cases they can hit:
 
-Summarize and compare always return 0 if inputs are valid. Grade returns the grader's exit code,
-which is typically 0 but may be nonzero if the evaluator encounters infrastructure issues.
-The grader's exit code does NOT indicate task pass/fail; use the `summary.json` resolved rate for that.
+- **0**: success.
+- **2**: validation error (bad arguments, malformed or changed inputs, immutability violations).
+
+`grade` returns **2** for the same validation errors, otherwise the evaluator
+process's own exit status, unchanged. Those statuses are not remapped to the
+runner's `3`: any other nonzero value means the evaluator itself failed (see
+`grading/<id>/grader.log`). Neither a 0 nor a nonzero status says whether tasks
+passed; read the resolved rate in `summary.json`. `summarize` after a failed grade
+reports missing results as unknown instead of failing.
 
 ## Commands
 
