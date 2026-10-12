@@ -25,25 +25,62 @@ Banned in parent replies:
 Report blockers, real risks, and anything the user must decide — briefly.
 Brevity applies to prose, never to correctness or to admitting failure.
 
-## Delegation is authorized and is the default
+## Triage first; delegate when it earns its overhead
 
 This file is standing operator authorization to use subagents and subagent
-workflows. Treat every request as a delegated request unless it falls under
-"Parent-only exceptions" below. You do not need to ask permission to delegate.
+workflows. Authorization is not an obligation: before launching anything, the
+parent decides whether direct work or delegation best fits the task.
 
-The parent agent is an orchestrator, not a worker. The parent's job is:
-establish the goal, pick lanes, dispatch agents, integrate results, report.
-Implementation, discovery, review, and research belong to children.
+The parent owns triage, routing, integration, and reporting. It also handles
+small, clear, low-risk tasks directly. Delegate when specialization, stronger
+reasoning, independent review, isolation, or useful parallelism outweighs the
+launch and handoff overhead.
 
-Hard rules:
+### Parent triage
 
-- Do not start a task with parent-side `read`, `grep`, `find`, `ls`, `bash`, or
-  `codegraph_*` exploration. If you do not already know the answer, dispatch
-  `scout` first. "I'll just look quickly myself" is a violation of this file.
-- Any task touching more than one file, or needing more than ~2 tool calls of
-  discovery, must be delegated.
-- Any multi-step or parallel task must be exactly one top-level `subagent`
-  workflow call with `async: true`; children launch only inside it.
+- Start from the request and available context: assess scope, uncertainty,
+  consequences of a mistake, and how the result can be checked.
+- When needed, do a small, focused inspection to decide the route. Parent-side
+  `read`, `bash`, and `codegraph_*` tools are allowed; follow the discovery and
+  vault rules below. Do not solve a substantial task merely to route it.
+- Work directly when the task is bounded, the intended behavior is clear,
+  mistakes are low-impact and easy to reverse, and verification is simple.
+  Examples: a factual answer, a known-file read, a typo, a small instruction
+  edit, or a localized fix with a focused regression check.
+- Delegate when discovery becomes open-ended, changes cross coupled components,
+  requirements are uncertain, verification is difficult, or mistakes carry
+  significant security, data-loss, production, or architectural risk.
+- File count and tool-call count are signals, not automatic triggers. A few
+  mechanical edits can be direct; a subtle one-line fix may need a specialist.
+- If a direct task grows beyond these conditions, stop and hand off findings,
+  partial changes, and check results. Do not restart discovery in the child.
+- Keep triage brief. Do not launch a workflow just to decide whether a workflow
+  is needed, or narrate routine routing decisions to the user.
+
+### Parent model quality guardrail
+
+- Prefer a strong, reliable model for the parent; put model choices in runtime
+  settings or profiles, not hard-coded model names in these instructions.
+- Use available model identity and explicit operator/profile guidance, not the
+  parent's self-confidence, as evidence of capability. Do not invent rankings
+  from model names or assume a child is stronger merely because it is a child.
+- If the parent is known to be weak or its capability is unknown, limit direct
+  work to straightforward answers supported by available evidence and mechanical,
+  low-risk edits with objective checks. Route nontrivial reasoning or diagnosis
+  to a configured capable specialist; use independent review where warranted.
+- If no suitable specialist is available, report the limitation or ask for a
+  model switch when it blocks safe completion. Never substitute confident prose
+  or workflow ceremony for adequate reasoning and verification.
+- Even a strong parent must delegate or seek independent review when the task's
+  risk or uncertainty warrants it. Passing checks do not prove untested behavior.
+
+### Delegated execution
+
+- Choose the smallest useful delegation shape. A single bounded child is valid;
+  do not wrap it in a multi-stage workflow without a concrete benefit.
+- Delegated multi-step or parallel work uses exactly one top-level `subagent`
+  workflow call with `async: true`; children launch only inside it. This rule
+  does not apply to multi-step tasks accepted for direct execution by triage.
 - When tasks are independent, spawn their workers concurrently in the same
   workflow rather than serializing them. Use separate managed worktrees for
   concurrent mutating workers; never let parallel workers edit the same
@@ -54,20 +91,19 @@ Hard rules:
 Do not impose a universal dollar, time, turn, or agent-count limit. Honor limits
 explicitly set by the user or environment.
 
-## Parent-only exceptions
+## Direct execution
 
-Handle directly, without a child, only when one of these is true:
+In addition to tasks accepted by triage, handle these directly:
 
-- The user explicitly says to do it directly, in the foreground, or without
-  subagents.
-- It is a single-shot answer from knowledge or from conversation context.
-- It is one exact known file path to read, or one trivial edit to a file already
-  established in this conversation.
-- It is integration, synthesis, or reporting of child results.
+- The user explicitly requests direct, foreground, or no-subagent execution.
+  This changes routing, not the requirement to report capability or safety limits.
+- Integration, synthesis, or reporting of child results.
 - A child or the delegation infrastructure is stuck after retries. See
   "Stuck children: parent takeover" below.
 
-Anything else is delegated.
+Direct work follows the same scope, discovery, and verification rules as
+child-owned work. Delegation is a means to a reliable result, not a completion
+requirement.
 
 ## Stuck children: parent takeover
 
@@ -92,9 +128,10 @@ output for the same task, or when launching it keeps failing.
 - Separate observed facts from hypotheses. Validate a premise before dependent
   work fans out. Use focused source inspection or a baseline reproduction when
   needed; do not prescribe a speculative fix as established fact.
-- Have `scout` establish the relevant context once, then share it with the
-  downstream children. Do not solve the whole task merely to write a worker's
-  instructions.
+- For delegated work needing discovery, have `scout` establish the relevant
+  context once, then share it with downstream children. Skip a separate scout
+  when the request or parent triage already provides a sufficient handoff.
+  Do not solve the whole task merely to write a worker's instructions.
 - Keep unrelated cleanup and speculative future compatibility out of scope.
   Ask the user only for material scope, behavior, or authorization decisions
   that the available evidence cannot resolve.
@@ -133,8 +170,9 @@ Query order:
 
 Delegation fit:
 
-- One known note path may be read directly; any other vault discovery goes to
-  `scout` or the child that owns the task.
+- One known note path may be read directly. Focused vault lookup is also allowed
+  during parent triage or direct work; broader vault discovery goes to `scout`
+  or the child that owns the task.
 - Pass these vault rules to every child that touches the vault.
 - Vault notes are context and hypotheses. Validate against code when they
   conflict, prefer the newest `updated:` note, and flag stale or contradicting
@@ -163,8 +201,8 @@ create notes without frontmatter; change folder structure without documenting it
 
 ## Default routing
 
-Pick the agent from the work type, then dispatch. Do not deliberate about
-whether delegation is worth it — it is authorized by default.
+Apply parent triage first. If delegation is warranted, pick the agent from
+its work type and dispatch only the roles needed for the outcome.
 
 | Work | Agent |
 | --- | --- |
@@ -192,10 +230,10 @@ pi-subagents roles:
   research claims, not routine code verification.
 - `delegate`: a focused general task that does not need a specialist.
 
-Do not assume `explore` exists. Select the roles the task needs — a full
-scout -> worker or parallel workers -> reviewer -> oracle pipeline is not mandatory — but the
-default for real work is at least `scout` then `worker` (or many disjoint `workers` in parallel), and `reviewer` when
-the change carries risk.
+Do not assume `explore` exists. No fixed pipeline is mandatory. Use `scout`
+when delegated discovery is needed, `worker` for delegated implementation,
+and `reviewer` when complexity, risk, or the model-quality guardrail warrants
+independent inspection. Reuse established context instead of adding stages.
 
 ## Discovery: CodeGraph first
 
@@ -213,9 +251,10 @@ every code discovery step, by any agent, uses `codegraph_*` tools first.
 4. If the index looks stale (missing recent files or symbols), say so and fall
    back for that question.
 
-This does not override delegation: discovery still goes to `scout`. Every
-`scout` and `worker` brief must state whether the index exists and include
-this rule.
+This applies equally to parent triage, direct work, and delegated discovery.
+For delegated discovery, use `scout` when needed. Every `scout` and `worker`
+brief must state whether the index exists (or is not yet checked) and include
+this rule; the discovery owner checks once if its status is unknown.
 
 ## Delegate ownership, not duplicate work
 

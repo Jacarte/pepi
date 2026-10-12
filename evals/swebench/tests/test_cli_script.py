@@ -1,13 +1,20 @@
 """Tests for evals/pepi-eval.sh: subprocess-based core functionality."""
+import json
 import os
+import pty
+import select
+import signal
 import shlex
 import stat
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
 from evals.swebench.__main__ import build_parser
+from evals.swebench.tests.test_runner import prepare_fixture
+from evals.swebench.tests.test_profiles import repository, prepare
 
 # Stand-in for the swebench venv's python: records `-m` invocations, exits with $FAKE_STATUS.
 FAKE_PYTHON = """#!/bin/sh
@@ -38,15 +45,21 @@ class PepiEvalTest(unittest.TestCase):
         docker = fake / 'bin/docker'
         docker.write_text('#!/bin/sh\nexit 0\n')
         docker.chmod(docker.stat().st_mode | stat.S_IXUSR)
+        pi = fake / 'bin/pi'
+        pi.write_text('#!/bin/sh\necho 1.1.0\n')
+        pi.chmod(pi.stat().st_mode | stat.S_IXUSR)
         self.log = fake / 'calls.log'
+        self.home = fake / 'home'
+        self.home.mkdir()
     
     def tearDown(self):
         self.runs_tmpdir.cleanup()
         self.fake.cleanup()
     
-    def run_script(self, args, env_extra=None, stdin=None):
-        """Run the script against a fake venv/docker, so tests need neither."""
-        env = os.environ.copy()
+    def script_env(self, env_extra=None):
+        env = {k: v for k, v in os.environ.items() if not k.startswith("PEPI_EVAL_")
+               and not k.startswith("LITELLM_")}
+        env['HOME'] = str(self.home)
         env['PEPI_EVAL_RUNS_DIR'] = self.runs_tmpdir.name
         env['PEPI_EVAL_VENV'] = str(Path(self.fake.name) / 'venv')
         env['PATH'] = f"{Path(self.fake.name) / 'bin'}{os.pathsep}{env['PATH']}"
@@ -56,9 +69,13 @@ class PepiEvalTest(unittest.TestCase):
         if env_extra:
             env.update(env_extra)
         
+        return env
+
+    def run_script(self, args, env_extra=None, stdin=None):
+        """Run the script against a synthetic HOME and fake venv/docker."""
         result = subprocess.run(
             ['bash', str(self.script_path)] + args,
-            env=env,
+            env=self.script_env(env_extra),
             capture_output=True,
             text=True,
             input=stdin,
@@ -203,7 +220,8 @@ class PepiEvalTest(unittest.TestCase):
     
     def test_non_tty_run_without_litellm_base_url_exits_2_naming_var(self):
         """Non-TTY run without LITELLM_BASE_URL exits 2 and names the var."""
-        result = self.run_script(['run'], env_extra={}, stdin='')
+        run = prepare_fixture(Path(self.runs_tmpdir.name))
+        result = self.run_script(['run'], env_extra={'PEPI_EVAL_RUN_NAME': run.name}, stdin='')
         
         self.assertEqual(result.returncode, 2)
         self.assertIn('LITELLM_BASE_URL', result.stderr)
@@ -211,7 +229,8 @@ class PepiEvalTest(unittest.TestCase):
     
     def test_non_tty_run_with_base_url_without_api_key_exits_2(self):
         """Non-TTY run with LITELLM_BASE_URL but no key exits 2 naming LITELLM_API_KEY."""
-        env = {'LITELLM_BASE_URL': 'https://gateway.example'}
+        run = prepare_fixture(Path(self.runs_tmpdir.name))
+        env = {'LITELLM_BASE_URL': 'https://gateway.example', 'PEPI_EVAL_RUN_NAME': run.name}
         result = self.run_script(['run'], env_extra=env, stdin='')
         
         self.assertEqual(result.returncode, 2)
@@ -307,17 +326,15 @@ class PepiEvalTest(unittest.TestCase):
                     'PEPI_EVAL_RUN_NAME': f'status-{status}', 'FAKE_STATUS': status})
                 self.assertEqual(result.returncode, expected, result.stderr)
 
-    def test_prepare_exit_2_without_drop_mcp_suggests_the_flag(self):
+    def test_prepare_failure_does_not_suggest_disabling_mcp(self):
         result = self.run_script(['-y', 'prepare'], stdin='', env_extra={
             'PEPI_EVAL_RUN_NAME': 'mcp-tip', 'FAKE_STATUS': '2'})
-        self.assertIn('PEPI_EVAL_DROP_MCP=1', result.stderr)
+        self.assertNotIn('PEPI_EVAL_DROP_MCP=1', result.stderr)
 
     def test_paid_run_needs_confirmation_when_not_interactive(self):
-        run = Path(self.runs_tmpdir.name) / 'paid'
-        run.mkdir()
-        (run / 'manifest.json').write_text('{"tasks": []}')
+        run = prepare_fixture(Path(self.runs_tmpdir.name))
         env = {'LITELLM_API_KEY': 'sk-SECRET-KEY-12345', 'LITELLM_BASE_URL': 'https://x',
-               'PEPI_EVAL_RUN_NAME': 'paid'}
+               'PEPI_EVAL_RUN_NAME': run.name}
         result = self.run_script(['run'], env_extra=env, stdin='')
         self.assertEqual(result.returncode, 2, result.stderr)
         self.assertFalse(self.log.exists(), 'no paid run without confirmation')
@@ -327,8 +344,58 @@ class PepiEvalTest(unittest.TestCase):
         self.assertIn('evals.swebench run', call)
         self.assertNotIn('sk-SECRET-KEY-12345', call + confirmed.stdout + confirmed.stderr)
 
+    def test_named_codex_prepare_and_dry_run_require_no_litellm_pin_or_prompt(self):
+        result = self.run_script(['--dry-run', '-y', 'all'], stdin='', env_extra={
+            'PEPI_EVAL_PROFILE': 'codex', 'PEPI_EVAL_RUN_NAME': 'codex',
+            'PEPI_EVAL_LITELLM_VERSION': 'should-not-be-used'})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        parsed = {argv[0]: build_parser().parse_args(argv) for argv in self.printed_commands(result)}
+        self.assertEqual(parsed['prepare'].profile, 'codex')
+        self.assertIsNone(parsed['prepare'].litellm_version)
+        self.assertNotIn('LiteLLM', result.stderr)
+        self.assertNotIn('should-not-be-used', result.stdout)
+
+    def test_named_bedrock_prepare_requires_litellm_pin(self):
+        result = self.run_script(['--dry-run', '-y', 'prepare'], stdin='', env_extra={
+            'PEPI_EVAL_PROFILE': 'bedrock', 'PEPI_EVAL_RUN_NAME': 'bedrock',
+            'PEPI_EVAL_LITELLM_VERSION': '4.2.0'})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        args = build_parser().parse_args(self.printed_commands(result)[0])
+        self.assertEqual(args.profile, 'bedrock')
+        self.assertEqual(args.litellm_version, '4.2.0')
+
+    def test_run_uses_frozen_codex_even_when_host_selector_is_bedrock(self):
+        base = Path(self.runs_tmpdir.name)
+        root = repository(base)
+        prepare(root, base / 'codex-run', profile_name='codex')
+        result = self.run_script(['-y', 'run'], stdin='', env_extra={
+            'PEPI_EVAL_RUN_NAME': 'codex-run', 'PEPI_EVAL_PROFILE': 'bedrock'})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn('LITELLM', result.stderr)
+        self.assertIn('evals.swebench run', self.log.read_text())
+
+    def test_run_uses_frozen_litellm_even_when_host_selector_is_codex(self):
+        run = prepare_fixture(Path(self.runs_tmpdir.name))
+        result = self.run_script(['run'], stdin='', env_extra={
+            'PEPI_EVAL_RUN_NAME': run.name, 'PEPI_EVAL_PROFILE': 'codex'})
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('LITELLM_BASE_URL', result.stderr)
+        self.assertFalse(self.log.exists())
+
+    def test_tampered_run_rejected_before_secret_prompts(self):
+        run = prepare_fixture(Path(self.runs_tmpdir.name))
+        (run / 'build/provider-plan.json').write_text('{}')
+        result = self.run_script(['run'], stdin='', env_extra={'PEPI_EVAL_RUN_NAME': run.name})
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('Invalid frozen run', result.stderr)
+        self.assertNotIn('Missing required env var: LITELLM', result.stderr)
+        self.assertFalse(self.log.exists())
+
     def test_works_from_any_working_directory(self):
-        env = os.environ.copy()
+        env = {k: v for k, v in os.environ.items() if not k.startswith('PEPI_EVAL_')
+               and not k.startswith('LITELLM_')}
+        env['PATH'] = f"{Path(self.fake.name) / 'bin'}{os.pathsep}{env['PATH']}"
+        env['HOME'] = str(self.home)
         env.update({'PEPI_EVAL_RUNS_DIR': self.runs_tmpdir.name, 'PEPI_EVAL_RUN_NAME': 'cwd',
                     'PEPI_EVAL_VENV': str(Path(self.fake.name) / 'venv'), 'FAKE_LOG': str(self.log)})
         with tempfile.TemporaryDirectory() as elsewhere:
@@ -336,6 +403,237 @@ class PepiEvalTest(unittest.TestCase):
                            capture_output=True, text=True, input='', timeout=5, check=True)
         # PYTHONPATH makes `-m evals.swebench` resolvable; the fake python only logs it.
         self.assertIn('evals.swebench prepare', self.log.read_text())
+
+    def host_auth_fixture(self):
+        from evals.swebench.tests.test_profiles import oauth
+        base = Path(self.runs_tmpdir.name)
+        root = repository(base)
+        prepare(root, base / 'host-run', profile_name='codex')
+        auth = self.home / '.pi/agent/auth.json'
+        auth.parent.mkdir(parents=True)
+        data = oauth()
+        data['unrelated'] = {'type': 'api_key', 'key': 'SYNTHETIC-UNRELATED-TOKEN'}
+        auth.write_text(json.dumps(data))
+        auth.chmod(0o600)
+        (auth.parent / 'mcp.json').write_text('SYNTHETIC-MCP-NEVER-COPY')
+        inspector = Path(self.fake.name) / 'inspect.py'
+        inspector.write_text('''import json, os, pathlib, stat, sys, time
+args = sys.argv[1:]
+d = pathlib.Path(args[args.index('--secrets-dir') + 1])
+a = d / 'auth.json'
+pathlib.Path(os.environ['FAKE_CAPTURE']).write_text(json.dumps({
+    'directory': str(d), 'dir_mode': stat.S_IMODE(d.stat().st_mode),
+    'mode': stat.S_IMODE(a.stat().st_mode), 'files': sorted(p.name for p in d.iterdir()),
+    'auth': json.loads(a.read_bytes()), 'args': args, 'pid': os.getpid()}))
+if os.environ.get('FAKE_SLEEP') == '1':
+    time.sleep(60)
+sys.exit(int(os.environ.get('FAKE_STATUS', '0')))
+''')
+        python = Path(self.fake.name) / 'venv/bin/python'
+        python.write_text('''#!/bin/sh
+[ "$1" = "-m" ] || exit 0
+printf '%s\\n' "$*" >> "$FAKE_LOG"
+exec python3 "$FAKE_INSPECTOR" "$@"
+''')
+        capture = Path(self.fake.name) / 'capture.json'
+        env = {'PEPI_EVAL_RUN_NAME': 'host-run', 'FAKE_INSPECTOR': str(inspector),
+               'FAKE_CAPTURE': str(capture)}
+        return auth, capture, env
+
+    def test_explicit_host_auth_filtered_private_unchanged_and_cleaned(self):
+        auth, capture, env = self.host_auth_fixture()
+        original = (auth.read_bytes(), auth.stat().st_mode, auth.stat().st_mtime_ns)
+        for status in ('0', '2', '3', '130'):
+            with self.subTest(status=status):
+                result = self.run_script(['-y', 'run'], {**env, 'PEPI_EVAL_USE_HOST_AUTH': '1',
+                                                          'FAKE_STATUS': status})
+                self.assertEqual(result.returncode, int(status), result.stderr)
+                data = json.loads(capture.read_text())
+                self.assertEqual(set(data['auth']), {'openai-codex'})
+                self.assertEqual(data['files'], ['auth.json'])
+                self.assertEqual((data['dir_mode'], data['mode']), (0o700, 0o600))
+                self.assertFalse(Path(data['directory']).exists())
+                self.assertIn('invalidate', result.stderr)
+                self.assertNotIn('$20', result.stderr)
+                for token in ('SYNTHETIC-access', 'SYNTHETIC-refresh', 'SYNTHETIC-UNRELATED'):
+                    self.assertNotIn(token, result.stdout + result.stderr + self.log.read_text())
+                self.assertEqual(original, (auth.read_bytes(), auth.stat().st_mode, auth.stat().st_mtime_ns))
+
+    def test_yes_and_non_tty_unset_never_consent_and_zero_disables(self):
+        auth, capture, env = self.host_auth_fixture()
+        # A FIFO would hang if opened: absence of consent must mean no read, not just no copy.
+        auth.unlink()
+        os.mkfifo(auth, 0o600)
+        for extra in ({}, {'PEPI_EVAL_USE_HOST_AUTH': '0'}, {'PEPI_EVAL_YES': '1'}):
+            result = self.run_script(['-y', 'run'], {**env, **extra})
+            self.assertFalse(capture.exists())
+            self.assertNotIn('Use ' + str(auth), result.stderr)
+
+    def test_explicit_secrets_dir_wins_without_host_proposal(self):
+        auth, capture, env = self.host_auth_fixture()
+        auth.unlink()
+        secrets = Path(self.fake.name) / 'provided'
+        secrets.mkdir(mode=0o700)
+        (secrets / 'auth.json').write_text('{}')
+        # Use the ordinary mock: only the user directory is forwarded.
+        (Path(self.fake.name) / 'venv/bin/python').write_text(FAKE_PYTHON)
+        result = self.run_script(['-y', 'run'], {**env, 'PEPI_EVAL_USE_HOST_AUTH': '1',
+                                                'PEPI_EVAL_SECRETS_DIR': str(secrets)})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn('host login', result.stderr)
+        self.assertNotIn('Allow temporary', result.stderr)
+        self.assertIn(str(secrets), self.log.read_text())
+        self.assertTrue(secrets.exists())
+        self.assertFalse(capture.exists())
+
+    def test_host_auth_dry_run_has_no_read_or_credential_directory(self):
+        auth, capture, env = self.host_auth_fixture()
+        auth.unlink()
+        os.mkfifo(auth, 0o600)
+        before = set(Path('/tmp').glob('pepi-eval-auth-*'))
+        result = self.run_script(['--dry-run', '-y', 'run'], {**env, 'PEPI_EVAL_USE_HOST_AUTH': '1'})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('no credentials read or directory created', result.stderr)
+        self.assertFalse(capture.exists())
+        self.assertEqual(before, set(Path('/tmp').glob('pepi-eval-auth-*')))
+
+    def test_host_auth_bad_options_and_sources_fail_closed(self):
+        auth, capture, env = self.host_auth_fixture()
+        for option in ('', 'yes', '2', '01'):
+            result = self.run_script(['-y', 'run'], {**env, 'PEPI_EVAL_USE_HOST_AUTH': option})
+            self.assertEqual(result.returncode, 2)
+            self.assertIn('must be 0 or 1', result.stderr)
+        for content in ('SYNTHETIC-SECRET-invalid', '[]', '{}',
+                        '{"openai-codex":{"type":"api_key","key":"SYNTHETIC-SECRET"}}'):
+            auth.write_text(content)
+            result = self.run_script(['-y', 'run'], {**env, 'PEPI_EVAL_USE_HOST_AUTH': '1'})
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertNotIn('SYNTHETIC-SECRET', result.stdout + result.stderr)
+            self.assertFalse(capture.exists())
+        auth.unlink()
+        for kind in ('missing', 'symlink', 'public', 'directory', 'fifo'):
+            with self.subTest(kind=kind):
+                if kind == 'symlink':
+                    target = auth.parent / 'target'
+                    target.write_text('{}'); target.chmod(0o600)
+                    auth.symlink_to(target)
+                elif kind == 'public':
+                    auth.write_text('{}'); auth.chmod(0o644)
+                elif kind == 'directory':
+                    auth.mkdir()
+                elif kind == 'fifo':
+                    os.mkfifo(auth, 0o600)
+                before = set(Path('/tmp').glob('pepi-eval-auth-*'))
+                result = self.run_script(['-y', 'run'], {**env, 'PEPI_EVAL_USE_HOST_AUTH': '1'})
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertFalse(capture.exists())
+                self.assertEqual(before, set(Path('/tmp').glob('pepi-eval-auth-*')))
+                if auth.is_dir(): auth.rmdir()
+                elif kind != 'missing': auth.unlink()
+
+    def tty_host_auth(self, env, answer):
+        master, slave = pty.openpty()
+        process = subprocess.Popen(['bash', str(self.script_path), '-y', 'run'],
+                                   stdin=slave, stdout=slave, stderr=slave, env=self.script_env(env))
+        os.close(slave)
+        output = b''
+        try:
+            deadline = time.monotonic() + 8
+            answered = False
+            while time.monotonic() < deadline:
+                if select.select([master], [], [], 0.1)[0]:
+                    try: chunk = os.read(master, 65536)
+                    except OSError: break
+                    if not chunk: break
+                    output += chunk
+                    if b'Allow temporary host-auth copy?' in output and not answered:
+                        self.assertFalse(Path(env['FAKE_CAPTURE']).exists(), 'no copy before consent')
+                        os.write(master, answer.encode() + b'\n')
+                        answered = True
+                if process.poll() is not None: break
+            process.wait(timeout=3)
+            return process.returncode, output.decode()
+        finally:
+            if process.poll() is None:
+                process.terminate(); process.wait(timeout=3)
+            os.close(master)
+
+    def test_tty_affirmative_and_default_decline_with_yes(self):
+        auth, capture, env = self.host_auth_fixture()
+        status, output = self.tty_host_auth(env, 'yes')
+        self.assertEqual(status, 0, output)
+        self.assertTrue(capture.exists())
+        self.assertFalse(Path(json.loads(capture.read_text())['directory']).exists())
+        capture.unlink()
+        auth.unlink(); os.mkfifo(auth, 0o600)
+        for answer in ('', 'n'):
+            status, output = self.tty_host_auth(env, answer)
+            self.assertFalse(capture.exists())
+            self.assertIn('[y/N]', output)
+
+    def test_declined_host_auth_preserves_litellm_env_flow(self):
+        run = prepare_fixture(Path(self.runs_tmpdir.name))
+        result = self.run_script(['-y', 'run'], {
+            'PEPI_EVAL_RUN_NAME': run.name, 'PEPI_EVAL_USE_HOST_AUTH': '0',
+            'LITELLM_BASE_URL': 'https://gateway.example', 'LITELLM_API_KEY': 'SYNTHETIC-TOKEN'})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn('--secrets-dir', self.log.read_text())
+
+    def test_host_opt_in_still_requires_usage_confirmation_before_read(self):
+        auth, capture, env = self.host_auth_fixture()
+        auth.unlink(); os.mkfifo(auth, 0o600)
+        result = self.run_script(['run'], {**env, 'PEPI_EVAL_USE_HOST_AUTH': '1'})
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('not confirmed', result.stderr)
+        self.assertFalse(capture.exists())
+        self.assertFalse(self.log.exists())
+
+    def test_litellm_host_auth_opt_in_skips_env_prompts(self):
+        run = prepare_fixture(Path(self.runs_tmpdir.name))
+        auth = self.home / '.pi/agent/auth.json'
+        auth.parent.mkdir(parents=True)
+        auth.write_text(json.dumps({'litellm': {'type': 'api_key', 'key': 'SYNTHETIC-LITELLM',
+                                              'env': {'LITELLM_BASE_URL': 'https://gateway.example'}}}))
+        auth.chmod(0o600)
+        result = self.run_script(['-y', 'run'], {'PEPI_EVAL_RUN_NAME': run.name,
+                                                'PEPI_EVAL_USE_HOST_AUTH': '1'})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn('Missing required', result.stderr)
+        call = self.log.read_text()
+        directory = Path(shlex.split(call)[-1])
+        self.assertFalse(directory.exists())
+        self.assertNotIn('SYNTHETIC-LITELLM', call + result.stdout + result.stderr)
+
+    def test_host_auth_cleanup_on_sigint_and_sigterm_reaps_child(self):
+        auth, capture, env = self.host_auth_fixture()
+        original = (auth.read_bytes(), auth.stat().st_mode, auth.stat().st_mtime_ns)
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            with self.subTest(signal=signum):
+                capture.unlink(missing_ok=True)
+                process = subprocess.Popen(['bash', str(self.script_path), '-y', 'run'],
+                    env=self.script_env({**env, 'PEPI_EVAL_USE_HOST_AUTH': '1', 'FAKE_SLEEP': '1'}),
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                child_pid = None
+                try:
+                    deadline = time.monotonic() + 5
+                    while not capture.exists() and time.monotonic() < deadline:
+                        time.sleep(0.02)
+                    self.assertTrue(capture.exists())
+                    data = json.loads(capture.read_text())
+                    child_pid = data['pid']
+                    process.send_signal(signum)
+                    stdout, stderr = process.communicate(timeout=5)
+                    self.assertEqual(process.returncode, 130, stderr)
+                    self.assertFalse(Path(data['directory']).exists())
+                    with self.assertRaises(ProcessLookupError): os.kill(child_pid, 0)
+                    self.assertNotIn('SYNTHETIC-access', stdout + stderr)
+                    self.assertEqual(original, (auth.read_bytes(), auth.stat().st_mode, auth.stat().st_mtime_ns))
+                finally:
+                    if process.poll() is None:
+                        process.terminate(); process.communicate(timeout=5)
+                    if child_pid:
+                        try: os.kill(child_pid, signal.SIGKILL)
+                        except ProcessLookupError: pass
 
 
 if __name__ == '__main__':

@@ -84,6 +84,8 @@ function pickTarget(s: Scores): Target {
 
 
 export default function(pi: ExtensionAPI) {
+  // Detached subagents keep their launch model; only the parent is auto-routed.
+  if (process.env.PI_SUBAGENT_CHILD === "1") return;
   pi.on("input", async (event, ctx) => {
     if (!ctx.isIdle()) return { action: "continue" };
 

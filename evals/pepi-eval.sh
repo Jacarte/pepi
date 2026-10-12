@@ -1,6 +1,6 @@
 #!/bin/bash
 # Interactive CLI for SWE-bench evaluation workflow
-# Secrets (required for 'run' step):
+# Secrets (only for runs requiring LiteLLM; builtin providers use runtime auth.json):
 #   LITELLM_BASE_URL: LiteLLM gateway URL
 #   LITELLM_API_KEY: Dedicated, budget-capped API key
 # Optional PEPI_EVAL_* env vars override defaults; see --help.
@@ -229,6 +229,11 @@ run_cmd() {
     "$@"
 }
 
+# Inspect only allowed settings; never activate a host profile or open credentials.
+selected_providers() {
+    python3 -c 'import sys; from pathlib import Path; from evals.swebench.common import read_json; from evals.swebench.profile import config_source, isolated_settings; source=config_source(Path(sys.argv[1]), Path(sys.argv[2]) if sys.argv[2] else None, sys.argv[3] or None); print("\n".join(isolated_settings(read_json(source("settings.json")), None)[1]["required_providers"]))' "$script_dir" "${PEPI_EVAL_CONFIG_DIR:-}" "${PEPI_EVAL_PROFILE:-}"
+}
+
 # Commands
 
 cmd_check() {
@@ -280,13 +285,16 @@ cmd_prepare() {
     local ids_file pi_version litellm_version subagents_version node_image task_repo
     ids_file=$(prepare_ids_file) || return 2
     pi_version=$(ask PI_VERSION "Pi version" "$(get_pi_version)") || return 2
-    litellm_version=$(ask LITELLM_VERSION "LiteLLM version" "$(get_litellm_version)") || return 2
+    prepared_providers=$(selected_providers) || die "Invalid selected eval profile" 2
+    if [[ "$prepared_providers" == *"litellm"* ]]; then
+        litellm_version=$(ask LITELLM_VERSION "LiteLLM version" "$(get_litellm_version)") || return 2
+    fi
     subagents_version=$(ask SUBAGENTS_VERSION "Subagents version" "$(get_subagents_version)") || return 2
     node_image=$(ask NODE_IMAGE "Node image" "node:22-bookworm-slim") || return 2
     task_repo=$(ask TASK_REPO "Task repo path" "${PEPI_EVAL_TASK_REPO:-$HOME/swe-bench-tasks}") || return 2
     
     local drop_mcp
-    drop_mcp=$(ask DROP_MCP "Drop MCP from the profile? 1=yes 0=no (required if the config declares MCP)" "0") || return 2
+    drop_mcp=$(ask DROP_MCP "Disable native MCP? 1=yes 0=no" "0") || return 2
     [[ "$drop_mcp" == "0" || "$drop_mcp" == "1" ]] || die "PEPI_EVAL_DROP_MCP must be 0 or 1" 2
     
     # `prepare` creates the run directory itself and refuses an existing one.
@@ -297,11 +305,12 @@ cmd_prepare() {
         --ids "$ids_file"
         --out "$run_dir"
         --pi-version "$pi_version"
-        --litellm-version "$litellm_version"
         --subagents-version "$subagents_version"
         --node-image "$node_image"
     )
     
+    [[ -n "$litellm_version" ]] && prepare_cmd+=(--litellm-version "$litellm_version")
+    [[ -n "${PEPI_EVAL_PROFILE:-}" ]] && prepare_cmd+=(--profile "$PEPI_EVAL_PROFILE")
     # Injected, non-secret config; missing files fall back to the repository copies.
     if [[ -n "${PEPI_EVAL_CONFIG_DIR:-}" ]]; then
         reject_secrets_in_config_dir "$PEPI_EVAL_CONFIG_DIR"
@@ -318,8 +327,6 @@ cmd_prepare() {
     # The IDs file is ours (and removed) unless the user passed an existing file.
     [[ -f "${PEPI_EVAL_IDS:-sympy__sympy-20590}" ]] || rm -f "$ids_file"
     if [[ $prepare_status -ne 0 ]]; then
-        [[ $prepare_status -eq 2 && "$drop_mcp" != "1" ]] &&
-            tip "if the error says the config declares MCP, set PEPI_EVAL_DROP_MCP=1 to remove MCP from the frozen profile"
         fail_step prepare "$prepare_status"
     fi
     
@@ -387,23 +394,6 @@ cmd_run() {
     
     setup_venv
     
-    # Resolve secrets FIRST (before asking for run name)
-    local base_url
-    if [[ -n "${LITELLM_BASE_URL:-}" ]]; then
-        base_url="$LITELLM_BASE_URL"
-    elif is_tty; then
-        printf 'pepi-eval: tip: export LITELLM_BASE_URL to skip this step\n' >&2
-        printf '%s' "LiteLLM base URL (e.g. https://...): " >&2
-        if ! read base_url; then
-            die "Failed to read LITELLM_BASE_URL" 2
-        fi
-    else
-        die "Missing required env var: LITELLM_BASE_URL" 2
-    fi
-    [[ -n "$base_url" ]] || die "LITELLM_BASE_URL cannot be empty" 2
-    
-    ask_secret LITELLM_API_KEY "LiteLLM API key (dedicated, budget-capped)" || return 2
-    
     # Now resolve run name; in dry-run use timestamp default, in real mode require existing
     local run_name
     if [[ -n "${PEPI_EVAL_RUN_NAME:-}" ]]; then
@@ -438,6 +428,58 @@ cmd_run() {
         fi
     fi
     
+    # Resolve the hash-verified frozen contract BEFORE credential prompts.
+    local providers
+    if [[ -f "$run_dir/manifest.json" ]]; then
+        providers=$(python3 -c 'import sys; from pathlib import Path; from evals.swebench.runner import frozen_provider_plan; print("\n".join(frozen_provider_plan(Path(sys.argv[1]))["required_providers"]))' "$run_dir") || die "Invalid frozen run profile" 2
+    elif [[ "${DRY_RUN:-}" == "1" ]]; then
+        providers="${prepared_providers:-$(selected_providers)}" || return 2
+    else
+        die "Run manifest not found: $run_dir" 2
+    fi
+    # Host auth consent is separate from defaults/paid-run consent, including with -y.
+    local use_host_auth=0
+    if [[ -n "${PEPI_EVAL_USE_HOST_AUTH+x}" && "${PEPI_EVAL_USE_HOST_AUTH}" != "0" && "${PEPI_EVAL_USE_HOST_AUTH}" != "1" ]]; then
+        die "PEPI_EVAL_USE_HOST_AUTH must be 0 or 1" 2
+    fi
+    if [[ -z "${PEPI_EVAL_SECRETS_DIR:-}" ]]; then
+        if [[ "${PEPI_EVAL_USE_HOST_AUTH:-}" == "1" ]] || { [[ -z "${PEPI_EVAL_USE_HOST_AUTH+x}" ]] && is_tty; }; then
+            warn "Use $HOME/.pi/agent/auth.json for this run? Only frozen required providers will be copied to a private temporary directory, then deleted."
+            warn "OAuth refresh can invalidate your shared host login even though the host file stays unchanged. Dedicated eval credentials are safer."
+            if [[ "${PEPI_EVAL_USE_HOST_AUTH:-}" == "1" ]]; then
+                use_host_auth=1
+            else
+                local host_reply
+                printf '%s' 'Allow temporary host-auth copy? [y/N]: ' >&2
+                read -r host_reply || host_reply=""
+                [[ "$host_reply" =~ ^([Yy]|[Yy][Ee][Ss])$ ]] && use_host_auth=1
+            fi
+        fi
+    fi
+    if [[ "$use_host_auth" == "1" && "${DRY_RUN:-}" == "1" ]]; then
+        printf 'pepi-eval: dry-run: would validate and temporarily copy only frozen required auth from %s; no credentials read or directory created\n' "$HOME/.pi/agent/auth.json" >&2
+    fi
+    if [[ "$use_host_auth" != "1" && "$providers" == *"litellm"* && ! -f "${PEPI_EVAL_SECRETS_DIR:-/nonexistent}/auth.json" ]]; then
+        local base_url
+        if [[ -n "${LITELLM_BASE_URL:-}" ]]; then
+            base_url="$LITELLM_BASE_URL"
+        elif is_tty; then
+            printf 'pepi-eval: tip: export LITELLM_BASE_URL to skip this step\n' >&2
+            printf '%s' "LiteLLM base URL (e.g. https://...): " >&2
+            if ! read base_url; then
+                die "Failed to read LITELLM_BASE_URL" 2
+            fi
+        else
+            die "Missing required env var: LITELLM_BASE_URL" 2
+        fi
+        [[ -n "$base_url" ]] || die "LITELLM_BASE_URL cannot be empty" 2
+
+        ask_secret LITELLM_API_KEY "LiteLLM API key (dedicated, budget-capped)" || return 2
+
+        export LITELLM_BASE_URL="$base_url"
+        export LITELLM_API_KEY
+    fi
+
     # Optional run parameters
     local network timeout_s cpus memory
     network=$(ask NETWORK "Docker network" "pepi-eval") || return 2
@@ -450,14 +492,11 @@ cmd_run() {
         
         local task_count
         task_count=$(python3 -c "import json; m=json.load(open('$run_dir/manifest.json')); print(len(m['tasks']))" 2>/dev/null || echo "?")
-        warn "⚠ Paid step: $task_count task(s) × ~\$20–50 each; timeout $timeout_s s"
+        warn "⚠ Provider/account usage step: $task_count task(s); may incur charges or consume account quota; timeout $timeout_s s"
         
         ask_yes "Proceed with paid Pi run?" ||
             die "Paid run not confirmed (pass -y or set PEPI_EVAL_YES=1 to confirm non-interactively)" 2
     fi
-    
-    export LITELLM_BASE_URL="$base_url"
-    export LITELLM_API_KEY
     
     local run_cmd=(
         "$PEPI_PYTHON" -m evals.swebench run
@@ -469,13 +508,25 @@ cmd_run() {
     )
     
     # auth.json (chmod 600) is injected into a tmpfs by the runner, never via --config-dir.
-    # LITELLM_BASE_URL and LITELLM_API_KEY are still required in the environment.
+    # Builtin providers use auth.json; only frozen LiteLLM dependencies prompt for env credentials.
     if [[ -n "${PEPI_EVAL_SECRETS_DIR:-}" ]]; then
         [[ -d "$PEPI_EVAL_SECRETS_DIR" ]] || die "Secrets directory not found: $PEPI_EVAL_SECRETS_DIR" 2
         run_cmd+=(--secrets-dir "$PEPI_EVAL_SECRETS_DIR")
     fi
     
-    run_cmd "${run_cmd[@]}" || fail_step run $?
+    if [[ "$use_host_auth" == "1" && "${DRY_RUN:-}" != "1" ]]; then
+        # Adapter owns the private temp directory and cleanup; tokens never enter argv/env.
+        local host_auth_pid="" host_auth_status=0
+        # Bash otherwise defers traps while waiting for a foreground child. Forward and
+        # reap the adapter so it can stop the runner and remove its credentials first.
+        trap 'kill -TERM "${host_auth_pid:-$!}" 2>/dev/null; wait "${host_auth_pid:-$!}" 2>/dev/null; exit 130' INT TERM
+        python3 -m evals.swebench.host_auth "$run_dir" -- "${run_cmd[@]}" & host_auth_pid=$!
+        wait "$host_auth_pid" || host_auth_status=$?
+        trap - INT TERM
+        [[ $host_auth_status -eq 0 ]] || fail_step run "$host_auth_status"
+    else
+        run_cmd "${run_cmd[@]}" || fail_step run $?
+    fi
     
     [[ "${DRY_RUN:-}" != "1" ]] && warn "Run complete: $run_dir/predictions.jsonl"
     next_step
@@ -654,11 +705,11 @@ Commands:
   help       Show this help
 
 Options:
-  -y, --yes           Accept all defaults without prompting
+  -y, --yes           Accept defaults and provider usage (NOT host-auth consent)
   --dry-run           Print commands (shell-quoted, key masked) without running
   -h, --help          Show this help
 
-Secrets (required for 'run', never echoed):
+Secrets (only for frozen LiteLLM providers; builtins use SECRETS_DIR auth.json):
   LITELLM_BASE_URL      LiteLLM gateway URL
   LITELLM_API_KEY       Dedicated, budget-capped API key
 
@@ -669,24 +720,29 @@ Optional PEPI_EVAL_* env vars:
   IDS                   Task IDs: comma-sep or file (default sympy__sympy-20590)
   RUN_NAME              Run directory name (default smoke-YYYYMMDD-HHMM)
   PI_VERSION            Pi version (auto-detected)
-  LITELLM_VERSION       LiteLLM provider version (auto-detected)
+  LITELLM_VERSION       LiteLLM provider version (auto-detected only if required)
   SUBAGENTS_VERSION     Subagents version (auto-detected)
   NODE_IMAGE            Node base image (default node:22-bookworm-slim)
+  PROFILE               Named profiles/NAME selection (bedrock or codex, for example)
   CONFIG_DIR            Injected config directory (never auth.json/mcp.json/.env)
   CONFIG_LABEL          Config label for manifest
-  DROP_MCP              1 removes MCP from the profile (needed if the config declares it)
+  DROP_MCP              1 disables native MCP (default: 0, enabled; Pi >= 1.1.0)
   PLATFORM              Docker build platform (default linux/amd64)
   NETWORK               Docker network (default pepi-eval)
   TIMEOUT_SECONDS       Pi timeout (default 1200)
   CPUS                  CPU count (default 4)
   MEMORY                Memory (default 8g)
-  SECRETS_DIR           Directory with a chmod-600 auth.json, injected by 'run' (--secrets-dir)
+  SECRETS_DIR           chmod-700 directory with chmod-600 auth.json/mcp.json (runtime only)
+  USE_HOST_AUTH         1 explicitly consents to temporary ~/.pi/agent/auth.json copy;
+                        0 disables proposal; unset asks on TTY only (default No).
+                        SECRETS_DIR wins. OAuth refresh may invalidate shared host login.
+                        Dry-run never reads/copies host auth or creates a credential dir.
   WORKERS               Grade workers (default 1)
   TEST_TIMEOUT_SECONDS  Grading timeout (default 1800)
   BASELINE_RUN          Baseline for compare
   CANDIDATE_RUN         Candidate for compare
   RUNS_DIR              Override runs directory (default evals/swebench/runs)
-  YES                   Set to 1 to auto-accept (same as --yes)
+  YES                   Set to 1 to auto-accept defaults/usage, NOT host-auth copy
 
 Exit codes (same as python -m evals.swebench):
   0 ok, 2 usage/configuration error, 3 step or infrastructure failure, 130 interrupted

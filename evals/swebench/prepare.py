@@ -1,15 +1,17 @@
-"""Freeze selected tasks and a local-only Pepi profile, without model calls."""
+"""Freeze selected tasks and an isolated Pepi profile, without model calls."""
 from __future__ import annotations
 
-import copy
 import hashlib
 import re
 import shutil
 from pathlib import Path
 
 from .common import (DATASET, fingerprint, git_dirty, git_revision, identifier, read_json,
-                     redact_url_userinfo, reject_secret_files, runtime_record, sha256_file,
+                     redact_url_userinfo, runtime_record, sha256_file,
                      version, write_json)
+
+from .mcp import freeze_mcp
+from .profile import config_source, isolated_settings, safe_models
 
 HERE = Path(__file__).parent
 
@@ -44,56 +46,46 @@ def sanitize_tasks(tasks: list[dict], ids: list[str], dataset: str = DATASET) ->
 
 
 KEPT_SETTINGS = ("defaultModel", "defaultProvider", "defaultThinkingLevel", "subagents")
-CONFIG_FILES = ("settings.json", "AGENTS.md", "workflows", "extensions/subagent/config.json")
-
-
-def declares_mcp(settings: dict) -> bool:
-    packages = settings.get("packages", [])
-    packages = [str(package).lower() for package in packages] if isinstance(packages, list) else []
-    litellm = settings.get("litellm")
-    litellm_mcp = litellm.get("mcp") if isinstance(litellm, dict) else None
-    return (any(re.search(r"(?<![a-z0-9])mcp(?![a-z0-9])", package) for package in packages)
-            or any(str(key).lower().startswith("mcp") for key in settings)
-            or (isinstance(litellm_mcp, dict) and bool(litellm_mcp.get("enabled"))))
+CONFIG_FILES = ("settings.json", "models.json", "AGENTS.md", "workflows", "extensions/subagent/config.json",
+                "mcp-packages.json", "mcp-package-lock.json")
 
 
 def make_profile(root: Path, build: Path, versions: dict, config_dir: Path | None = None,
-                 drop_mcp: bool = False) -> dict:
+                 drop_mcp: bool = False, profile_name: str | None = None) -> dict:
     """Write the frozen profile; return non-secret provenance for the manifest.
 
-    Each config file comes from `config_dir` when present there, else from `root`.
+    Files use injected > named profile > repo precedence; named models never use repo fallback.
     Secret files (auth.json, mcp.json, .env) are never read: pass them to `run`.
     """
-    if config_dir is not None:
-        reject_secret_files(config_dir)
-    def source(name: str) -> Path:
-        if config_dir is not None and (config_dir / name).exists():
-            return config_dir / name
-        return root / name
+    source = config_source(root, config_dir, profile_name)
     settings = read_json(source("settings.json"))
-    dropped = {"mcp": declares_mcp(settings),
+    profile, plan = isolated_settings(settings, versions)
+    mcp_policy, mcp_files = freeze_mcp(source, build, versions["pi"], drop_mcp)
+    dropped = {"mcp": drop_mcp,
                "packages": [redact_url_userinfo(str(package)) for package in
                             (settings.get("packages") if isinstance(settings.get("packages"), list) else [])],
                "settings_keys": sorted(key for key in settings if key not in KEPT_SETTINGS),
                "agent_skill_overrides": []}
-    if dropped["mcp"] and not drop_mcp:
-        raise ValueError("The configuration declares MCP, which this runtime does not support "
-                         "(stdio servers need npm/network access). Pass --drop-mcp to run without it.")
     # Copy model/role choices, not personal servers, memory, auth or package caches.
-    profile = {key: copy.deepcopy(settings[key]) for key in KEPT_SETTINGS if key in settings}
-    if profile.get("defaultProvider") != "litellm":
-        raise ValueError("This first runtime supports Pepi's LiteLLM provider only")
-    for name, override in profile.get("subagents", {}).get("agentOverrides", {}).items():
-        if override.pop("skills", None) is not None:  # Personal skills are not in the snapshot.
+    for name, override in settings.get("subagents", {}).get("agentOverrides", {}).items():
+        if "skills" in override:
             dropped["agent_skill_overrides"].append(name)
-    profile["packages"] = [f"npm:{name}@{version(versions[name])}" for name in
-                           ("pi-provider-litellm", "pi-subagents")]
-    profile["litellm"] = {"skills": {"enabled": False}, "mcp": {"enabled": False}}
+    if drop_mcp:
+        profile["extensions"] = ["-builtin:mcp"]
     destination = build / "profile"
     destination.mkdir(parents=True)
     write_json(destination / "settings.json", profile)
-    files = {"settings.json": sha256_file(source("settings.json"))}
-    used_injected = source("settings.json").parent == config_dir
+    write_json(build / "provider-plan.json", plan)
+    models = source("models.json")
+    if models.is_file():
+        write_json(destination / "models.json", safe_models(models))
+    files = {"settings.json": sha256_file(source("settings.json")), **mcp_files}
+    if models.is_file():
+        files["models.json"] = sha256_file(models)
+    used_injected = (
+        models.is_file() and config_dir is not None and models.is_relative_to(config_dir)
+        or source("settings.json").parent == config_dir
+        or bool(mcp_files) and source("mcp-packages.json").parent == config_dir)
     agents = source("AGENTS.md")
     shutil.copyfile(agents, destination / "AGENTS.md")
     files["AGENTS.md"] = sha256_file(agents)
@@ -114,18 +106,22 @@ def make_profile(root: Path, build: Path, versions: dict, config_dir: Path | Non
     extension.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(HERE / "eval-telemetry.ts", extension)
     shutil.copyfile(HERE / "Dockerfile", build / "Dockerfile")
+    shutil.copyfile(HERE / "auth-audit.cjs", build / "auth-audit.cjs")
+    shutil.copyfile(HERE / "install-mcp.mjs", build / "install-mcp.mjs")
     shutil.copyfile(HERE / "instructions.md", build / "instructions.md")
-    return {"source": "injected" if used_injected else "repo", "files": files,
-            "dropped_features": dropped}
+    return {"source": "injected" if used_injected else "profile" if profile_name else "repo",
+            "profile": profile_name, "files": files,
+            "dropped_features": dropped, "mcp": mcp_policy}
 
 
 def prepare_run(root: Path, run: Path, tasks: list[dict], ids: list[str], versions: dict,
                 node_image: str, dataset: str = DATASET, task_revision: str | None = None,
                 config_dir: Path | None = None, config_label: str | None = None,
-                drop_mcp: bool = False) -> dict:
+                drop_mcp: bool = False, profile_name: str | None = None) -> dict:
     rows = sanitize_tasks(tasks, ids, dataset)
     for value in versions.values():
-        version(value)
+        if value is not None:
+            version(value)
     if not node_image.strip() or node_image.startswith("-"):
         raise ValueError("A Node runtime image is required")
     if config_label is not None:
@@ -133,7 +129,8 @@ def prepare_run(root: Path, run: Path, tasks: list[dict], ids: list[str], versio
     identifier(run.name)
     run.mkdir(parents=True, exist_ok=False)
     try:
-        config = make_profile(root, run / "build", versions, config_dir, drop_mcp)
+        config = make_profile(root, run / "build", versions, config_dir, drop_mcp, profile_name)
+        versions = read_json(run / "build/provider-plan.json")["versions"]
         config["label"] = config_label
         write_json(run / "build/runtime.json", runtime_record(versions, node_image, rows))
         digest = fingerprint(run / "build")
@@ -144,8 +141,9 @@ def prepare_run(root: Path, run: Path, tasks: list[dict], ids: list[str], versio
             "pepi_revision": git_revision(HERE), "pepi_dirty": git_dirty(HERE),
             "task_repo_revision": task_revision, "profile_sha256": digest,
             "versions": versions, "node_image": node_image, "tasks": rows,
-            "profile_policy": "local-only; keeps model/role config, AGENTS.md and workflows; "
-                              "drops MCP, gateway and personal skills, memory and router packages",
+            "profile_policy": "isolated; keeps model/role config, AGENTS.md and workflows; "
+                              + ("native MCP disabled; " if drop_mcp else "native MCP enabled; ")
+                              + "drops gateway tools, personal skills, memory and router packages",
         }
         write_json(run / "manifest.json", manifest)
         return manifest

@@ -5,6 +5,7 @@ Exit codes: 0 all attempts ran (agent failures/timeouts are benchmark outcomes),
 130 interrupted (Ctrl-C or SIGTERM).
 """
 import argparse
+import os
 import signal
 import subprocess
 import sys
@@ -21,31 +22,35 @@ from .runner import EXIT_INFRA, EXIT_USAGE, build_images, run_tasks  # noqa: E40
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     commands = parser.add_subparsers(dest="command", required=True)
-    prepare = commands.add_parser("prepare", help="freeze a task selection and local-only profile")
+    prepare = commands.add_parser("prepare", help="freeze a task selection and isolated profile")
     prepare.add_argument("--pepi-root", type=Path, default=Path(__file__).resolve().parents[2],
                          help="checkout providing default config files")
     prepare.add_argument("--config-dir", type=Path,
-                         help="injected config (settings.json, AGENTS.md, workflows/, "
-                              "extensions/subagent/config.json); missing files fall back to --pepi-root. "
+                         help="injected config (settings.json, models.json, AGENTS.md, workflows/, "
+                              "extensions/subagent/config.json, mcp-packages.json + mcp-package-lock.json); "
+                              "precedence: injected > named profile > --pepi-root (named models never use root fallback). "
                               "Must not contain auth.json/mcp.json: use `run --secrets-dir`")
+    prepare.add_argument("--profile", default=os.environ.get("PEPI_EVAL_PROFILE"),
+                         help="named profiles/NAME selection, without activating it")
     prepare.add_argument("--config-label", help="name recorded in the manifest and predictions")
     prepare.add_argument("--drop-mcp", action="store_true",
-                         help="allow a config that declares MCP; MCP is removed from the profile")
+                         help="disable native MCP explicitly (enabled by default with Pi >= 1.1.0)")
     prepare.add_argument("--task-repo", type=Path, required=True)
     prepare.add_argument("--ids", type=Path, required=True)
     prepare.add_argument("--out", type=Path, required=True)
     prepare.add_argument("--dataset", default=DATASET)
     prepare.add_argument("--pi-version", required=True)
-    prepare.add_argument("--litellm-version", required=True)
+    prepare.add_argument("--litellm-version", help="exact pin required only for LiteLLM models")
     prepare.add_argument("--subagents-version", required=True)
     prepare.add_argument("--node-image", required=True, help="prefer a digest-pinned Node 22 Debian image")
     build = commands.add_parser("build", help="build Pi on top of each task image")
     build.add_argument("run", type=Path)
     build.add_argument("--platform", default="linux/amd64")
-    run = commands.add_parser("run", help="run Pi; this makes paid gateway requests")
+    run = commands.add_parser("run", help="run Pi; this makes paid provider requests")
     run.add_argument("run", type=Path)
     run.add_argument("--timeout-seconds", type=positive, required=True)
-    run.add_argument("--network", required=True, help="Docker network with operator-enforced gateway-only egress")
+    run.add_argument("--network", required=True,
+                     help="Docker network with operator-enforced gateway/MCP endpoint allowlist")
     run.add_argument("--cpus", type=positive, default=4)
     run.add_argument("--memory", default="8g")
     run.add_argument("--secrets-dir", type=Path,
@@ -71,13 +76,13 @@ def main(argv=None) -> int:
                         {"pi": args.pi_version, "pi-provider-litellm": args.litellm_version,
                          "pi-subagents": args.subagents_version}, args.node_image, args.dataset,
                         git_revision(args.task_repo),
-                        args.config_dir.resolve() if args.config_dir else None,
-                        args.config_label, args.drop_mcp)
+                        args.config_dir.absolute() if args.config_dir else None,
+                        args.config_label, args.drop_mcp, args.profile)
         elif args.command == "build":
             build_images(args.run.resolve(), args.platform)
         elif args.command == "run":
             return run_tasks(args.run.resolve(), args.timeout_seconds, args.network, str(args.cpus),
-                             args.memory, args.secrets_dir.resolve() if args.secrets_dir else None)
+                             args.memory, args.secrets_dir.absolute() if args.secrets_dir else None)
     except (ValueError, OSError, ImportError, KeyError) as error:
         print(f"pepi-eval: {error}", file=sys.stderr)
         return EXIT_USAGE

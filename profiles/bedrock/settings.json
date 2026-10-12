@@ -8,7 +8,6 @@
     "npm:pi-mcp-adapter",
     "npm:@vndv/pi-codegraph",
     "npm:@amaster.ai/pi-memory-mem0",
-    "npm:pi-defender",
     "npm:pi-ketch"
   ],
   "defaultModel": "bedrock-claude-sonnet-5-5",

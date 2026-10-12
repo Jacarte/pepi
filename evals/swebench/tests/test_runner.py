@@ -14,7 +14,7 @@ TASK = {"instance_id": "owner__repo-1", "repo": "owner/repo", "base_commit": "a"
         "image": "swebench/example@sha256:" + "b" * 64, "problem_statement": "Fix a bug.\n",
         "datasets": [DATASET], "split": "test", "patch": "SECRET GOLD",
         "test_patch": "SECRET TEST", "FAIL_TO_PASS": ["hidden_test"]}
-VERSIONS = {"pi": "0.87.1", "pi-provider-litellm": "3.0.1", "pi-subagents": "0.68.0"}
+VERSIONS = {"pi": "1.1.0", "pi-provider-litellm": "3.0.1", "pi-subagents": "0.68.0"}
 
 
 def prepare_fixture(root):
@@ -40,7 +40,7 @@ class FakeDocker:
 
     def call(self, *args, **kwargs):
         self.commands.append(args)
-        if "bash" in args and PI_COMMAND in args:
+        if "bash" in args and any(a.startswith(PI_COMMAND) for a in args):
             if self.failure == "timeout":
                 raise subprocess.TimeoutExpired(args, 1)
             if self.failure == "agent":
@@ -51,6 +51,8 @@ class FakeDocker:
             raise subprocess.CalledProcessError(125, args)
         if "pgrep" in args:
             raise subprocess.CalledProcessError(1, args)
+        if self.failure == "dirty" and "status" in args:
+            return SimpleNamespace(stdout=b"?? dirty.py\0", returncode=0)
         output = b"diff --git a/a b/a\nnew file mode 100644\n" if "--cached" in args else b""
         return SimpleNamespace(stdout=output, returncode=0)
 
@@ -58,8 +60,6 @@ class FakeDocker:
         self.commands.append(args)
         if "rev-parse" in args:
             return "c" * 40
-        if self.failure == "dirty" and "status" in args:
-            return "?? dirty.py"
         return ""
 
 
@@ -91,7 +91,7 @@ class PreparationTests(unittest.TestCase):
             run = prepare_fixture(Path(directory))
             manifest = read_manifest(run)
             profile = json.loads((run / "build/profile/settings.json").read_text())
-            self.assertEqual(profile["subagents"]["agentOverrides"]["worker"]["model"], "model-b")
+            self.assertEqual(profile["subagents"]["agentOverrides"]["worker"]["model"], "litellm/model-b")
             self.assertNotIn("skills", profile["subagents"]["agentOverrides"]["reviewer"])
             self.assertFalse((run / "build/profile/auth.json").exists())
             self.assertNotIn("SECRET", json.dumps(manifest))
