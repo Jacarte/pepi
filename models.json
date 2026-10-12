@@ -1,0 +1,20 @@
+{
+  "providers": {
+    "openai-codex": {
+      "modelOverrides": {
+        "gpt-6-luna": {
+          "contextWindow": 500000
+        },
+        "gpt-6.1-sol": {
+          "contextWindow": 500000
+        },
+        "gpt-6-sol": {
+          "contextWindow": 500000
+        },
+        "gpt-6-astra": {
+          "contextWindow": 500000
+        }
+      }
+    }
+  }
+}

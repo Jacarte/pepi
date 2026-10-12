@@ -60,3 +60,11 @@ tmp/
 Thumbs.db
 
 mcp-npx-cache.json
+logs/
+
+
+# mcp.json, settings.json and models-router.json are copied from the profiles folder
+# with the profiles.sh script launching
+/settings.json
+/mcp.json
+/models-router.json
