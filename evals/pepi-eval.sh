@@ -120,7 +120,8 @@ fail_step() {
 # Validate name: alphanumeric, dot, dash, underscore only
 validate_name() {
     local name=$1
-    if [[ ! "$name" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    [[ -n "$name" ]] || die "Run name cannot be empty" 2
+    if [[ "$name" == "." || "$name" == ".." || ! "$name" =~ ^[A-Za-z0-9._-]+$ ]]; then
         die "Invalid name (use alphanumeric, '.', '-', '_' only): $name" 2
     fi
 }
@@ -190,7 +191,7 @@ ask_yes() {
 
 # Resolve IDs: file or temp file from comma-sep
 prepare_ids_file() {
-    local ids_input="${PEPI_EVAL_IDS:-sympy__sympy-20590}"
+    local ids_input="${PEPI_EVAL_IDS:-$eval_dir/presets/verified20-v1.ids}"
     local ids_file
     
     if [[ -f "$ids_input" ]]; then
@@ -325,11 +326,14 @@ cmd_prepare() {
     local prepare_status=0
     run_cmd "${prepare_cmd[@]}" || prepare_status=$?
     # The IDs file is ours (and removed) unless the user passed an existing file.
-    [[ -f "${PEPI_EVAL_IDS:-sympy__sympy-20590}" ]] || rm -f "$ids_file"
+    [[ -f "${PEPI_EVAL_IDS:-$eval_dir/presets/verified20-v1.ids}" ]] || rm -f "$ids_file"
     if [[ $prepare_status -ne 0 ]]; then
         fail_step prepare "$prepare_status"
     fi
     
+    # Carry the successfully prepared run through all subsequent steps.
+    PEPI_EVAL_RUN_NAME="$run_name"
+
     [[ "${DRY_RUN:-}" != "1" ]] && warn "Prepared run: $run_dir"
     next_step
 }
@@ -364,6 +368,8 @@ cmd_build() {
     
     local run_dir="$runs_dir/$run_name"
     
+    validate_name "$run_name"
+
     # In dry-run, skip preconditions; otherwise check
     if [[ "${DRY_RUN:-}" != "1" ]]; then
         [[ -d "$run_dir" ]] || die "Run directory not found: $run_dir" 2
@@ -419,6 +425,8 @@ cmd_run() {
     
     local run_dir="$runs_dir/$run_name"
     
+    validate_name "$run_name"
+
     # In dry-run, skip preconditions; otherwise check
     if [[ "${DRY_RUN:-}" != "1" ]]; then
         [[ -d "$run_dir" ]] || die "Run directory not found: $run_dir" 2
@@ -483,7 +491,7 @@ cmd_run() {
     # Optional run parameters
     local network timeout_s cpus memory
     network=$(ask NETWORK "Docker network" "pepi-eval") || return 2
-    timeout_s=$(ask TIMEOUT_SECONDS "Timeout (seconds)" "1200") || return 2
+    timeout_s=$(ask TIMEOUT_SECONDS "Pi invocation timeout (seconds)" "300") || return 2
     cpus=$(ask CPUS "CPU count" "4") || return 2
     memory=$(ask MEMORY "Memory" "8g") || return 2
     
@@ -562,6 +570,8 @@ cmd_report() {
     
     local run_dir="$runs_dir/$run_name"
     
+    validate_name "$run_name"
+
     # In dry-run, skip preconditions; otherwise check
     if [[ "${DRY_RUN:-}" != "1" ]]; then
         [[ -d "$run_dir" ]] || die "Run directory not found: $run_dir" 2
@@ -717,7 +727,7 @@ Optional PEPI_EVAL_* env vars:
   VENV                  Python venv path (default ~/.venvs/swebench)
   SWEBENCH_REPO         SWE-bench source (default ~/SWE-bench)
   TASK_REPO             Task definitions (default ~/swe-bench-tasks)
-  IDS                   Task IDs: comma-sep or file (default sympy__sympy-20590)
+  IDS                   Task IDs: comma-sep or file (default custom Verified20 v1)
   RUN_NAME              Run directory name (default smoke-YYYYMMDD-HHMM)
   PI_VERSION            Pi version (auto-detected)
   LITELLM_VERSION       LiteLLM provider version (auto-detected only if required)
@@ -729,7 +739,7 @@ Optional PEPI_EVAL_* env vars:
   DROP_MCP              1 disables native MCP (default: 0, enabled; Pi >= 1.1.0)
   PLATFORM              Docker build platform (default linux/amd64)
   NETWORK               Docker network (default pepi-eval)
-  TIMEOUT_SECONDS       Pi timeout (default 1200)
+  TIMEOUT_SECONDS       Per-task Pi invocation timeout (default 300; excludes setup/export)
   CPUS                  CPU count (default 4)
   MEMORY                Memory (default 8g)
   SECRETS_DIR           chmod-700 directory with chmod-600 auth.json/mcp.json (runtime only)

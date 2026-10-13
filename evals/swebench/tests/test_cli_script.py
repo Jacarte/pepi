@@ -13,6 +13,7 @@ import unittest
 from pathlib import Path
 
 from evals.swebench.__main__ import build_parser
+from evals.swebench.preset import DEFAULT_IDS, IDS_SHA256, tasklist_hash
 from evals.swebench.tests.test_runner import prepare_fixture
 from evals.swebench.tests.test_profiles import repository, prepare
 
@@ -20,6 +21,12 @@ from evals.swebench.tests.test_profiles import repository, prepare
 FAKE_PYTHON = """#!/bin/sh
 [ "$1" = "-m" ] || exit 0
 printf '%s\\n' "$*" >> "$FAKE_LOG"
+if [ -n "$FAKE_IDS_LOG" ]; then
+    while [ "$#" -gt 0 ]; do
+        if [ "$1" = "--ids" ]; then cat "$2" > "$FAKE_IDS_LOG"; break; fi
+        shift
+    done
+fi
 exit "${FAKE_STATUS:-0}"
 """
 
@@ -291,6 +298,53 @@ class PepiEvalTest(unittest.TestCase):
         self.assertEqual(parsed['run'].secrets_dir, secrets)
         self.assertNotIn('sk-SECRET-KEY-12345', result.stdout + result.stderr)
 
+    def test_default_preset_and_300_seconds_forwarded_for_each_profile(self):
+        for profile in ('codex', 'bedrock'):
+            result = self.run_script(['--dry-run', '-y', 'all'], stdin='', env_extra={
+                'PEPI_EVAL_PROFILE': profile, 'PEPI_EVAL_RUN_NAME': f'{profile}-20',
+                'PEPI_EVAL_LITELLM_VERSION': '4.2.0',
+                'LITELLM_BASE_URL': 'https://x', 'LITELLM_API_KEY': 'fake'})
+            self.assertEqual(result.returncode, 0, result.stderr)
+            args = {argv[0]: build_parser().parse_args(argv) for argv in self.printed_commands(result)}
+            self.assertEqual(args['prepare'].ids, DEFAULT_IDS)
+            self.assertEqual(args['run'].timeout_seconds, 300)
+            self.assertIsNone(args['prepare'].config_label)
+            self.assertEqual(tasklist_hash(DEFAULT_IDS.read_text().splitlines()), IDS_SHA256)
+            self.assertTrue(DEFAULT_IDS.is_file(), 'default IDs must not be deleted during cleanup')
+
+    def test_explicit_ids_file_and_timeout_override_remain_supported(self):
+        ids = Path(self.fake.name) / 'custom.ids'
+        ids.write_text('sympy__sympy-20590\\n')
+        result = self.run_script(['--dry-run', '-y', 'all'], stdin='', env_extra={
+            'PEPI_EVAL_PROFILE': 'codex', 'PEPI_EVAL_RUN_NAME': 'smoke',
+            'PEPI_EVAL_IDS': str(ids), 'PEPI_EVAL_TIMEOUT_SECONDS': '1200'})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        args = {argv[0]: build_parser().parse_args(argv) for argv in self.printed_commands(result)}
+        self.assertEqual(args['prepare'].ids, ids)
+        self.assertEqual(args['run'].timeout_seconds, 1200)
+        self.assertTrue(ids.exists())
+
+    def test_comma_ids_and_one_task_smoke_forward_exact_ids_then_remove_temp(self):
+        captured = Path(self.fake.name) / 'captured.ids'
+        for ids in ('sympy__sympy-20590', 'a__b-1,c__d-2'):
+            result = self.run_script(['-y', 'prepare'], stdin='', env_extra={
+                'PEPI_EVAL_RUN_NAME': 'smoke', 'PEPI_EVAL_IDS': ids,
+                'FAKE_IDS_LOG': str(captured)})
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(captured.read_text().splitlines(), ids.split(','))
+            argv = shlex.split(self.log.read_text().splitlines()[-1])
+            self.assertFalse(Path(argv[argv.index('--ids') + 1]).exists())
+
+    def test_direct_cli_defaults_and_explicit_flags(self):
+        prepare_args = ['prepare', '--task-repo', '/tasks', '--out', '/fresh',
+                        '--pi-version', '1.1.0', '--subagents-version', '0.68.0', '--node-image', 'node:22']
+        self.assertEqual(build_parser().parse_args(prepare_args).ids, DEFAULT_IDS)
+        self.assertEqual(build_parser().parse_args(prepare_args + ['--ids', '/custom.ids']).ids,
+                         Path('/custom.ids'))
+        run_args = ['run', '/fresh', '--network', 'pepi-eval']
+        self.assertEqual(build_parser().parse_args(run_args).timeout_seconds, 300)
+        self.assertEqual(build_parser().parse_args(run_args + ['--timeout-seconds', '1200']).timeout_seconds, 1200)
+
     def test_optional_flags_are_omitted_when_unset(self):
         env = {'PEPI_EVAL_RUN_NAME': 'plain-run'}
         result = self.run_script(['--dry-run', '-y', 'prepare'], env_extra=env, stdin='')
@@ -318,6 +372,86 @@ class PepiEvalTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse((Path(self.runs_tmpdir.name) / 'fresh').exists())
         self.assertIn('prepare', self.log.read_text())
+
+    def test_all_carries_prepared_run_without_name_env(self):
+        template_root = Path(self.fake.name) / 'template'
+        template_root.mkdir()
+        template = prepare_fixture(template_root)
+        for name in ('source', 'tasks'):
+            (Path(self.fake.name) / name).mkdir()
+        python = Path(self.fake.name) / 'venv/bin/python'
+        python.write_text('''#!/bin/sh
+[ "$1" = "-m" ] || exit 0
+printf '%s\\n' "$*" >> "$FAKE_LOG"
+if [ "$2" = "evals.swebench" ]; then
+    case "$3" in
+        prepare)
+            while [ "$#" -gt 0 ]; do
+                if [ "$1" = "--out" ]; then cp -R "$FAKE_TEMPLATE" "$2"; break; fi
+                shift
+            done ;;
+        build) printf '{}' > "$4/builds.json" ;;
+        run) printf '{}\\n' > "$4/predictions.jsonl" ;;
+    esac
+fi
+''')
+        result = self.run_script(['-y', 'all'], stdin='', env_extra={
+            'FAKE_TEMPLATE': str(template), 'PEPI_EVAL_PROFILE': 'bedrock',
+            'PEPI_EVAL_SWEBENCH_REPO': str(Path(self.fake.name) / 'source'),
+            'PEPI_EVAL_TASK_REPO': str(Path(self.fake.name) / 'tasks'),
+            'LITELLM_BASE_URL': 'https://gateway.example', 'LITELLM_API_KEY': 'SYNTHETIC',
+        })
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = [shlex.split(line) for line in self.log.read_text().splitlines()]
+        self.assertEqual(len(calls), 6, calls)
+        prepared = calls[0][calls[0].index('--out') + 1]
+        for call in calls[1:]:
+            target = call[2] if call[1] == 'evals.swebench.telemetry' else call[3]
+            self.assertEqual(target, prepared, call)
+        self.assertNotIn('Run name (from runs/)', result.stderr)
+        self.assertNotIn('Available runs:', result.stderr)
+
+    def test_blank_tty_run_name_fails_before_runner_for_each_step(self):
+        for command in ('build', 'run', 'report'):
+            with self.subTest(command=command):
+                master, slave = pty.openpty()
+                process = subprocess.Popen(['bash', str(self.script_path), '-y', command],
+                                           stdin=slave, stdout=slave, stderr=slave,
+                                           env=self.script_env())
+                os.close(slave)
+                output = b''
+                try:
+                    os.write(master, b'\n')
+                    deadline = time.monotonic() + 5
+                    while time.monotonic() < deadline:
+                        if select.select([master], [], [], 0.1)[0]:
+                            try:
+                                chunk = os.read(master, 65536)
+                            except OSError:
+                                break
+                            if not chunk:
+                                break
+                            output += chunk
+                    process.wait(timeout=2)
+                    self.assertEqual(process.returncode, 2, output.decode())
+                    self.assertIn('Run name cannot be empty', output.decode())
+                    self.assertFalse(self.log.exists(), 'no runner for an empty selection')
+                finally:
+                    if process.poll() is None:
+                        process.terminate()
+                        process.wait(timeout=2)
+                    os.close(master)
+
+    def test_invalid_existing_run_names_fail_before_runner(self):
+        for command in ('build', 'run', 'report'):
+            for name in ('../other-run', ' ', 'bad/name', '.', '..'):
+                with self.subTest(command=command, name=name):
+                    result = self.run_script(['--dry-run', '-y', command], env_extra={
+                        'PEPI_EVAL_RUN_NAME': name})
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    self.assertIn('Invalid name', result.stderr)
+                    self.assertEqual(result.stdout, '')
+                    self.assertFalse(self.log.exists())
 
     def test_runner_exit_codes_pass_through_as_2_and_3(self):
         for status, expected in (('2', 2), ('3', 3), ('1', 3), ('130', 130)):

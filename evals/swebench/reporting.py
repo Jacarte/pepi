@@ -158,6 +158,19 @@ def summarize_run(run: Path) -> dict:
         "cost_caveat": "Pi estimates within reported coverage; includes failed attempts; not gateway billing",
         "instances": rows,
     }
+    suite_note = ""
+    if "selection" in manifest:
+        summary["selection"] = manifest["selection"]
+        preset = manifest["selection"].get("preset")
+        if preset:
+            builds = read_json(run / "builds.json")
+            if set(builds) != {task["instance_id"] for task in manifest["tasks"]}:
+                raise ValueError("Build records must cover exactly the selected task IDs")
+            summary["comparison_runtime"] = {
+                "versions": manifest["versions"], "node_image": manifest["node_image"],
+                "platforms": {instance_id: row["platform"] for instance_id, row in builds.items()},
+            }
+            suite_note = f"{preset['label']}. Preset: `{preset['id']}`.\n\n"
     write_json(run / "summary.json", summary)
     with (run / "summary.csv").open("w", encoding="utf-8", newline="") as stream:
         writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
@@ -165,6 +178,7 @@ def summarize_run(run: Path) -> dict:
         writer.writerows(rows)
     (run / "summary.md").write_text(
         f"# {manifest['run_id']}\n\n"
+        f"{suite_note}"
         f"Resolved: **{solved}/{count} ({100 * solved / count:.1f}%)**. Unknown grades: {summary['unknown_grades']}.\n\n"
         f"Agent latency (all observed attempts): {summary['latency_all_seconds']}.\n\n"
         f"Resolved-task latency: {summary['latency_resolved_seconds']}.\n\n"
@@ -179,6 +193,16 @@ def compare(left: dict, right: dict) -> dict:
     for key in ("dataset", "task_identity", "protocol"):
         if left[key] != right[key]:
             raise ValueError(f"Cannot pair runs with different {key}; do not silently intersect task sets")
+    if left.get("selection") != right.get("selection"):
+        raise ValueError("Cannot pair runs with different frozen selection/source provenance")
+    if left.get("selection", {}).get("preset"):
+        x, y = left["comparison_runtime"], right["comparison_runtime"]
+        for key in ("node_image", "platforms"):
+            if x[key] != y[key]:
+                raise ValueError(f"Cannot pair runs with different {key}")
+        shared_versions = {"pi", "pi-subagents"} | (set(x["versions"]) & set(y["versions"]))
+        if any(x["versions"].get(key) != y["versions"].get(key) for key in shared_versions):
+            raise ValueError("Cannot pair runs with different shared runtime versions")
     a = {row["instance_id"]: row for row in left["instances"]}
     b = {row["instance_id"]: row for row in right["instances"]}
     if set(a) != set(b):
@@ -197,13 +221,19 @@ def compare(left: dict, right: dict) -> dict:
             if x is not None and y is not None:
                 deltas.append(y - x)
     x, y = left["estimated_total_cost_usd"], right["estimated_total_cost_usd"]
-    return {"schema_version": 1, "baseline": left["run_id"], "candidate": right["run_id"],
+    result = {"schema_version": 1, "baseline": left["run_id"], "candidate": right["run_id"],
             "resolved_delta": right["resolved"] - left["resolved"], "wins": sorted(wins),
             "regressions": sorted(regressions), "inconclusive": sorted(unknown),
             "both_resolved_latency_pairs": len(deltas),
             "both_resolved_latency_delta_median_seconds": statistics.median(deltas) if deltas else None,
             "estimated_cost_delta_usd": y - x if x is not None and y is not None else None,
             "note": "Positive deltas mean more time/cost for the candidate; repeat runs before interpreting small differences."}
+    if left.get("selection", {}).get("preset"):
+        result.update({"selection": left["selection"], "selected": left["selected"],
+                       "baseline_resolved": left["resolved"], "candidate_resolved": right["resolved"],
+                       "baseline_unknown_grades": left["unknown_grades"],
+                       "candidate_unknown_grades": right["unknown_grades"]})
+    return result
 
 
 def main() -> int:

@@ -6,6 +6,15 @@ with `swebench.task.repo`, and a clone of `SWE-bench/swe-bench-tasks` are requir
 The initial image recipe targets Verified's Debian/Ubuntu, `/testbed`, Conda
 `testbed` environments. Other benchmark/image layouts require another recipe.
 
+## Default custom subset
+
+Shell preparation and direct `prepare` default to the versioned
+[custom Verified20 v1 preset](presets/README.md); `run` defaults to 300 seconds per
+Pi invocation. It is **not an official Verified score**. The frozen task repository
+revision is required for this exact ordered selection. IDs and timeout overrides
+remain available; the explicit one-task commands below are smoke runs, not the suite.
+The preset documentation includes reproducibility/provenance and paired profile commands.
+
 ## Prepare, build, run
 
 Run from the Pepi repository root. Choose exact installed/approved package

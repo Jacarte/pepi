@@ -16,6 +16,7 @@ if sys.version_info < (3, 10):
 
 from .common import DATASET, git_revision, positive  # noqa: E402
 from .prepare import prepare_run, selected_ids  # noqa: E402
+from .preset import DEFAULT_IDS, definition  # noqa: E402
 from .runner import EXIT_INFRA, EXIT_USAGE, build_images, run_tasks  # noqa: E402
 
 
@@ -36,7 +37,8 @@ def build_parser() -> argparse.ArgumentParser:
     prepare.add_argument("--drop-mcp", action="store_true",
                          help="disable native MCP explicitly (enabled by default with Pi >= 1.1.0)")
     prepare.add_argument("--task-repo", type=Path, required=True)
-    prepare.add_argument("--ids", type=Path, required=True)
+    prepare.add_argument("--ids", type=Path, default=DEFAULT_IDS,
+                         help="ordered IDs file (default: frozen custom Verified20 v1)")
     prepare.add_argument("--out", type=Path, required=True)
     prepare.add_argument("--dataset", default=DATASET)
     prepare.add_argument("--pi-version", required=True)
@@ -48,7 +50,8 @@ def build_parser() -> argparse.ArgumentParser:
     build.add_argument("--platform", default="linux/amd64")
     run = commands.add_parser("run", help="run Pi; this makes paid provider requests")
     run.add_argument("run", type=Path)
-    run.add_argument("--timeout-seconds", type=positive, required=True)
+    run.add_argument("--timeout-seconds", type=positive, default=300,
+                     help="per-task Pi invocation deadline, excluding setup/export (default: 300)")
     run.add_argument("--network", required=True,
                      help="Docker network with operator-enforced gateway/MCP endpoint allowlist")
     run.add_argument("--cpus", type=positive, default=4)
@@ -68,6 +71,9 @@ def main(argv=None) -> int:
     signal.signal(signal.SIGTERM, _raise_interrupt)
     try:
         if args.command == "prepare":
+            # A changed shipped default must fail, not become an ordinary custom selection.
+            if args.ids.resolve() == DEFAULT_IDS.resolve():
+                definition()
             # Import only here: tests/reporting do not require the grading package.
             from swebench.task.repo import load_task_repo
             ids = selected_ids(args.ids)

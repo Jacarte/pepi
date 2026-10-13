@@ -12,6 +12,7 @@ from .common import (DATASET, fingerprint, git_dirty, git_revision, identifier, 
 
 from .mcp import freeze_mcp
 from .profile import config_source, isolated_settings, safe_models
+from .preset import selection_record
 
 HERE = Path(__file__).parent
 
@@ -119,6 +120,7 @@ def prepare_run(root: Path, run: Path, tasks: list[dict], ids: list[str], versio
                 config_dir: Path | None = None, config_label: str | None = None,
                 drop_mcp: bool = False, profile_name: str | None = None) -> dict:
     rows = sanitize_tasks(tasks, ids, dataset)
+    selection = selection_record(ids, rows, dataset, task_revision)
     for value in versions.values():
         if value is not None:
             version(value)
@@ -133,13 +135,14 @@ def prepare_run(root: Path, run: Path, tasks: list[dict], ids: list[str], versio
         versions = read_json(run / "build/provider-plan.json")["versions"]
         config["label"] = config_label
         write_json(run / "build/runtime.json", runtime_record(versions, node_image, rows))
+        write_json(run / "build/selection.json", selection)
         digest = fingerprint(run / "build")
         manifest = {
             "schema_version": 1, "run_id": run.name, "config_id": f"pepi-{digest[:12]}",
             "config": config, "dataset": dataset, "split": "test",
             # Revision of the runner code; injected config is described by `config`.
             "pepi_revision": git_revision(HERE), "pepi_dirty": git_dirty(HERE),
-            "task_repo_revision": task_revision, "profile_sha256": digest,
+            "task_repo_revision": task_revision, "selection": selection, "profile_sha256": digest,
             "versions": versions, "node_image": node_image, "tasks": rows,
             "profile_policy": "isolated; keeps model/role config, AGENTS.md and workflows; "
                               + ("native MCP disabled; " if drop_mcp else "native MCP enabled; ")

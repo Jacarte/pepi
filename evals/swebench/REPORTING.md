@@ -45,6 +45,16 @@ joined summary. `grading/<id>/grader.log` contains evaluator output;
 when available. Passing a task repo can rebuild official images; that elapsed
 time is grading infrastructure, not agent latency.
 
+For the [custom Verified20 v1 preset](presets/README.md), reports explicitly label
+**Custom SWE-bench Verified 20-task subset; not an official Verified score**, with
+raw X/20 resolved and unknown grades separately. Hash-verified prepared selection
+metadata carries the fixed ordered tasklist hash, definition and source revision.
+New suite-aware comparisons also check shared Pi/subagents pins, Node image
+reference and per-ID build platform. LiteLLM pins match when both sides require it;
+its absence on Codex does not block a Bedrock comparison. Legacy reports retain
+their previous schema and comparison behavior. Matching mutable tags is not proof
+of identical image contents; inspect digests/build IDs and preserve runtime pins.
+
 Outputs: `summary.json`, per-task `summary.csv`, and `summary.md`. Resolved rate
 uses every selected task. Empty patches are unsuccessful; missing/error reports
 are unknown, not fabricated test failures. Agent status and correctness remain

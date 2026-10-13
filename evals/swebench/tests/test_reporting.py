@@ -111,6 +111,9 @@ class ReportingTests(unittest.TestCase):
 
     def test_grade_uses_new_ids_and_host_only_task_snapshots(self):
         run, manifest = self.fixture()
+        unselected = run / 'task-source/tasks/not__selected-1'
+        unselected.mkdir()
+        (unselected / 'test.patch').write_text('synthetic unselected input')
         with patch("evals.swebench.reporting.subprocess.run", return_value=SimpleNamespace(returncode=0)) as execute:
             self.assertEqual(grade_run(run, run / "task-source", 2, 60), 0)
             first = read_json(run / "grading.json")
@@ -121,6 +124,9 @@ class ReportingTests(unittest.TestCase):
         self.assertTrue(Path(args["task_repo"]).is_relative_to(run / "grading"))
         self.assertEqual(args["instance_ids"], [task["instance_id"] for task in manifest["tasks"]])
         self.assertEqual(args["expected_tasks"], manifest["tasks"])
+        self.assertEqual({path.name for path in (Path(args['task_repo']) / 'tasks').iterdir()},
+                         {task['instance_id'] for task in manifest['tasks']})
+        self.assertEqual(Path(execute.call_args.args[0][1]).name, 'grade_driver.py')
         self.assertFalse(args["rewrite_reports"])
 
     def test_pairing_refuses_mismatched_tasks_or_budgets(self):

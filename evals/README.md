@@ -11,7 +11,11 @@ Use the interactive CLI for the full workflow:
 evals/pepi-eval.sh
 ```
 
-This prompts for required inputs or reads them from env vars.
+This prompts for required inputs or reads them from env vars. Defaults are the
+[frozen custom Verified20 v1 subset](swebench/presets/README.md) and 300 seconds per
+Pi invocation (not end-to-end wall time). This is **not an official Verified score**.
+`PEPI_EVAL_IDS=django__django-11095` gives a one-task smoke; explicit IDs and timeout
+overrides remain supported. Keep the frozen task-source revision for the preset.
 
 **Secrets** (only when the frozen plan needs LiteLLM; never echoed):
 - `LITELLM_BASE_URL`: LiteLLM gateway URL
