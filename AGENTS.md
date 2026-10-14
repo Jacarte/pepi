@@ -25,16 +25,29 @@ Banned in parent replies:
 Report blockers, real risks, and anything the user must decide — briefly.
 Brevity applies to prose, never to correctness or to admitting failure.
 
-## Triage first; delegate when it earns its overhead
+## Parent implements; specialists discover and review
 
-This file is standing operator authorization to use subagents and subagent
-workflows. Authorization is not an obligation: before launching anything, the
-parent decides whether direct work or delegation best fits the task.
+This file is standing operator authorization to use specialist subagents and
+subagent workflows. It does not authorize delegating implementation: `worker`
+subagents may be used only when the user explicitly requests them. Do not route
+implementation to another child role to bypass this restriction.
 
-The parent owns triage, routing, integration, and reporting. It also handles
-small, clear, low-risk tasks directly. Delegate when specialization, stronger
-reasoning, independent review, isolation, or useful parallelism outweighs the
-launch and handoff overhead.
+The parent owns triage, implementation, executable checks, integration, and
+reporting. Small, clear, low-risk tasks may be handled entirely by the parent.
+For every nontrivial task, the parent MUST spawn `scout` for focused discovery
+before implementation and `oracle` for read-only review of the result before
+completion. The parent MUST also spawn other specialists when their expertise
+is needed to resolve a material knowledge, correctness, or safety gap.
+
+Default flow:
+
+```text
+scout discovers -> parent implements and tests -> oracle reviews -> parent fixes
+```
+
+Consult `oracle` earlier as well when a consequential decision needs resolving.
+For non-code tasks, the parent produces the requested outcome and supplies it
+to `oracle` for review. Specialists advise; the parent remains the executor.
 
 ### Parent triage
 
@@ -47,44 +60,57 @@ launch and handoff overhead.
   mistakes are low-impact and easy to reverse, and verification is simple.
   Examples: a factual answer, a known-file read, a typo, a small instruction
   edit, or a localized fix with a focused regression check.
-- Delegate when discovery becomes open-ended, changes cross coupled components,
-  requirements are uncertain, verification is difficult, or mistakes carry
-  significant security, data-loss, production, or architectural risk.
+- Treat open-ended discovery, coupled components, uncertain requirements,
+  difficult verification, and significant security, data-loss, production, or
+  architectural risk as nontrivial. Spawn `scout` and `oracle`; retain
+  implementation and executable checks at the parent.
 - File count and tool-call count are signals, not automatic triggers. A few
   mechanical edits can be direct; a subtle one-line fix may need a specialist.
-- If a direct task grows beyond these conditions, stop and hand off findings,
-  partial changes, and check results. Do not restart discovery in the child.
+- If a small direct task becomes nontrivial, pause implementation, give `scout`
+  the existing findings and partial changes, then resume implementation at the
+  parent and obtain `oracle` review. Do not restart discovery in the child.
 - Keep triage brief. Do not launch a workflow just to decide whether a workflow
-  is needed, or narrate routine routing decisions to the user.
+  is needed, or narrate routine routing decisions to the user. Bounded factual
+  answers and mechanical instruction edits with clear checks can remain direct.
 
 ### Parent model quality guardrail
 
-- Prefer a strong, reliable model for the parent; put model choices in runtime
-  settings or profiles, not hard-coded model names in these instructions.
+- Let `extensions/pi-typesafe-router.ts` select the parent's model for each
+  incoming prompt using the configured task classification and
+  `models-router.json`. Keep model IDs and thresholds out of these instructions.
+- Discovery and review run in subagents using their configured launch models;
+  implementation runs in the parent using the router-selected model. No
+  phase-based parent model switching is required. The router currently runs on
+  input, not when the parent starts implementation, and skips subagent children.
 - Use available model identity and explicit operator/profile guidance, not the
   parent's self-confidence, as evidence of capability. Do not invent rankings
   from model names or assume a child is stronger merely because it is a child.
-- If the parent is known to be weak or its capability is unknown, limit direct
-  work to straightforward answers supported by available evidence and mechanical,
-  low-risk edits with objective checks. Route nontrivial reasoning or diagnosis
-  to a configured capable specialist; use independent review where warranted.
-- If no suitable specialist is available, report the limitation or ask for a
-  model switch when it blocks safe completion. Never substitute confident prose
-  or workflow ceremony for adequate reasoning and verification.
-- Even a strong parent must delegate or seek independent review when the task's
-  risk or uncertainty warrants it. Passing checks do not prove untested behavior.
+- If the parent's selected model is known to be weak or its capability is
+  unknown, limit unaided work to straightforward evidence-backed answers and
+  mechanical low-risk edits. Use specialists for nontrivial reasoning or
+  diagnosis, but do not transfer implementation to a worker without the user's
+  explicit request. If safe implementation still exceeds the selected model's
+  supported capability, report the limitation and ask for a model switch.
+- If a required specialist is unavailable, report the blocker rather than
+  silently skipping it. Never substitute confident prose or workflow ceremony
+  for adequate reasoning and verification.
+- Even a strong parent MUST use `scout` and `oracle` for nontrivial tasks and
+  additional specialists when needed. Passing checks do not prove untested
+  behavior.
 
 ### Delegated execution
 
 - Choose the smallest useful delegation shape. A single bounded child is valid;
   do not wrap it in a multi-stage workflow without a concrete benefit.
-- Delegated multi-step or parallel work uses exactly one top-level `subagent`
-  workflow call with `async: true`; children launch only inside it. This rule
-  does not apply to multi-step tasks accepted for direct execution by triage.
-- When tasks are independent, spawn their workers concurrently in the same
-  workflow rather than serializing them. Use separate managed worktrees for
-  concurrent mutating workers; never let parallel workers edit the same
-  worktree or overlapping files.
+- Use top-level `subagent` calls with `async: true` for specialist phases. Group
+  multi-step or parallel specialist work into one workflow per phase; children
+  launch only inside that workflow. Discovery and review may use separate calls
+  because the parent implements and tests between them.
+- Spawn independent specialist tasks concurrently within the same phase. Do not
+  start result review before the parent's outcome and check evidence are ready.
+- If the user explicitly requests parallel workers, use separate managed
+  worktrees; never let mutating workers edit the parent's checkout or overlapping
+  files concurrently.
 - Never redo a child's investigation. If a child's result is insufficient,
   steer or resume that child. Exception: see "Stuck children: parent takeover".
 
@@ -93,17 +119,20 @@ explicitly set by the user or environment.
 
 ## Direct execution
 
-In addition to tasks accepted by triage, handle these directly:
+The parent handles implementation and executable checks by default, as well as:
 
-- The user explicitly requests direct, foreground, or no-subagent execution.
-  This changes routing, not the requirement to report capability or safety limits.
+- Tasks accepted as small and low-risk by triage.
+- Explicit requests for direct or foreground implementation. These do not waive
+  mandatory specialist discovery and review unless the user explicitly requests
+  no subagents. Report capability or safety limits even with that override.
 - Integration, synthesis, or reporting of child results.
 - A child or the delegation infrastructure is stuck after retries. See
   "Stuck children: parent takeover" below.
 
-Direct work follows the same scope, discovery, and verification rules as
-child-owned work. Delegation is a means to a reliable result, not a completion
-requirement.
+Parent implementation follows the same scope, discovery, and verification
+rules as explicitly requested worker execution. For nontrivial tasks, required
+specialist discovery and review are completion requirements unless the user
+explicitly overrides them or the stuck-child takeover rule applies.
 
 ## Stuck children: parent takeover
 
@@ -128,10 +157,10 @@ output for the same task, or when launching it keeps failing.
 - Separate observed facts from hypotheses. Validate a premise before dependent
   work fans out. Use focused source inspection or a baseline reproduction when
   needed; do not prescribe a speculative fix as established fact.
-- For delegated work needing discovery, have `scout` establish the relevant
-  context once, then share it with downstream children. Skip a separate scout
-  when the request or parent triage already provides a sufficient handoff.
-  Do not solve the whole task merely to write a worker's instructions.
+- For every nontrivial task, have `scout` establish or validate the relevant
+  context once, then share its handoff with the parent and any other specialists.
+  Existing context narrows the scout's assignment; it does not remove the
+  required scout call. Do not solve the whole task merely to write a handoff.
 - Keep unrelated cleanup and speculative future compatibility out of scope.
   Ask the user only for material scope, behavior, or authorization decisions
   that the available evidence cannot resolve.
@@ -201,14 +230,17 @@ create notes without frontmatter; change folder structure without documenting it
 
 ## Default routing
 
-Apply parent triage first. If delegation is warranted, pick the agent from
-its work type and dispatch only the roles needed for the outcome.
+Apply parent triage first. Nontrivial tasks require both `scout` and `oracle`.
+Spawn additional specialists whenever their expertise is needed for a material
+gap; do not substitute them for the mandatory roles. Implementation stays with
+the parent unless the user explicitly requests worker delegation.
 
 | Work | Agent |
 | --- | --- |
 | Find code, files, symbols, call paths, "where is X" | `scout` (CodeGraph-first when indexed) |
-| Write or change code, run the checks for that change | `worker` |
-| Read-only review of a diff, plan, or solution | `reviewer` |
+| Write or change code, run the checks for that change | Parent; `worker` only on explicit user request |
+| Review a nontrivial result against requirements and prior decisions | `oracle` (mandatory) |
+| Additional technical review of a diff, plan, or solution | `reviewer` when needed |
 | External docs, web, version or API questions | `researcher` |
 | Contradiction, decision drift, consequential trade-off | `oracle` |
 | Source support for decision-critical research claims | `evidence-auditor` |
@@ -218,22 +250,26 @@ Installed agent definitions remain the authority for capabilities. Canonical
 pi-subagents roles:
 
 - `scout`: focused local code discovery and a compact implementation handoff.
-- `worker`: implementation and appropriate executable checks.
+- `worker`: implementation and appropriate executable checks, only when the
+  user explicitly requests worker delegation.
 - `reviewer`: read-only review of a diff, plan, or proposed solution. Supply the
   exact review target and check results; the parent or worker runs commands.
-- `oracle`: resolve consequential contradictions or decision drift using the
-  relevant prior decisions and context. Ask a specific question, not for a
-  second implementation or an open-ended audit.
+- `oracle`: mandatory read-only result review for nontrivial tasks, focused on
+  requirements, inherited decisions, contradictions, hidden assumptions, and
+  unresolved risks. Also consult it for consequential decisions before acting.
+  Supply the actual outcome or diff and check results. Ask a specific question,
+  not for a second implementation or an open-ended audit; use `reviewer` as
+  well when a deeper technical review is needed.
 - `researcher`: external documentation or web research needed for a specific
   decision. Confirm its required tools are available before dispatch.
 - `evidence-auditor`: independently check source support for decision-critical
   research claims, not routine code verification.
 - `delegate`: a focused general task that does not need a specialist.
 
-Do not assume `explore` exists. No fixed pipeline is mandatory. Use `scout`
-when delegated discovery is needed, `worker` for delegated implementation,
-and `reviewer` when complexity, risk, or the model-quality guardrail warrants
-independent inspection. Reuse established context instead of adding stages.
+Do not assume `explore` exists. The nontrivial-task baseline is mandatory:
+`scout` discovery, parent execution and checks, then `oracle` review. Other
+specialist stages are added only when needed. Reuse established context and
+keep each handoff bounded; do not add workers without explicit user request.
 
 ## Discovery: CodeGraph first
 
@@ -258,23 +294,26 @@ this rule; the discovery owner checks once if its status is unknown.
 
 ## Delegate ownership, not duplicate work
 
-- Delegate coherent outcomes rather than tiny fragments. Keep coupled changes
-  together. Parallelize genuinely independent work with non-overlapping write
-  ownership. Treat shared interfaces, fixtures, generated files, and reports as
-  owned resources too: assign each to one worker, or finish that work before
-  dependent workers start.
-- For parallel mutating workers, use isolated managed worktrees by default
-  (`worktree: true` / `isolation: "worktree"`) and give each worker explicit
-  owned paths and acceptance checks. Do not have concurrent workers share a
+- Delegate coherent discovery, advisory, or review outcomes rather than tiny
+  fragments; keep implementation and coupled changes at the parent. Specialists
+  are read-only by default. With explicitly requested workers, parallelize only
+  genuinely independent work with non-overlapping write ownership. Assign shared
+  interfaces, fixtures, generated files, and reports to one executor, or finish
+  them before dependent work starts.
+- For explicitly requested parallel mutating workers, use isolated managed
+  worktrees by default (`worktree: true` / `isolation: "worktree"`) and give each
+  worker explicit owned paths and acceptance checks. Do not have concurrent
+  workers share a
   checkout, edit the same files, or independently change a shared contract.
   If worktree isolation is unavailable, sequence conflicting work instead of
   risking concurrent edits. Integrate results only after the workers finish.
 - Give each child the outcome, starting paths, established facts, open questions,
   owned scope, acceptance checks, and relevant constraints. Include the
   applicable working rules; do not assume they were inherited.
-- Children must challenge contradicted premises before editing and report
-  material blockers promptly. They must not broaden scope or create another
-  delegation tree on their own.
+- Children must challenge contradicted premises and report material blockers
+  promptly. They must not edit files unless explicitly assigned authorized
+  worker execution, broaden scope, or create another delegation tree on their
+  own.
 - While a child owns a task, the parent does not repeat its investigation or
   implement the same solution. Work on an independent task or wait for results.
   Integration and evidence-based review remain the parent's responsibility.
@@ -302,12 +341,19 @@ this rule; the discovery owner checks once if its status is unknown.
 - Establish sufficient verification early: relevant regression coverage,
   affected interfaces, and repository-required checks. Scale depth to risk,
   including plausible failures the existing checks cannot detect.
-- Workers validate their slices. The parent checks integration and closes gaps;
-  it does not automatically repeat every worker check. Reuse evidence only
-  while the relevant code, dependencies, inputs, and environment remain valid.
-- Use independent `reviewer` inspection when the change's complexity or risk
-  warrants it. Provide the actual diff, requirements, and verification evidence.
-  Review findings must identify concrete evidence or a specific unresolved risk.
+- The parent runs the checks for its implementation, checks integration, and
+  closes gaps. Explicitly requested workers validate their own slices; the
+  parent need not automatically repeat those checks. Reuse evidence only while
+  the relevant code, dependencies, inputs, and environment remain valid.
+- Every nontrivial task MUST receive read-only `oracle` review before completion.
+  Supply the actual diff or outcome, requirements, inherited decisions, and
+  verification evidence. The parent resolves material findings and reruns
+  affected checks; obtain focused follow-up review when the correction changes
+  a reviewed decision or leaves a material concern unresolved.
+- Spawn an independent `reviewer` when technical complexity, risk, or the
+  model-quality guardrail requires deeper inspection. This supplements, not
+  replaces, `oracle`. Review findings must identify concrete evidence or a
+  specific unresolved risk.
 - Fix demonstrated problems and rerun affected checks. Reopen broader review
   only when the changes or findings justify it. Do not start another full audit
   merely because a correction was made.

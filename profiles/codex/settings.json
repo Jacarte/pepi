@@ -38,7 +38,7 @@
         "model": "gpt-6-luna"
       },
       "reviewer": {
-        "model": "gpt-6.1-sol",
+        "model": "gpt-6-astra",
         "skills": [
           "go-reviewer"
         ]
