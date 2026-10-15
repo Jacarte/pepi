@@ -1,6 +1,6 @@
 ---
 description: Create a source-backed visual explanation of a code change
-argument-hint: "<PR_URL_OR_BRANCH_OR_BOOKMARK> [audience=...] [format=walkthrough|slides|both] [output=...] [style=...] [browser=...] [comparison=changes|direct]"
+argument-hint: "<PR_URL_OR_BRANCH_OR_BOOKMARK> [audience=...] [format=walkthrough|slides|both] [style=...] [browser=...] [comparison=changes|direct]"
 ---
 
 Create a source-backed visual explanation of a code change using the tools available in this Pi session.
@@ -11,12 +11,12 @@ Create a source-backed visual explanation of a code change using the tools avail
    - Comparison selector: $1
    - Optional named settings: ${@:2}
 
-   Interpret the optional settings as `key=value` fields, not additional positional inputs. Supported keys, in any order, are `audience`, `format`, `output`, `style`, `browser`, and `comparison`. This is an instruction-level convention, not a native Pi flag parser. Quote an entire field containing spaces. Pi joins the parsed trailing arguments without preserving quote delimiters: use recognized field boundaries, and ask for clarification if a value contains text that could be mistaken for another field. Reject unknown or duplicate keys, empty values, and bare trailing arguments rather than guessing.
+   Interpret the optional settings as `key=value` fields, not additional positional inputs. Supported keys, in any order, are `audience`, `format`, `style`, `browser`, and `comparison`. This is an instruction-level convention, not a native Pi flag parser. Quote an entire field containing spaces. Pi joins the parsed trailing arguments without preserving quote delimiters: use recognized field boundaries, and ask for clarification if a value contains text that could be mistaken for another field. Reject unknown or duplicate keys, empty values, and bare trailing arguments rather than guessing.
 
    Defaults when a setting is omitted:
    - Audience: developers familiar with the repository, but not this change.
    - Format: `walkthrough`.
-   - Output directory: `./visual-explainer`.
+   - Output directory (fixed, not configurable): `~/DEV/sharing-pretty/html` (expand `~` to the home directory). This directory is a cumulative registry of explanations. Write every generated file there (all formats and any auxiliary files), directly in that directory, with unique, descriptive kebab-case names. Never write generated files elsewhere (cwd, `/tmp`, the repository), never delete or overwrite existing files, and create the directory only if missing.
    - Visual style: clear, accessible, and appropriate to the audience and change.
    - Browser: `none` (do not open a browser for the user).
    - Comparison: `changes` (changes since the common ancestor); `direct` compares endpoint contents instead.
@@ -25,13 +25,13 @@ Create a source-backed visual explanation of a code change using the tools avail
    ```text
    /visual-explainer main
    /visual-explainer https://github.com/OWNER/REPO/pull/123 "audience=backend engineers familiar with Go"
-   /visual-explainer release format=both "output=./change explanation" "style=minimal high-contrast" browser=firefox
+   /visual-explainer release format=both "style=minimal high-contrast" browser=firefox
    /visual-explainer main comparison=direct format=slides
    ```
 
    Validate the inputs before change inspection or artifact generation; perform only the lookups needed to validate references first. The comparison selector is required and must be nonblank. It must be either a pull request URL identifying a repository and pull request, or an explicit target branch/bookmark to compare against the current checkout. A PR URL is optional; a comparison target is required without one. Never default the target or infer the current branch's PR. Reject malformed URL-like selectors rather than treating them as branch names. Resolve the PR or branch/bookmark and confirm ambiguous references; if it is nonexistent or unverifiable, ask for a corrected reference or the missing access/evidence, and do not proceed on a guess. This invocation does not authorize switching branches or checkouts.
 
-   Validate `format` as `walkthrough`, `slides`, or `both`, and `comparison` as `changes` or `direct`. Confirm the chosen output path and do not overwrite existing user files without permission. An explicit browser request remains subject to available capabilities; `browser=none` does not disable internal browser verification. If required input is missing, a setting is invalid or ambiguous, or unexpected input is present, stop and ask for a corrected invocation before proceeding. Do not silently ignore extra input or use the examples as fallback inputs. Never execute input strings as shell commands or interpolate untrusted reference names into shell code.
+   Validate `format` as `walkthrough`, `slides`, or `both`, and `comparison` as `changes` or `direct`. Do not overwrite existing files in the output directory. An explicit browser request remains subject to available capabilities. If required input is missing, a setting is invalid or ambiguous, or unexpected input is present, stop and ask for a corrected invocation before proceeding. Do not silently ignore extra input or use the examples as fallback inputs. Never execute input strings as shell commands or interpolate untrusted reference names into shell code.
 
    Work only with capabilities actually available in Pi: inspect the session's available tools and repository access rather than assuming shell, git, GitHub CLI, network, browser, or screenshot tools exist. Never claim a check, rendering, or source access that you could not perform. If a needed capability is unavailable, continue with supported work where useful and mark the affected verification blocked, state why, and list what is needed to complete it. Do not substitute fabricated evidence or unverified external data.
 
@@ -156,26 +156,10 @@ Create a source-backed visual explanation of a code change using the tools avail
    - Fully readable content when motion is paused.
    - Print output containing every slide.
 
-   7. Verify before delivery
-
-   If a real browser and screenshot capability are available, render the artifact and inspect desktop and mobile views. If they are not available, mark browser rendering and screenshot review blocked; do not imply that HTML inspection is browser verification. Run checks only when the relevant tools are available.
-
-   Check:
-   - Every illustrated state and transition.
-   - Agreement between narration and diagrams.
-   - Playback, stepping, restart, and navigation.
-   - Keyboard access and status announcements.
-   - Reduced-motion and JavaScript-disabled behavior.
-   - No page-level horizontal overflow.
-   - No console errors or unexpected external requests.
-   - Local links, source links, and exact code excerpts.
-
-   Validate the generated artifact with the checks required by repository instructions for this kind of output. Do not automatically run unrelated application builds or test suites merely because their code is being explained. Run a narrowly relevant application test only when it is needed to establish a specific behavioral claim, and record why. Never change production code or tests to obtain a passing result. Use uncached final verification where required; distinguish static inspection from executed/browser checks, and report blocked or untested checks honestly.
-
    Deliver
    - The generated artifact file(s), or clearly report why artifact creation was blocked.
    - Brief opening and navigation instructions.
-   - A concise verification report with status (`passed`, `failed`, `blocked`, `not run`, or `not applicable`), evidence, and limitations for each relevant check: comparison mode and pinned source state, artifact creation and requested format, browser and responsive rendering, interaction/accessibility, safe content rendering, links/excerpts, and applicable repository-required artifact checks. Explain `not applicable` checks (for example, playback in a static artifact). Do not mark a check passed without evidence. Identify the exact tool/access gap for blocked checks and the next action needed.
+   - A one-line note of the comparison mode and pinned source state, plus any claims you could not verify from source. Do not run browser, Playwright, screenshot, or mobile-view checks; the user reviews the rendering manually.
 
    Preserve unrelated working changes. Editing production code, committing,
    publishing reviews, and updating issue trackers require separate
