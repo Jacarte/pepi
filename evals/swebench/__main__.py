@@ -58,6 +58,10 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--memory", default="8g")
     run.add_argument("--secrets-dir", type=Path,
                      help="directory with chmod-600 auth.json and/or mcp.json; injected into a tmpfs at run time")
+    run.add_argument("--pass-env", action="append", default=[], metavar="NAME",
+                     help="forward this environment variable into the task container by name (repeatable); "
+                          "the value comes from this process's environment, is readable by the agent and "
+                          "its MCP servers, and is redacted from artifacts")
     return parser
 
 
@@ -88,7 +92,8 @@ def main(argv=None) -> int:
             build_images(args.run.resolve(), args.platform)
         elif args.command == "run":
             return run_tasks(args.run.resolve(), args.timeout_seconds, args.network, str(args.cpus),
-                             args.memory, args.secrets_dir.absolute() if args.secrets_dir else None)
+                             args.memory, args.secrets_dir.absolute() if args.secrets_dir else None,
+                             args.pass_env)
     except (ValueError, OSError, ImportError, KeyError) as error:
         print(f"pepi-eval: {error}", file=sys.stderr)
         return EXIT_USAGE

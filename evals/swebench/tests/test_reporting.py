@@ -132,11 +132,79 @@ class ReportingTests(unittest.TestCase):
     def test_pairing_refuses_mismatched_tasks_or_budgets(self):
         run, _ = self.fixture()
         baseline = summarize_run(run)
-        for key in ("task_identity", "protocol", "dataset"):
+        for key in ("task_identity", "dataset"):
             candidate = copy.deepcopy(baseline)
             candidate[key] = "different"
-            with self.assertRaises(ValueError):
+            with self.assertRaisesRegex(ValueError, f"different {key}; do not silently intersect"):
                 compare(baseline, candidate)
+        candidate = copy.deepcopy(baseline)
+        candidate["protocol"] = "different"
+        with self.assertRaisesRegex(ValueError, "malformed execution protocol"):
+            compare(baseline, candidate)
+
+    def real_protocol(self, **changes):
+        # Shape of execution.json from smoke-20261017-1109 (no forwarding, no auth.json).
+        protocol = {"timeout_seconds": 300.0, "network": "pepi-eval", "network_policy": "operator-managed; not verified",
+                    "cpus": 4.0, "memory": "8g", "concurrency": 1, "host": "macOS-26.7.1-arm64-arm-64bit",
+                    "pids_limit": 512, "timeout_scope": "Pi invocation; setup and export are outside this deadline",
+                    "timeout_patch_policy": "submit partial diff after stopping all agent processes",
+                    "secrets": {"auth.json": {"present": False}, "mcp.json": {"present": False}},
+                    "config_label": None, "mcp": {"enabled": True, "commands": []}}
+        protocol.update(changes)
+        return protocol
+
+    def paired(self, baseline_protocol, candidate_protocol):
+        run, _ = self.fixture()
+        baseline = summarize_run(run)
+        candidate = copy.deepcopy(baseline)
+        candidate["run_id"] = "candidate"
+        baseline["protocol"], candidate["protocol"] = baseline_protocol, candidate_protocol
+        return baseline, candidate
+
+    def test_pairing_reports_forwarded_env_and_auth_presence_as_configuration(self):
+        candidate_protocol = self.real_protocol(
+            secrets={"auth.json": {"present": True}, "mcp.json": {"present": False}},
+            forwarded_env_names=["TYPESAFE_API_KEY"])
+        result = compare(*self.paired(self.real_protocol(), candidate_protocol))
+        self.assertEqual(result["configuration_differences"], {
+            "forwarded_env_names": {"baseline": [], "candidate": ["TYPESAFE_API_KEY"]},
+            "secrets": {"baseline": {"auth.json": {"present": False}, "mcp.json": {"present": False}},
+                        "candidate": {"auth.json": {"present": True}, "mcp.json": {"present": False}}}})
+        self.assertEqual(list(result["configuration_differences"]), ["forwarded_env_names", "secrets"])
+
+    def test_pairing_rejects_measurement_protocol_mismatch_naming_keys(self):
+        with self.assertRaisesRegex(ValueError, "different execution protocol: timeout_seconds, cpus$"):
+            compare(*self.paired(self.real_protocol(), self.real_protocol(timeout_seconds=600.0, cpus=2.0)))
+        legacy = self.real_protocol()
+        del legacy["pids_limit"]
+        with self.assertRaisesRegex(ValueError, "different execution protocol: pids_limit$"):
+            compare(*self.paired(legacy, self.real_protocol()))
+        both_legacy = copy.deepcopy(legacy)
+        self.assertEqual(compare(*self.paired(legacy, both_legacy))["configuration_differences"], {})
+
+    def test_pairing_treats_absent_forwarded_env_names_as_empty(self):
+        result = compare(*self.paired(self.real_protocol(), self.real_protocol(forwarded_env_names=[])))
+        self.assertEqual(result["configuration_differences"], {})
+        result = compare(*self.paired(self.real_protocol(), self.real_protocol(forwarded_env_names=["ALPHA"])))
+        self.assertEqual(result["configuration_differences"],
+                         {"forwarded_env_names": {"baseline": [], "candidate": ["ALPHA"]}})
+
+    def test_pairing_treats_absent_mcp_servers_as_empty(self):
+        result = compare(*self.paired(self.real_protocol(), self.real_protocol(mcp_servers=[])))
+        self.assertEqual(result["configuration_differences"], {})
+        result = compare(*self.paired(self.real_protocol(), self.real_protocol(mcp_servers=["docs"])))
+        self.assertEqual(result["configuration_differences"],
+                         {"mcp_servers": {"baseline": [], "candidate": ["docs"]}})
+
+    def test_pairing_reports_config_label_and_unknown_keys_safely(self):
+        candidate_protocol = self.real_protocol(config_label="x" * 500, extra={"nested": [1, float("nan")]})
+        result = compare(*self.paired(self.real_protocol(), candidate_protocol))
+        differences = result["configuration_differences"]
+        self.assertEqual(list(differences), ["config_label", "extra"])
+        self.assertEqual(differences["config_label"], {"baseline": None, "candidate": "x" * 200})
+        self.assertEqual(differences["extra"], {"baseline": None,
+                                                "candidate": {"nested": [1, "<unsupported value>"]}})
+        json.dumps(differences, allow_nan=False)
 
     def test_pairing_does_not_label_unknown_grade_a_regression(self):
         run, _ = self.fixture()

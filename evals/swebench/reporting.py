@@ -18,6 +18,16 @@ from .common import fingerprint, identifier, read_json, read_manifest, write_jso
 from .telemetry import collect, number, records
 
 
+# execution.json keys that change what is measured; paired runs must match on all of them.
+# Every other execution.json key is configuration: reported by compare(), never a blocker.
+COMPARABLE_PROTOCOL_KEYS = ("timeout_seconds", "cpus", "memory", "concurrency", "host", "network",
+                            "network_policy", "pids_limit", "timeout_scope", "timeout_patch_policy")
+# Runs omit forwarded_env_names/mcp_servers when nothing is forwarded/copied, so absent equals [].
+CONFIGURATION_DEFAULTS = {"forwarded_env_names": [], "mcp_servers": []}
+CONFIGURATION_STRING_LIMIT = 200
+MISSING = object()
+
+
 def file_hash(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -189,10 +199,43 @@ def summarize_run(run: Path) -> dict:
     return summary
 
 
+def configuration_value(value):
+    """Keep only JSON-plain values with capped strings, so configuration differences are safe to display."""
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value if math.isfinite(value) else "<unsupported value>"
+    if isinstance(value, str):
+        return value[:CONFIGURATION_STRING_LIMIT]
+    if isinstance(value, list):
+        return [configuration_value(item) for item in value]
+    if isinstance(value, dict):
+        return {key[:CONFIGURATION_STRING_LIMIT]: configuration_value(item)
+                for key, item in value.items() if isinstance(key, str)}
+    return "<unsupported value>"
+
+
+def configuration_differences(left: dict, right: dict) -> dict:
+    result = {}
+    for key in sorted((set(left) | set(right)) - set(COMPARABLE_PROTOCOL_KEYS)):
+        default = CONFIGURATION_DEFAULTS.get(key)
+        baseline, candidate = left.get(key, default), right.get(key, default)
+        if baseline != candidate:
+            result[key] = {"baseline": configuration_value(baseline), "candidate": configuration_value(candidate)}
+    return result
+
+
 def compare(left: dict, right: dict) -> dict:
-    for key in ("dataset", "task_identity", "protocol"):
+    for key in ("dataset", "task_identity"):
         if left[key] != right[key]:
             raise ValueError(f"Cannot pair runs with different {key}; do not silently intersect task sets")
+    protocols = left["protocol"], right["protocol"]
+    if not all(isinstance(protocol, dict) for protocol in protocols):
+        raise ValueError("Cannot pair runs with a malformed execution protocol; summarize them again")
+    different = [key for key in COMPARABLE_PROTOCOL_KEYS
+                 if protocols[0].get(key, MISSING) != protocols[1].get(key, MISSING)]
+    if different:
+        raise ValueError(f"Cannot pair runs with different execution protocol: {', '.join(different)}")
     if left.get("selection") != right.get("selection"):
         raise ValueError("Cannot pair runs with different frozen selection/source provenance")
     if left.get("selection", {}).get("preset"):
@@ -227,6 +270,7 @@ def compare(left: dict, right: dict) -> dict:
             "both_resolved_latency_pairs": len(deltas),
             "both_resolved_latency_delta_median_seconds": statistics.median(deltas) if deltas else None,
             "estimated_cost_delta_usd": y - x if x is not None and y is not None else None,
+            "configuration_differences": configuration_differences(*protocols),
             "note": "Positive deltas mean more time/cost for the candidate; repeat runs before interpreting small differences."}
     if left.get("selection", {}).get("preset"):
         result.update({"selection": left["selection"], "selected": left["selected"],

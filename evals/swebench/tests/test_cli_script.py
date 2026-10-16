@@ -18,9 +18,39 @@ from evals.swebench.tests.test_runner import prepare_fixture
 from evals.swebench.tests.test_profiles import repository, prepare
 
 # Stand-in for the swebench venv's python: records `-m` invocations, exits with $FAKE_STATUS.
+# Preflight `-c` imports succeed unless FAKE_NO_LZMA / FAKE_NO_PIPE / FAKE_NO_HARNESS /
+# FAKE_NO_SWEBENCH is set (FAKE_NO_PIPE crashes with exit 139 like a segfault); the fake pyenv
+# install and pip install markers in $FAKE_STATE repair them.
 FAKE_PYTHON = """#!/bin/sh
+if [ "$1" = "-c" ]; then
+    case "$2" in
+        "import lzma") [ -z "$FAKE_NO_LZMA" ] || [ -e "$FAKE_STATE/lzma-fixed" ] || { echo "ModuleNotFoundError: No module named '_lzma'" >&2; exit 1; } ;;
+        "import os, subprocess; os.pipe(); subprocess.run(['true'], check=True)") [ -z "$FAKE_NO_PIPE" ] || [ -e "$FAKE_STATE/pipe-fixed" ] || exit 139 ;;
+        "import swebench.harness.run_evaluation") [ -z "$FAKE_NO_HARNESS" ] || [ -e "$FAKE_STATE/pip-installed" ] || { echo "ImportError: harness broke" >&2; exit 1; } ;;
+        "import swebench.task.repo") [ -z "$FAKE_NO_SWEBENCH" ] || [ -e "$FAKE_STATE/pip-installed" ] || exit 1 ;;
+        "import sys;print(sys.version.split()[0])") echo 3.12.13 ;;
+        "import sys;print(sys.base_prefix)") echo "$FAKE_BASE_PREFIX" ;;
+    esac
+    exit 0
+fi
 [ "$1" = "-m" ] || exit 0
 printf '%s\\n' "$*" >> "$FAKE_LOG"
+# FAKE_ENV_DUMP: record the exact environment a runner child receives (JSON keeps newlines).
+[ -z "$FAKE_ENV_DUMP" ] || python3 -c 'import json, os, sys; json.dump(dict(os.environ), open(sys.argv[1], "w"))' "$FAKE_ENV_DUMP"
+# FAKE_ENV_LOG: append {"argv", "env"} per `-m` call, so tests can tell the steps apart.
+[ -z "$FAKE_ENV_LOG" ] || python3 -c 'import json, os, sys; open(sys.argv[1], "a").write(json.dumps({"argv": sys.argv[2:], "env": dict(os.environ)}) + "\\n")' "$FAKE_ENV_LOG" "$@"
+# FAKE_PREPARE_FIXTURE: `prepare` copies that run directory to --out and `run` writes an empty
+# predictions.jsonl, so `all` can go through every step.
+if [ -n "$FAKE_PREPARE_FIXTURE" ] && [ "$2" = evals.swebench ]; then
+    case "$3" in
+        prepare) previous=""; for arg; do [ "$previous" = --out ] && cp -R "$FAKE_PREPARE_FIXTURE" "$arg"; previous=$arg; done ;;
+        run) : > "$4/predictions.jsonl" ;;
+    esac
+fi
+case "$2" in
+    venv) mkdir -p "$3/bin" && cp "$0" "$3/bin/python" && : > "$3/pyvenv.cfg"; exit 0 ;;
+    pip) [ -n "$FAKE_PIP_NOOP" ] || : > "$FAKE_STATE/pip-installed"; exit 0 ;;
+esac
 if [ -n "$FAKE_IDS_LOG" ]; then
     while [ "$#" -gt 0 ]; do
         if [ "$1" = "--ids" ]; then cat "$2" > "$FAKE_IDS_LOG"; break; fi
@@ -30,10 +60,46 @@ fi
 exit "${FAKE_STATUS:-0}"
 """
 
+# Fake Homebrew/pyenv shadow the host tools: queries are answered from $FAKE_STATE and
+# $FAKE_PYENV_ROOT, and only installs are logged to $FAKE_LOG.
+FAKE_BREW = """#!/bin/sh
+case "$1" in
+    list) [ -e "$FAKE_STATE/brew-xz" ] ;;
+    --prefix) echo "$FAKE_BREW_PREFIX/opt/$2" ;;
+    install) printf 'brew %s\\n' "$*" >> "$FAKE_LOG"; : > "$FAKE_STATE/brew-xz" ;;
+    *) exit 1 ;;
+esac
+"""
 
-class PepiEvalTest(unittest.TestCase):
-    """Test evals/pepi-eval.sh command line interface."""
-    
+# uname -s answers $FAKE_UNAME (default Darwin) so tests do not depend on the host OS.
+FAKE_UNAME = """#!/bin/sh
+if [ "$1" = "-s" ]; then echo "${FAKE_UNAME:-Darwin}"; else exec /usr/bin/uname "$@"; fi
+"""
+
+FAKE_PYENV = """#!/bin/sh
+case "$1" in
+    versions) ls "$FAKE_PYENV_ROOT/versions" ;;
+    prefix) [ -d "$FAKE_PYENV_ROOT/versions/$2" ] && echo "$FAKE_PYENV_ROOT/versions/$2" ;;
+    install)
+        printf 'pyenv %s CFLAGS=%s LDFLAGS=%s ac_cv_func_pipe2=%s\\n' "$*" "$CFLAGS" "$LDFLAGS" "${ac_cv_func_pipe2-unset}" >> "$FAKE_LOG"
+        [ -z "$FAKE_PYENV_FAIL" ] || exit 1
+        : > "$FAKE_STATE/lzma-fixed"
+        [ "$ac_cv_func_pipe2" != no ] || : > "$FAKE_STATE/pipe-fixed" ;;
+    *) exit 1 ;;
+esac
+"""
+
+
+def write_executable(path, content):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content)
+    path.chmod(path.stat().st_mode | stat.S_IXUSR)
+
+
+class ScriptHarness(unittest.TestCase):
+    """Fake venv/docker/HOME for evals/pepi-eval.sh; launched from an empty directory so a
+    ./.env in the developer's working tree never leaks into tests."""
+
     @classmethod
     def setUpClass(cls):
         cls.script_path = Path(__file__).resolve().parents[2] / "pepi-eval.sh"
@@ -44,11 +110,13 @@ class PepiEvalTest(unittest.TestCase):
         self.runs_tmpdir = tempfile.TemporaryDirectory()
         self.fake = tempfile.TemporaryDirectory()
         fake = Path(self.fake.name)
-        (fake / 'venv/bin').mkdir(parents=True)
-        python = fake / 'venv/bin/python'
-        python.write_text(FAKE_PYTHON)
-        python.chmod(python.stat().st_mode | stat.S_IXUSR)
-        (fake / 'bin').mkdir()
+        write_executable(fake / 'venv/bin/python', FAKE_PYTHON)
+        (fake / 'venv/pyvenv.cfg').write_text('home = fake\n')
+        write_executable(fake / 'pyenv/versions/3.12.13/bin/python3', FAKE_PYTHON)
+        write_executable(fake / 'bin/brew', FAKE_BREW)
+        write_executable(fake / 'bin/pyenv', FAKE_PYENV)
+        write_executable(fake / 'bin/uname', FAKE_UNAME)
+        (fake / 'state').mkdir()
         docker = fake / 'bin/docker'
         docker.write_text('#!/bin/sh\nexit 0\n')
         docker.chmod(docker.stat().st_mode | stat.S_IXUSR)
@@ -58,6 +126,8 @@ class PepiEvalTest(unittest.TestCase):
         self.log = fake / 'calls.log'
         self.home = fake / 'home'
         self.home.mkdir()
+        self.launch = fake / 'launch'
+        self.launch.mkdir()
     
     def tearDown(self):
         self.runs_tmpdir.cleanup()
@@ -71,6 +141,10 @@ class PepiEvalTest(unittest.TestCase):
         env['PEPI_EVAL_VENV'] = str(Path(self.fake.name) / 'venv')
         env['PATH'] = f"{Path(self.fake.name) / 'bin'}{os.pathsep}{env['PATH']}"
         env['FAKE_LOG'] = str(self.log)
+        env['FAKE_STATE'] = str(Path(self.fake.name) / 'state')
+        env['FAKE_PYENV_ROOT'] = str(Path(self.fake.name) / 'pyenv')
+        env['FAKE_BASE_PREFIX'] = str(Path(self.fake.name) / 'pyenv/versions/3.12.13')
+        env['FAKE_BREW_PREFIX'] = str(Path(self.fake.name) / 'homebrew')
         env['PYTHONDONTWRITEBYTECODE'] = '1'
         
         if env_extra:
@@ -83,13 +157,18 @@ class PepiEvalTest(unittest.TestCase):
         result = subprocess.run(
             ['bash', str(self.script_path)] + args,
             env=self.script_env(env_extra),
+            cwd=self.launch,
             capture_output=True,
             text=True,
             input=stdin,
             timeout=5
         )
         return result
-    
+
+
+class PepiEvalTest(ScriptHarness):
+    """Test evals/pepi-eval.sh command line interface."""
+
     def test_dry_run_prints_commands_to_stdout(self):
         """Dry-run prints commands to stdout, not stderr."""
         env = {
@@ -417,7 +496,7 @@ fi
                 master, slave = pty.openpty()
                 process = subprocess.Popen(['bash', str(self.script_path), '-y', command],
                                            stdin=slave, stdout=slave, stderr=slave,
-                                           env=self.script_env())
+                                           cwd=self.launch, env=self.script_env())
                 os.close(slave)
                 output = b''
                 try:
@@ -459,6 +538,271 @@ fi
                 result = self.run_script(['-y', 'prepare'], stdin='', env_extra={
                     'PEPI_EVAL_RUN_NAME': f'status-{status}', 'FAKE_STATUS': status})
                 self.assertEqual(result.returncode, expected, result.stderr)
+
+    def test_missing_lzma_fails_preflight_with_xz_guidance(self):
+        result = self.run_script(['check'], env_extra={'FAKE_NO_LZMA': '1'})
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('lzma', result.stderr)
+        self.assertIn('xz', result.stderr)
+        self.assertIn('pyenv install --force 3.12.13', result.stderr)
+        self.assertFalse(self.log.exists(), 'no runner/docker/pi call after failed preflight')
+
+    def test_harness_import_failure_fails_preflight(self):
+        result = self.run_script(['check'], env_extra={'FAKE_NO_HARNESS': '1'})
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('swebench.harness.run_evaluation', result.stderr)
+        self.assertIn('ImportError: harness broke', result.stderr)
+        self.assertIn('pip install -e ~/SWE-bench', result.stderr)
+
+    def test_broken_runtime_fails_preflight_with_pipe2_guidance(self):
+        result = self.run_script(['check'], env_extra={'FAKE_NO_PIPE': '1'})
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('crashes on os.pipe()/subprocess', result.stderr)
+        self.assertIn('exit status 139', result.stderr)
+        self.assertIn('pipe2', result.stderr)
+        self.assertIn('ac_cv_func_pipe2=no pyenv install --force 3.12.13', result.stderr)
+        self.assertFalse(self.log.exists(), 'no runner/docker/pi call after failed preflight')
+
+    def test_real_segfault_is_reported_with_status_not_a_bare_shell_message(self):
+        write_executable(Path(self.fake.name) / 'venv/bin/python', FAKE_PYTHON.replace(
+            'if [ "$1" = "-c" ]; then', 'if [ "$1" = "-c" ] && [ "${2#import os}" != "$2" ]; then kill -SEGV $$; fi\nif [ "$1" = "-c" ]; then', 1))
+        result = self.run_script(['check'], env_extra={'FAKE_NO_PIPE': '1'})
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('crashes on os.pipe()/subprocess (exit status 139', result.stderr)
+
+    def test_lzma_message_wins_over_harness_failure(self):
+        result = self.run_script(['check'], env_extra={'FAKE_NO_LZMA': '1', 'FAKE_NO_HARNESS': '1'})
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('xz', result.stderr)
+
+    def test_compare_is_exempt_from_grader_preflight(self):
+        result = self.run_script(['compare'], env_extra={
+            'FAKE_NO_LZMA': '1', 'FAKE_NO_HARNESS': '1',
+            'PEPI_EVAL_BASELINE_RUN': 'a', 'PEPI_EVAL_CANDIDATE_RUN': 'b'})
+        self.assertNotIn('lzma', result.stderr)
+        self.assertNotIn('run_evaluation', result.stderr)
+
+    def test_dry_run_skips_preflight(self):
+        result = self.run_script(['--dry-run', 'prepare'], env_extra={
+            'FAKE_NO_LZMA': '1', 'FAKE_NO_PIPE': '1', 'FAKE_NO_HARNESS': '1', 'PEPI_EVAL_RUN_NAME': 'dry'})
+        self.assertNotIn('lzma', result.stderr)
+        self.assertNotIn('os.pipe', result.stderr)
+
+    def test_compare_is_exempt_from_runtime_preflight(self):
+        result = self.run_script(['compare'], env_extra={
+            'FAKE_NO_PIPE': '1', 'PEPI_EVAL_BASELINE_RUN': 'a', 'PEPI_EVAL_CANDIDATE_RUN': 'b'})
+        self.assertNotIn('os.pipe', result.stderr)
+
+    def repair_env(self, extra=None):
+        """Env with SWE-bench/task repos present, so a venv repair plan is possible."""
+        for name in ('SWE-bench', 'swe-bench-tasks'):
+            (self.home / name).mkdir(exist_ok=True)
+        return {'PEPI_EVAL_SWEBENCH_REPO': str(self.home / 'SWE-bench'),
+                'PEPI_EVAL_TASK_REPO': str(self.home / 'swe-bench-tasks'), **(extra or {})}
+
+    def calls(self):
+        return self.log.read_text().splitlines() if self.log.exists() else []
+
+    def backups(self):
+        return sorted(Path(self.fake.name).glob('venv.bak-*'))
+
+    def tty_fix(self, args, env, answer):
+        """Run on a pty; answer the venv-fix prompt once and return (status, output)."""
+        master, slave = pty.openpty()
+        process = subprocess.Popen(['bash', str(self.script_path), *args],
+                                   stdin=slave, stdout=slave, stderr=slave, cwd=self.launch, env=self.script_env(env))
+        os.close(slave)
+        output = b''
+        try:
+            deadline = time.monotonic() + 8
+            answered = False
+            while time.monotonic() < deadline:
+                if select.select([master], [], [], 0.1)[0]:
+                    try: chunk = os.read(master, 65536)
+                    except OSError: break
+                    if not chunk: break
+                    output += chunk
+                    if b'Run these fix commands now? [y/N]' in output and not answered:
+                        self.assertEqual(self.calls(), [], 'nothing runs before consent')
+                        os.write(master, answer.encode() + b'\n')
+                        answered = True
+                elif process.poll() is not None:
+                    break
+            process.wait(timeout=3)
+            return process.returncode, output.decode()
+        finally:
+            if process.poll() is None:
+                process.terminate(); process.wait(timeout=3)
+            os.close(master)
+
+    def test_venv_fix_tty_decline_runs_nothing(self):
+        status, output = self.tty_fix(['check'], self.repair_env({'FAKE_NO_LZMA': '1'}), 'n')
+        self.assertEqual(status, 2, output)
+        self.assertIn('1. brew install xz', output)
+        self.assertIn('pyenv install --force 3.12.13', output)
+        self.assertIn('never deleted', output)
+        self.assertIn('rebuilds Python 3.12.13 in place', output)
+        self.assertIn('Venv not fixed', output)
+        self.assertEqual(self.calls(), [])
+        self.assertEqual(self.backups(), [])
+        self.assertTrue((Path(self.fake.name) / 'venv/pyvenv.cfg').exists())
+
+    def test_venv_fix_tty_accept_rebuilds_python_and_recreates_venv(self):
+        status, output = self.tty_fix(['check'], self.repair_env({'FAKE_NO_LZMA': '1'}), 'y')
+        self.assertEqual(status, 0, output)
+        fake = Path(self.fake.name)
+        venv, repo = fake / 'venv', self.home / 'SWE-bench'
+        xz = fake / 'homebrew/opt/xz'
+        self.assertEqual(self.calls(), [
+            'brew install xz',
+            f'pyenv install --force 3.12.13 CFLAGS=-I{xz}/include LDFLAGS=-L{xz}/lib ac_cv_func_pipe2=no',
+            f'-m venv {venv}',
+            f'-m pip install -e {repo}',
+        ])
+        [backup] = self.backups()
+        self.assertEqual((backup / 'pyvenv.cfg').read_text(), 'home = fake\n')
+        self.assertTrue((venv / 'bin/python').exists())
+        self.assertIn('pepi-eval: + brew install xz', output)
+        self.assertIn(f'pepi-eval: + mv -- {venv} {backup}', output)
+        self.assertIn('venv fixed', output)
+        self.assertIn('task-repo ready', output)
+
+    def test_broken_runtime_fix_shows_pipe2_in_non_tty_plan(self):
+        result = self.run_script(['check'], self.repair_env({'FAKE_NO_PIPE': '1'}), stdin='')
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('proposed fix:', result.stderr)
+        self.assertRegex(result.stderr, r'\d\. CFLAGS=\S+ LDFLAGS=\S+ ac_cv_func_pipe2=no pyenv install --force 3\.12\.13')
+        self.assertEqual(self.calls(), [])
+
+    def test_broken_runtime_tty_accept_rebuilds_with_pipe2_off_and_reverifies(self):
+        status, output = self.tty_fix(['check'], self.repair_env({'FAKE_NO_PIPE': '1'}), 'y')
+        self.assertEqual(status, 0, output)
+        fake = Path(self.fake.name)
+        xz = fake / 'homebrew/opt/xz'
+        self.assertEqual(self.calls(), [
+            'brew install xz',
+            f'pyenv install --force 3.12.13 CFLAGS=-I{xz}/include LDFLAGS=-L{xz}/lib ac_cv_func_pipe2=no',
+            f"-m venv {fake / 'venv'}",
+            f"-m pip install -e {self.home / 'SWE-bench'}",
+        ])
+        self.assertTrue((fake / 'state/pipe-fixed').exists())
+        self.assertIn('venv fixed', output)
+
+    def test_pipe2_override_is_only_set_on_macos(self):
+        result = self.run_script(['check'], self.repair_env({
+            'FAKE_NO_LZMA': '1', 'FAKE_UNAME': 'Linux', 'PEPI_EVAL_AUTO_FIX': '1'}), stdin='')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('ac_cv_func_pipe2=unset', self.calls()[1])
+        self.assertNotRegex(result.stderr, r'ac_cv_func_pipe2=no pyenv install --force 3\.12\.13\n')
+
+    def test_venv_fix_step_failure_exits_3_before_moving_venv(self):
+        result = self.run_script(['check'], self.repair_env({
+            'FAKE_NO_LZMA': '1', 'FAKE_PYENV_FAIL': '1', 'PEPI_EVAL_AUTO_FIX': '1'}))
+        self.assertEqual(result.returncode, 3, result.stderr)
+        self.assertIn('Fix step 2 failed: CFLAGS=', result.stderr)
+        self.assertEqual([call.split()[0] for call in self.calls()], ['brew', 'pyenv'])
+        self.assertEqual(self.backups(), [])
+
+    def test_venv_fix_needs_consent_without_terminal_even_with_yes(self):
+        for args in (['check'], ['-y', 'check']):
+            with self.subTest(args=args):
+                result = self.run_script(args, self.repair_env({'FAKE_NO_LZMA': '1'}), stdin='')
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn('proposed fix:', result.stderr)
+                self.assertIn('PEPI_EVAL_AUTO_FIX=1', result.stderr)
+                self.assertEqual(self.calls(), [])
+                self.assertEqual(self.backups(), [])
+        status, output = self.tty_fix(['-y', 'check'], self.repair_env({'FAKE_NO_LZMA': '1'}), '')
+        self.assertEqual(status, 2, output)
+        self.assertIn('Run these fix commands now? [y/N]', output)
+        self.assertEqual(self.calls(), [])
+
+    def test_auto_fix_env_runs_without_terminal_and_skips_installed_xz(self):
+        (Path(self.fake.name) / 'state/brew-xz').touch()
+        venv = Path(self.fake.name) / 'venv'
+        result = self.run_script(['check'], self.repair_env({
+            'FAKE_NO_LZMA': '1', 'PEPI_EVAL_AUTO_FIX': '1', 'PEPI_EVAL_VENV': f'{venv}/'}), stdin='')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual([call.split()[:2] for call in self.calls()],
+                         [['pyenv', 'install'], ['-m', 'venv'], ['-m', 'pip']])
+        self.assertIn(f'-m venv {venv}', self.calls()[1])
+        self.assertEqual([path.parent for path in self.backups()], [venv.parent])
+
+    def test_harness_fix_reinstalls_swebench_then_reverifies_once(self):
+        env = self.repair_env({'FAKE_NO_HARNESS': '1', 'PEPI_EVAL_AUTO_FIX': '1'})
+        result = self.run_script(['check'], env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.calls(), [f"-m pip install -e {self.home / 'SWE-bench'}"])
+        self.assertEqual(self.backups(), [])
+        self.log.unlink()
+        (Path(self.fake.name) / 'state/pip-installed').unlink()
+        result = self.run_script(['check'], {**env, 'FAKE_PIP_NOOP': '1'})
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('Fix did not resolve the venv: swebench.harness.run_evaluation', result.stderr)
+        self.assertEqual(len(self.calls()), 1)
+
+    def test_missing_venv_fix_creates_it_and_compare_offers_it_too(self):
+        write_executable(Path(self.fake.name) / 'bin/python3', FAKE_PYTHON)
+        venv = Path(self.fake.name) / 'new-venv'
+        env = self.repair_env({'PEPI_EVAL_VENV': str(venv)})
+        result = self.run_script(['compare'], env, stdin='')
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn(f'-m venv {venv}', result.stderr)
+        self.assertEqual(self.calls(), [])
+        result = self.run_script(['check'], {**env, 'PEPI_EVAL_AUTO_FIX': '1'})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.calls(), [f'-m venv {venv}', f"-m pip install -e {self.home / 'SWE-bench'}"])
+        self.assertTrue((venv / 'bin/python').exists())
+
+    def test_no_automatic_fix_without_pyenv_python_or_brew(self):
+        fake = Path(self.fake.name)
+        cases = {'not pyenv': ({'FAKE_BASE_PREFIX': '/usr'}, 'not on pyenv'),
+                 'no brew': ({'PATH': f"{fake / 'bin'}{os.pathsep}/usr/bin{os.pathsep}/bin"},
+                             'OS package manager')}
+        for name, (extra, reason) in cases.items():
+            with self.subTest(name):
+                if name == 'no brew':
+                    (fake / 'bin/brew').unlink()
+                result = self.run_script(['prepare'], self.repair_env({
+                    'FAKE_NO_LZMA': '1', 'PEPI_EVAL_AUTO_FIX': '1', **extra}))
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn('No automatic fix offered', result.stderr)
+                self.assertIn(reason, result.stderr)
+                self.assertIn('pyenv install --force 3.12.13', result.stderr)
+                self.assertNotIn('proposed fix:', result.stderr)
+                self.assertEqual(self.calls(), [])
+
+    def test_venv_move_refuses_home_and_non_venv_directories(self):
+        write_executable(self.home / 'bin/python', FAKE_PYTHON)
+        (self.home / 'pyvenv.cfg').write_text('home = fake\n')
+        (Path(self.fake.name) / 'venv/pyvenv.cfg').unlink()
+        cases = {'home': ({'PEPI_EVAL_VENV': str(self.home)}, 'or $HOME'),
+                 'no pyvenv.cfg': ({}, 'no pyvenv.cfg')}
+        for name, (extra, reason) in cases.items():
+            with self.subTest(name):
+                result = self.run_script(['check'], self.repair_env({
+                    'FAKE_NO_LZMA': '1', 'PEPI_EVAL_AUTO_FIX': '1', **extra}))
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn('refusing to move', result.stderr)
+                self.assertIn(reason, result.stderr)
+                self.assertEqual(self.calls(), [])
+        self.assertTrue((self.home / 'pyvenv.cfg').exists())
+        self.assertEqual(sorted(Path(self.fake.name).glob('*.bak-*')) + sorted(self.home.parent.glob('home.bak-*')), [])
+
+    def test_dry_run_never_plans_or_runs_a_venv_fix(self):
+        venv = Path(self.fake.name) / 'missing-venv'
+        result = self.run_script(['--dry-run', 'prepare'], self.repair_env({
+            'PEPI_EVAL_VENV': str(venv), 'PEPI_EVAL_AUTO_FIX': '1', 'PEPI_EVAL_RUN_NAME': 'dry'}))
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('Venv not found', result.stderr)
+        self.assertNotIn('proposed fix:', result.stderr)
+        self.assertEqual(self.calls(), [])
+        self.assertFalse(venv.exists())
+
+    def test_invalid_auto_fix_value_is_rejected(self):
+        result = self.run_script(['check'], self.repair_env({'PEPI_EVAL_AUTO_FIX': 'yes'}))
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('PEPI_EVAL_AUTO_FIX must be 0 or 1', result.stderr)
 
     def test_prepare_failure_does_not_suggest_disabling_mcp(self):
         result = self.run_script(['-y', 'prepare'], stdin='', env_extra={
@@ -558,7 +902,8 @@ a = d / 'auth.json'
 pathlib.Path(os.environ['FAKE_CAPTURE']).write_text(json.dumps({
     'directory': str(d), 'dir_mode': stat.S_IMODE(d.stat().st_mode),
     'mode': stat.S_IMODE(a.stat().st_mode), 'files': sorted(p.name for p in d.iterdir()),
-    'auth': json.loads(a.read_bytes()), 'args': args, 'pid': os.getpid()}))
+    'auth': json.loads(a.read_bytes()), 'args': args, 'pid': os.getpid(),
+    'env': {k: os.environ.get(k) for k in os.environ.get('FAKE_CAPTURE_ENV', '').split(',') if k}}))
 if os.environ.get('FAKE_SLEEP') == '1':
     time.sleep(60)
 sys.exit(int(os.environ.get('FAKE_STATUS', '0')))
@@ -668,7 +1013,7 @@ exec python3 "$FAKE_INSPECTOR" "$@"
     def tty_host_auth(self, env, answer):
         master, slave = pty.openpty()
         process = subprocess.Popen(['bash', str(self.script_path), '-y', 'run'],
-                                   stdin=slave, stdout=slave, stderr=slave, env=self.script_env(env))
+                                   stdin=slave, stdout=slave, stderr=slave, cwd=self.launch, env=self.script_env(env))
         os.close(slave)
         output = b''
         try:
@@ -746,6 +1091,7 @@ exec python3 "$FAKE_INSPECTOR" "$@"
                 capture.unlink(missing_ok=True)
                 process = subprocess.Popen(['bash', str(self.script_path), '-y', 'run'],
                     env=self.script_env({**env, 'PEPI_EVAL_USE_HOST_AUTH': '1', 'FAKE_SLEEP': '1'}),
+                    cwd=self.launch,
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
                 child_pid = None
                 try:

@@ -86,6 +86,79 @@ def freeze_mcp(source: Callable[[str], Path], build: Path, pi_version: str,
     return policy, files
 
 
+class McpServerRejected(ValueError):
+    """One server this runtime cannot run. `reason` is short and never contains config values."""
+
+    def __init__(self, message: str, reason: str):
+        super().__init__(message)
+        self.reason = reason
+
+
+def _command_reason(command: str, policy: dict) -> str:
+    if command.startswith(MCP_BIN):
+        binary = command[len(MCP_BIN):]
+        return (f"{binary} is not in the frozen mcp-packages.json"
+                if re.fullmatch(COMMAND_NAME, binary) else "command not provisioned")
+    if "/" in command or command.startswith("~"):
+        return "host path command"
+    if re.fullmatch(COMMAND_NAME, command):
+        if command in policy["commands"]:
+            return f"{command} must be spelled {MCP_BIN}{command}"
+        return f"{command} not provisioned"
+    return "command not provisioned"
+
+
+def check_mcp_server(name: str, server, policy: dict, accepted: set[str]) -> None:
+    """Raise McpServerRejected unless this runtime can launch `server`.
+
+    `accepted` holds the normalized names (`-` as `_`) of servers already accepted.
+    """
+    native = re.fullmatch(r"[A-Za-z0-9_-]+", name) is not None
+    if not native or name.replace("-", "_") in accepted:
+        raise McpServerRejected("MCP server names must be native Pi identifiers without normalized collisions",
+                                "name collides with another server" if native else "name is not a native Pi identifier")
+    if not isinstance(server, dict):
+        raise McpServerRejected("MCP server entries must be objects", "entry is not an object")
+    allowed = {MCP_BIN + command for command in policy["commands"]}
+    if "command" in server:
+        if server.get("type", "stdio") != "stdio" or "url" in server or not isinstance(server["command"], str):
+            reason = "command is not a string" if not isinstance(server["command"], str) else "mixes command with url/type"
+        elif server["command"] not in allowed:
+            reason = _command_reason(server["command"], policy)
+        else:
+            reason = None
+        if reason:
+            raise McpServerRejected("MCP stdio command must be a provisioned " + MCP_BIN + "<binary>; "
+                                    "declare exact packages in mcp-packages.json (no npx/uvx/custom commands)", reason)
+    elif "url" in server:
+        try:
+            url = urlsplit(server["url"]) if isinstance(server["url"], str) else None
+        except ValueError:  # e.g. an unbalanced IPv6 bracket
+            url = None
+        if (server.get("type", "http") not in ("http", "streamable-http")
+                or url is None or url.scheme not in ("https", "http") or not url.hostname):
+            raise McpServerRejected("MCP remote servers require native streamable HTTP URLs",
+                                    "url is not a streamable HTTP URL")
+    else:
+        raise McpServerRejected("MCP server requires a provisioned command or HTTP URL", "no command or url")
+    if "args" in server and (not isinstance(server["args"], list)
+                             or any(not isinstance(arg, str) for arg in server["args"])):
+        raise McpServerRejected("MCP args must be an array of strings", "args must be strings")
+    # Pi can execute !command in secret fields. This bounded runtime accepts literal
+    # credentials/env references only; otherwise they bypass provisioned launchers.
+    for field in ("env", "headers", "oauth"):
+        values = server.get(field, {})
+        if not isinstance(values, dict):
+            reason = f"{field} is not an object"
+        elif any(isinstance(v, str) and v.lstrip().startswith("!") for v in values.values()):
+            reason = f"{field} uses !command"
+        elif field != "oauth" and any(not isinstance(v, str) for v in values.values()):
+            reason = f"{field} has non-string values"
+        else:
+            continue
+        raise McpServerRejected("MCP env/headers/oauth must be objects without !command values", reason)
+
+
 def validate_mcp_secret(content: bytes, policy: dict, pi_version: str) -> None:
     """Reject unsupported transports/launchers before any task container starts."""
     if not policy.get("enabled"):
@@ -99,34 +172,7 @@ def validate_mcp_secret(content: bytes, policy: dict, pi_version: str) -> None:
     if (not isinstance(config, dict) or set(config) - {"mcpServers", "autoEnableCodemode"}
             or not isinstance(config.get("mcpServers"), dict)):
         raise ValueError("Use native Pi mcp.json with a mcpServers object, not adapter settings/imports")
-    allowed = {MCP_BIN + command for command in policy["commands"]}
-    names = set()
+    accepted = set()
     for name, server in config["mcpServers"].items():
-        if not re.fullmatch(r"[A-Za-z0-9_-]+", name) or name.replace("-", "_") in names:
-            raise ValueError("MCP server names must be native Pi identifiers without normalized collisions")
-        names.add(name.replace("-", "_"))
-        if not isinstance(server, dict):
-            raise ValueError("MCP server entries must be objects")
-        if "command" in server:
-            if (server.get("type", "stdio") != "stdio" or "url" in server
-                    or not isinstance(server["command"], str) or server["command"] not in allowed):
-                raise ValueError("MCP stdio command must be a provisioned " + MCP_BIN + "<binary>; "
-                                 "declare exact packages in mcp-packages.json (no npx/uvx/custom commands)")
-        elif "url" in server:
-            url = urlsplit(server["url"]) if isinstance(server["url"], str) else None
-            if (server.get("type", "http") not in ("http", "streamable-http")
-                    or url is None or url.scheme not in ("https", "http") or not url.hostname):
-                raise ValueError("MCP remote servers require native streamable HTTP URLs")
-        else:
-            raise ValueError("MCP server requires a provisioned command or HTTP URL")
-        if "args" in server and (not isinstance(server["args"], list)
-                                 or any(not isinstance(arg, str) for arg in server["args"])):
-            raise ValueError("MCP args must be an array of strings")
-        # Pi can execute !command in secret fields. This bounded runtime accepts literal
-        # credentials/env references only; otherwise they bypass provisioned launchers.
-        for field in ("env", "headers", "oauth"):
-            values = server.get(field, {})
-            if (not isinstance(values, dict)
-                    or any(isinstance(v, str) and v.lstrip().startswith("!") for v in values.values())
-                    or field != "oauth" and any(not isinstance(v, str) for v in values.values())):
-                raise ValueError("MCP env/headers/oauth must be objects without !command values")
+        check_mcp_server(name, server, policy, accepted)
+        accepted.add(name.replace("-", "_"))

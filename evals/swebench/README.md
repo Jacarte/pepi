@@ -81,6 +81,8 @@ parent.stderr.log,artifacts/}`. Agent wall time includes Pi startup, delegation,
 tools, tests, stopping children and patch extraction; setup/build/grading are
 separate. A process exit is not proof of correctness; use the official grader.
 Logs and sessions may contain sensitive source or prompts. Keep runs out of Git.
+Grading, summaries and an optional AI-written narrative of summarized runs
+(`python -m evals.swebench.narrate`) are described in [REPORTING.md](REPORTING.md).
 
 ## Named profiles and provider authentication
 
@@ -204,8 +206,9 @@ from GitHub secrets). Order matters: the frozen profile is hashed at `prepare`.
    They are streamed over stdin into a 1 MB tmpfs at `/run/pepi-secrets` (owned by the
    agent UID, `noexec`) and symlinked into the Pi agent dir. Never built into an image,
    argv, env, the manifest or `execution.json` (which records names and presence only).
-   Only required LiteLLM env credentials are forwarded, validated and redacted.
-5. Known secret values (required env credentials, validated auth strings including
+   Only required LiteLLM env credentials and explicit `--pass-env` names (see below) are
+   forwarded; both are validated and redacted.
+5. Known secret values (required env credentials, `--pass-env` values, validated auth strings including
    OAuth rotations, and MCP strings of 8+ characters) are redacted from `attempts/<id>/**` and the patch; the count is
    `secret_redactions` in `attempt.json`. Redaction fails closed: symlinks, special
    files and files that cannot be read or redacted are deleted and listed under
@@ -213,6 +216,27 @@ from GitHub secrets). Order matters: the frozen profile is hashed at `prepare`.
    binary git hunks, encoded values or partially overlapping values. The agent can
    read its key, so use a dedicated, revocable key, and upload only `predictions.jsonl`
    and `attempts/<id>/` directories that contain `attempt.json` (written after redaction).
+
+### .env forwarding
+
+`run --pass-env NAME` (repeatable) forwards exactly that variable from the runner's own
+environment into the task container as `docker exec --env NAME`: the value never enters argv.
+The runner is authoritative: it rejects invalid names, duplicates, unset variables, `LITELLM_*`
+(frozen-provider credentials), `PEPI_EVAL_*` and reserved names (`PATH`, `HOME`, `USER`, `SHELL`,
+`PWD`, `OLDPWD`, `TMPDIR`, `IFS`, `ENV`, `BASH_ENV`, `SHELLOPTS`, `BASHOPTS`, `PS4`,
+`PROMPT_COMMAND`, `CDPATH`, `GLOBIGNORE`, `POSIXLY_CORRECT`, `NODE_OPTIONS`, `NODE_PATH`, `LD_*`,
+`DYLD_*`, `BASH_FUNC_*`, `DOCKER_*`, `PYTHON*`) with exit 2. Values of 8+ bytes join the
+redaction set above, together with their JSON-escaped forms (as Pi's JSONL events and sessions
+store them) and each line of 8+ bytes of a multi-line value (as diffs show it); values that
+are not valid UTF-8 are matched byte for byte. Shorter values are forwarded with a warning and not
+redacted, because scrubbing them would corrupt patches. When anything is forwarded,
+`execution.json` records sorted `forwarded_env_names` (names only); `compare` pairs such runs and
+reports differing names under `configuration_differences` (an absent key equals `[]`).
+
+`evals/pepi-eval.sh` derives these flags from the container candidates in `./.env` of the launch
+directory, after consent, and exports their values only into the runner's own process (see
+[the evals README](../README.md)); no other step and nothing else from your shell gets them.
+Anything forwarded is readable by the agent and its MCP servers, like `mcp.json`.
 
 ## Native MCP
 
@@ -227,7 +251,13 @@ Use Pi >= 1.1.0 stable (the verified baseline, not the first MCP release). Older
 requires `--drop-mcp`. This disables the builtin in frozen settings and passes
 `--no-mcp` on supported runtimes. The adapter package and gateway MCP are still
 omitted: this variant uses native Pi semantics, not every desktop adapter feature.
-Nothing automatically reads or copies your host `mcp.json`, caches or keychain.
+Nothing reads or copies your host `mcp.json` without consent, and caches or keychain never.
+`evals/pepi-eval.sh run` can copy `~/.pi/agent/mcp.json` after a separate `[y/N]` (or
+`PEPI_EVAL_USE_HOST_MCP=1`; `-y` never consents), keeping only the servers this policy can launch:
+the same checks as a secrets-dir `mcp.json` below, applied per server, plus dropping servers
+disabled with `enabled: false` or `disabled: true`. It prints kept and dropped server names
+(with reasons) and env/header/oauth key names, never values, and continues without MCP when
+none survive. See [the evals README](../README.md) for consent and cleanup.
 
 **Local npm servers:** add a non-secret `mcp-packages.json` to your injected config:
 
@@ -280,7 +310,7 @@ in the runtime file, not unspecified host env vars. Adapter imports, SSE, intera
 OAuth/keychain flows and `mcp-auth.json` injection are not supported.
 
 Runtime MCP config is secret and deliberately not hashed/recorded; `execution.json`
-records presence and the frozen provisioning policy only. Preserve the secret config
+records presence, the frozen provisioning policy and the server names (`mcp_servers`) only. Preserve the secret config
 securely outside run artifacts and use a distinct config label when changing it.
 Remote tool inventories/data can drift even with a fixed local image. Validate tools
 and perform a one-task smoke test before comparing scores.

@@ -137,6 +137,7 @@ class McpTests(unittest.TestCase):
         self.assertEqual(self.execute(docker, None), 0)
         launch = next(c for c in docker.commands if any(a.startswith(PI_COMMAND) for a in c))
         self.assertIn("PEPI_EVAL_MCP_FLAG=--no-mcp", launch)
+        self.assertNotIn("mcp_servers", read_json(self.run / "execution.json"))
 
     def test_stdio_and_http_are_injected_over_stdin_only_and_redacted(self):
         self.provision()
@@ -156,6 +157,7 @@ class McpTests(unittest.TestCase):
         self.assertFalse(any(SENTINEL in arg for c in docker.commands for arg in c))
         execution = read_json(self.run / "execution.json")
         self.assertEqual(execution["secrets"]["mcp.json"], {"present": True})
+        self.assertEqual(execution["mcp_servers"], ["local", "remote"])  # names only
         for path in self.run.rglob("*"):
             if path.is_file():
                 self.assertNotIn(SENTINEL.encode(), path.read_bytes())

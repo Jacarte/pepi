@@ -66,13 +66,85 @@ resolved task includes failed attempts. It is null when accounting is incomplete
 or nothing resolved; observed partial spend is labeled separately. Consult
 TELEMETRY.md for coverage limits: estimates are not invoices.
 
-Paired comparisons reject different tasks/issues/baselines and execution
-protocols (deadline, CPU, memory, concurrency, host, network settings). They show
-wins, regressions, inconclusive pairs and latency changes on jointly resolved
-tasks. They do not prove hardware, gateway/model snapshots or mutable image tags
-are identical: keep those fixed and inspect the manifests/build records. Repeat
-fresh runs before interpreting small stochastic differences. No composite score
-or silent intersection of task sets is used.
+Paired comparisons reject different tasks/issues/baselines and different
+measurement protocols (`COMPARABLE_PROTOCOL_KEYS`: deadline, CPU, memory,
+concurrency, pids limit, host, network and timeout settings), naming the keys
+that differ. Other `execution.json` keys are configuration (config label, secret
+presence, MCP policy, forwarded variable names): differences are reported in
+`configuration_differences` (names, labels and presence flags only), not
+rejected. They show wins, regressions, inconclusive pairs and latency changes on
+jointly resolved tasks. They do not prove hardware, gateway/model snapshots or
+mutable image tags are identical: keep those fixed and inspect the
+manifests/build records. Repeat fresh runs before interpreting small stochastic
+differences. No composite score or silent intersection of task sets is used.
+
+## Narrate (optional, AI-written)
+
+```sh
+python -m evals.swebench.narrate evals/swebench/runs/baseline evals/swebench/runs/candidate --dry-run
+python -m evals.swebench.narrate evals/swebench/runs/baseline evals/swebench/runs/candidate [--model provider/id]
+```
+
+Turns the already-written `summary.json` files into a short plain-language
+summary using the **current Pi profile** (`pi --print --no-session --no-tools
+--no-mcp --no-skills --no-context-files --no-prompt-templates`, prompt on stdin;
+extensions stay enabled because the model provider may be one). It never
+regenerates summaries: run `reporting summarize` first (exit 2 otherwise). The first
+run is the baseline; each further run is compared to it with the same `compare`
+code as above, so mismatched tasks or measurement protocols exit 2; configuration
+differences are passed along and the narrative may mention them as context, never
+as a proven cause.
+
+All numbers (resolved/selected, unknown grades, latency, turns, tokens, cost, per-task
+status, wins/regressions/inconclusive, tasks that differ between runs) are computed in
+Python and passed to Pi as a JSON facts block; Pi only phrases them. Problem statements,
+patches and logs are never sent. The prompt tells Pi to invent no causes, say
+"unknown" for ungraded tasks, treat null cost as unavailable, and not call one run
+better unless the resolved delta exceeds ±2 tasks (`RESOLVED_DELTA_NOISE_THRESHOLD`;
+with about 20 tasks and one attempt, 1-2 tasks is noise).
+
+Tasks whose `agent_status` is not `completed` (agent_error, timeout, setup_error,
+runner_error, interrupted, not_started, unfinished_children) are listed per run as
+`infrastructure_failures` and per comparison with the side(s) that failed; Pi is told
+they were not a fair attempt, not a model failure. Unresolved or failed tasks carry
+`agent_errors`: only the `errors` strings from `attempts/<id>/attempt.json` (max 5,
+200 chars each, secret-scrubbed); stderr, events and patches are never read.
+`attempt.json`/`telemetry.json` files over 1 MiB, nested too deeply to parse, or not
+JSON objects are treated as missing. Configuration-difference strings have the facts
+markers removed, and `mcp_servers`/`forwarded_env_names` items must match the name
+pattern below.
+
+Tool, subagent and MCP use come only from `attempts/<id>/telemetry.json`: per run
+`tool_usage` (parent tool calls/errors, top 20 tools by calls plus `<other>`;
+`telemetry_coverage_partial` is true when any task lacks `telemetry.json` or a per-tool
+breakdown, `parent_tool_timing.by_tool`), `subagent_usage` (children by agent, unresolved
+async children, `tasks_without_subagent_accounting` for `accounting_status: unavailable`,
+where children are unknown rather than zero) and `mcp`. MCP servers count as configured
+only when `mcp_servers` (injected `mcp.json` servers) is non-empty; `protocol.mcp.commands`
+are reported as `provisioned_commands`. Direct MCP tool calls are recognised on the raw tool
+name by Pi's native naming (`mcp__<server>__<tool>` and the generic `*_mcp_resource*`
+tools). Under the default `codemode` exposure MCP tools run inside codemode scripts, so
+only `codemode` calls are visible; they are reported as `possible_mcp_via_codemode_calls`,
+not attributed to servers. `configured_but_unused` is true only with configured servers,
+no direct MCP calls, no codemode calls and full per-tool coverage; it is null when
+codemode calls or partial coverage make it undeterminable, and the narrative says "no
+direct mcp__* tool calls observed" rather than "never called". Names not matching
+`[A-Za-z0-9._:/@+-]{1,100}` become `<invalid-name>`; non-integer counts are skipped and
+counted. Each comparison gets `tool_usage_differences` (tools used by one side only, shifts
+of >=5 calls and >=25% of the larger side, MCP configured/direct/codemode calls and
+children deltas), which the narrative presents as context, not cause.
+
+The call may use account quota, so it asks `Proceed with Pi run (may incur charges)?
+[y/N]`; without a terminal it refuses (exit 2) unless `--yes` is given. `--dry-run`
+prints the prompt and exits 0 without confirmation or a Pi call. Options:
+`--model`, `--pi-command` (default `pi`; a different command or wrapper script),
+`--timeout-seconds` (default 300), `--output` (default `<last RUN>/narrative.md`;
+`narrative.md` sits outside the hashed `build/` and grading snapshots, so it does not
+affect any immutability check), `--force` to overwrite. The narrative is printed and
+written atomically with a header (time, run IDs, model, facts SHA-256) and an
+AI-interpretation caveat. Exit codes: 0 ok, 2 usage/validation (including a
+declined confirmation), 3 Pi failure (nonzero exit, timeout, empty output), 130 interrupted.
+It is an interpretation, not a grade; `summary.json` stays authoritative.
 
 ```sh
 python -m unittest discover -s evals/swebench/tests -v
