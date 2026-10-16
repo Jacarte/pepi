@@ -74,6 +74,41 @@ are identical: keep those fixed and inspect the manifests/build records. Repeat
 fresh runs before interpreting small stochastic differences. No composite score
 or silent intersection of task sets is used.
 
+## Narrate (optional, AI-written)
+
+```sh
+python -m evals.swebench.narrate evals/swebench/runs/baseline evals/swebench/runs/candidate --dry-run
+python -m evals.swebench.narrate evals/swebench/runs/baseline evals/swebench/runs/candidate [--model provider/id]
+```
+
+Turns the already-written `summary.json` files into a short plain-language
+summary using the **current Pi profile** (`pi --print --no-session --no-tools
+--no-mcp --no-skills --no-context-files --no-prompt-templates`, prompt on stdin;
+extensions stay enabled because the model provider may be one). It never
+regenerates summaries: run `reporting summarize` first (exit 2 otherwise). The first
+run is the baseline; each further run is compared to it with the same `compare`
+code as above, so mismatched tasks/protocols exit 2.
+
+All numbers (resolved/selected, unknown grades, latency, turns, tokens, cost, per-task
+status, wins/regressions/inconclusive, tasks that differ between runs) are computed in
+Python and passed to Pi as a JSON facts block; Pi only phrases them. Problem statements,
+patches and logs are never sent. The prompt tells Pi to invent no causes, say
+"unknown" for ungraded tasks, treat null cost as unavailable, and not call one run
+better unless the resolved delta exceeds ±2 tasks (`RESOLVED_DELTA_NOISE_THRESHOLD`;
+with about 20 tasks and one attempt, 1-2 tasks is noise).
+
+The call may use account quota, so it asks `Proceed with Pi run (may incur charges)?
+[y/N]`; without a terminal it refuses (exit 2) unless `--yes` is given. `--dry-run`
+prints the prompt and exits 0 without confirmation or a Pi call. Options:
+`--model`, `--pi-command` (default `pi`; a different command or wrapper script),
+`--timeout-seconds` (default 300), `--output` (default `<last RUN>/narrative.md`;
+`narrative.md` sits outside the hashed `build/` and grading snapshots, so it does not
+affect any immutability check), `--force` to overwrite. The narrative is printed and
+written atomically with a header (time, run IDs, model, facts SHA-256) and an
+AI-interpretation caveat. Exit codes: 0 ok, 2 usage/validation (including a
+declined confirmation), 3 Pi failure (nonzero exit, timeout, empty output), 130 interrupted.
+It is an interpretation, not a grade; `summary.json` stays authoritative.
+
 ```sh
 python -m unittest discover -s evals/swebench/tests -v
 node --test evals/swebench/tests/telemetry-extension.test.mjs

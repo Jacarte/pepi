@@ -81,6 +81,8 @@ parent.stderr.log,artifacts/}`. Agent wall time includes Pi startup, delegation,
 tools, tests, stopping children and patch extraction; setup/build/grading are
 separate. A process exit is not proof of correctness; use the official grader.
 Logs and sessions may contain sensitive source or prompts. Keep runs out of Git.
+Grading, summaries and an optional AI-written narrative of summarized runs
+(`python -m evals.swebench.narrate`) are described in [REPORTING.md](REPORTING.md).
 
 ## Named profiles and provider authentication
 
@@ -204,8 +206,9 @@ from GitHub secrets). Order matters: the frozen profile is hashed at `prepare`.
    They are streamed over stdin into a 1 MB tmpfs at `/run/pepi-secrets` (owned by the
    agent UID, `noexec`) and symlinked into the Pi agent dir. Never built into an image,
    argv, env, the manifest or `execution.json` (which records names and presence only).
-   Only required LiteLLM env credentials are forwarded, validated and redacted.
-5. Known secret values (required env credentials, validated auth strings including
+   Only required LiteLLM env credentials and explicit `--pass-env` names (see below) are
+   forwarded; both are validated and redacted.
+5. Known secret values (required env credentials, `--pass-env` values, validated auth strings including
    OAuth rotations, and MCP strings of 8+ characters) are redacted from `attempts/<id>/**` and the patch; the count is
    `secret_redactions` in `attempt.json`. Redaction fails closed: symlinks, special
    files and files that cannot be read or redacted are deleted and listed under
@@ -213,6 +216,27 @@ from GitHub secrets). Order matters: the frozen profile is hashed at `prepare`.
    binary git hunks, encoded values or partially overlapping values. The agent can
    read its key, so use a dedicated, revocable key, and upload only `predictions.jsonl`
    and `attempts/<id>/` directories that contain `attempt.json` (written after redaction).
+
+### .env forwarding
+
+`run --pass-env NAME` (repeatable) forwards exactly that variable from the runner's own
+environment into the task container as `docker exec --env NAME`: the value never enters argv.
+The runner is authoritative: it rejects invalid names, duplicates, unset variables, `LITELLM_*`
+(frozen-provider credentials), `PEPI_EVAL_*` and reserved names (`PATH`, `HOME`, `USER`, `SHELL`,
+`PWD`, `OLDPWD`, `TMPDIR`, `IFS`, `ENV`, `BASH_ENV`, `SHELLOPTS`, `BASHOPTS`, `PS4`,
+`PROMPT_COMMAND`, `CDPATH`, `GLOBIGNORE`, `POSIXLY_CORRECT`, `NODE_OPTIONS`, `NODE_PATH`, `LD_*`,
+`DYLD_*`, `BASH_FUNC_*`, `DOCKER_*`, `PYTHON*`) with exit 2. Values of 8+ bytes join the
+redaction set above, together with their JSON-escaped forms (as Pi's JSONL events and sessions
+store them) and each line of 8+ bytes of a multi-line value (as diffs show it); values that
+are not valid UTF-8 are matched byte for byte. Shorter values are forwarded with a warning and not
+redacted, because scrubbing them would corrupt patches. When anything is forwarded,
+`execution.json` records sorted `forwarded_env_names` (names only), so runs with different
+forwarded names are not paired by `compare`; the key is omitted otherwise.
+
+`evals/pepi-eval.sh` derives these flags from the container candidates in `./.env` of the launch
+directory, after consent, and exports their values only into the runner's own process (see
+[the evals README](../README.md)); no other step and nothing else from your shell gets them.
+Anything forwarded is readable by the agent and its MCP servers, like `mcp.json`.
 
 ## Native MCP
 

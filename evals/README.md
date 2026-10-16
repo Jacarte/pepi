@@ -64,6 +64,58 @@ opted-in action: it never reads/copies host auth or creates a credential directo
 The provider/account usage `run` step separately asks for confirmation; non-interactively pass `-y` (or `PEPI_EVAL_YES=1`).
 Exit codes match `python -m evals.swebench`: 0 ok, 2 usage/configuration, 3 step failure, 130 interrupted.
 
+**Venv repair:** if the SWE-bench venv is missing, cannot import `swebench`, or its Python lacks
+`lzma` (built without xz headers) or crashes on `os.pipe()`/subprocess, the script prints the numbered fix commands and asks
+`Run these fix commands now? [y/N]` on a terminal. For a pyenv Python this is `brew install xz`
+(if missing), `pyenv install --force <version>` with xz `CFLAGS`/`LDFLAGS`, moving the old venv to
+`<venv>.bak-<time>` (never deleted), recreating it and `pip install -e` SWE-bench, then one re-check.
+On macOS the rebuild also sets `ac_cv_func_pipe2=no`, which repairs a pyenv Python that segfaults on
+`os.pipe()`/subprocess because it was built with a newer SDK than the running OS (`pipe2` missing at runtime).
+`-y` does not consent; `PEPI_EVAL_AUTO_FIX=1` runs them non-interactively and `0` never does.
+Without pyenv/Homebrew, or for a directory without `pyvenv.cfg`, only manual guidance is printed.
+Dry-run never plans or runs a fix.
+
+**`./.env`:** the script reads `.env` from the directory you launch it in (never the checkout).
+Trust it as much as your shell profile: launching from a directory with someone else's `.env`
+(for example a cloned repo) lets it choose tasks, profile and config. It is plain `NAME=VALUE`
+text, never sourced: optional `export `, `#` comments, `'literal'`, `"double"` (only `\"`, `\\`,
+`\n`), no `$VAR`/`$(...)` expansion. A bad line exits 2 naming only its line number. The file must
+be a regular file you own, not a symlink and not group/world-writable (`chmod 600 .env`). The path
+and the loaded names (never values) are printed. Names fall into four groups:
+
+- **Script settings** override your shell (flags override both): `PEPI_EVAL_*` and
+  `LITELLM_BASE_URL`/`LITELLM_API_KEY`. They are never forwarded as extras.
+- **Shell-only** settings are ignored from `.env` with a warning and count only from the shell or
+  flags: the consent settings `PEPI_EVAL_YES`, `PEPI_EVAL_USE_HOST_AUTH`, `PEPI_EVAL_AUTO_FIX`,
+  `PEPI_EVAL_USE_DOTENV`, and `PEPI_EVAL_VENV`, `PEPI_EVAL_SWEBENCH_REPO` (host code: the venv Python,
+  `pip install -e`), `PEPI_EVAL_SECRETS_DIR` (would skip the host-auth prompt) and
+  `PEPI_EVAL_NETWORK` (egress containment).
+- **Ignored:** `PATH`, `HOME`, `USER`, `SHELL`, `PWD`, `OLDPWD`, `TMPDIR`, `IFS`, `ENV`, `BASH_ENV`,
+  `SHELLOPTS`, `BASHOPTS`, `PS4`, `PROMPT_COMMAND`, `CDPATH`, `GLOBIGNORE`, `POSIXLY_CORRECT`,
+  `NODE_OPTIONS`, `NODE_PATH`, `LD_*`, `DYLD_*`, `BASH_FUNC_*`, `DOCKER_*`, `PYTHON*`, other
+  `LITELLM_*`, and the script's own variables.
+- **Container candidates:** every other name. They are never set in the script's environment,
+  so host steps (`git`, `pip`, `docker build`, grading) never see them, not even `GIT_*`, `PIP_*`
+  or proxy settings. Only the `run` step exports them, for the runner alone, after consent.
+
+The container gets **only** the frozen LiteLLM credentials (as before) plus the container
+candidates, and only after consent: `run` lists the names and asks
+`Forward these .env variables into the eval container? [y/N]` on a terminal. `-y` does not
+consent; `PEPI_EVAL_USE_DOTENV=1` in the shell does, `0` never forwards. Without a terminal
+nothing is forwarded (one warning says how to opt in). The agent and its MCP servers can read
+every forwarded value. Values travel by environment (`--pass-env NAME`, `docker exec --env NAME`),
+never argv; values of 8+ bytes (and their JSON-escaped forms and lines) are redacted from
+attempts and patches, while shorter values are forwarded with a warning and **not** redacted.
+`execution.json` records `forwarded_env_names`. The Python runner validates the names again and
+is authoritative.
+
+If `.env` sets `LITELLM_BASE_URL` different from your shell's (even with its own `LITELLM_API_KEY`,
+since an `auth.json` key wins), your LiteLLM key, whether from the shell, `.env`, the prompt or a
+LiteLLM `api_key` in `auth.json`, would go to that gateway: the script warns and needs a terminal `y` or `PEPI_EVAL_USE_DOTENV=1`, otherwise it
+exits 2 before any step. `PEPI_EVAL_USE_DOTENV=1` approves **both** this gateway and the
+forwarding; `0` refuses both, so a run with such a `.env` then exits 2. See
+[.env forwarding](swebench/README.md#env-forwarding).
+
 **Dry-run mode** (no side effects, prints shell-quoted commands):
 ```sh
 PEPI_EVAL_PROFILE=codex evals/pepi-eval.sh --dry-run -y all

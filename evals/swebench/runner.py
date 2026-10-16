@@ -6,11 +6,13 @@ import json
 import math
 import os
 import platform
+import re
 import shutil
 import shlex
 import signal
 import stat
 import subprocess
+import sys
 import time
 import uuid
 from pathlib import Path
@@ -32,6 +34,38 @@ PI_COMMAND = (
     "exec pi ${PEPI_EVAL_MCP_FLAG:-} --print --mode json --session-dir /output/sessions "
     "--append-system-prompt /opt/pepi-eval/instructions.md @/input/issue.md"
 )
+# Root-level files whose content SWE-bench image setup commits rewrite (e.g. Sphinx pins).
+SETUP_CONTENT_PATHS = (b"setup.py", b"tox.ini")
+# `run --pass-env NAME` policy (authoritative; evals/pepi-eval.sh mirrors it for early feedback).
+# These names steer shells, loaders, interpreters, the Docker client or this runner; LITELLM_* use
+# the frozen-provider path and PEPI_EVAL_* configure the eval itself, so neither is forwarded.
+RESERVED_ENV_NAMES = frozenset({
+    "PATH", "HOME", "USER", "SHELL", "PWD", "OLDPWD", "TMPDIR", "IFS", "ENV", "BASH_ENV",
+    "SHELLOPTS", "BASHOPTS", "PS4", "PROMPT_COMMAND", "CDPATH", "GLOBIGNORE", "POSIXLY_CORRECT",
+    "NODE_OPTIONS", "NODE_PATH",
+})
+RESERVED_ENV_PREFIXES = ("LD_", "DYLD_", "BASH_FUNC_", "DOCKER_", "PYTHON", "PEPI_EVAL_", "LITELLM_")
+# Shorter values are too common to scrub from patches/logs without corrupting them.
+MIN_REDACTED_LENGTH = 8
+
+
+def forwardable_env_name(name: str) -> bool:
+    return (re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) is not None
+            and name not in RESERVED_ENV_NAMES and not name.startswith(RESERVED_ENV_PREFIXES))
+
+
+def forwarded_value_forms(value: str) -> set[bytes]:
+    """Byte forms of a forwarded value as artifacts store it: raw (any bytes, via the
+    surrogateescape round trip of os.environ), JSON-escaped as in Pi's JSONL events/sessions,
+    and each stripped line (diffs prefix every line of a multi-line value with +/-/space).
+    Forms shorter than MIN_REDACTED_LENGTH are left out."""
+    texts = {value} | {line.strip() for line in value.splitlines() if line.strip()}
+    forms = set()
+    for text in texts:
+        forms.add(os.fsencode(text))
+        for ascii_only in (True, False):
+            forms.add(json.dumps(text, ensure_ascii=ascii_only)[1:-1].encode("utf-8", "surrogateescape"))
+    return {form for form in forms if len(form) >= MIN_REDACTED_LENGTH}
 
 
 class Docker:
@@ -110,12 +144,17 @@ def export_patch(docker: Docker, container: str, baseline: str) -> bytes:
 
 
 def checkout_baseline(docker: Docker, container: str, base_commit: str) -> str:
-    """Accept clean image setup commits only if paths and blobs match the task base."""
+    """Accept clean image setup commits only if paths and blobs match the task base.
+
+    Exception: root-level SETUP_CONTENT_PATHS may also change content (regular file on
+    both sides). The baseline stays HEAD, so exported patches exclude the setup commit.
+    """
     command = ("exec", "--user", UID, "--workdir", "/testbed", container,
                "git", "-c", "core.fsmonitor=false", "-c", "core.fileMode=true")
     baseline = docker.text(*command, "rev-parse", "HEAD")
     # Raw, full object IDs and NUL paths avoid text/binary, quoting and rename heuristics.
-    # Image setup may flip regular-file executable bits, but no other tree delta is safe.
+    # Image setup may flip regular-file executable bits and rewrite SETUP_CONTENT_PATHS;
+    # no other tree delta is safe.
     delta = docker.call(*command, "diff", "--raw", "--no-abbrev", "-z", "--no-renames",
                         "--no-ext-diff", "--no-textconv", "--ignore-submodules=none",
                         base_commit, baseline, "--", capture_output=True).stdout
@@ -124,10 +163,12 @@ def checkout_baseline(docker: Docker, container: str, base_commit: str) -> str:
         valid = fields[-1] == b"" and len(fields) % 2 == 1
         for index in range(0, len(fields) - 1, 2):
             header = fields[index].split()
+            path = fields[index + 1]
             if (len(header) != 5 or header[0] not in (b":100644", b":100755")
                     or header[1] not in (b"100644", b"100755")
-                    or header[0][1:] == header[1] or header[2] != header[3]
-                    or header[4] != b"M" or not fields[index + 1]):
+                    or header[4] != b"M" or not path
+                    or (path not in SETUP_CONTENT_PATHS
+                        and (header[0][1:] == header[1] or header[2] != header[3]))):
                 valid = False
                 break
         if not valid:
@@ -145,6 +186,7 @@ class Secrets:
     def __init__(self, files: dict[str, bytes] | None = None):
         self.files = files or {}
         self.environment = list(CREDENTIALS)  # direct run_one legacy compatibility
+        self.forwarded: list[str] = []  # explicit `run --pass-env` names
         self.oauth = False
         self.audit_failed = False
         values = {os.environ[name] for name in CREDENTIALS[1:] if os.environ.get(name)}
@@ -154,7 +196,8 @@ class Secrets:
             except ValueError:
                 values.add(content.decode("utf-8", "replace").strip())
         # Longest first so a value containing another is fully replaced.
-        self.values = sorted((v.encode() for v in values if len(v) >= 8), key=len, reverse=True)
+        self.values = sorted((v.encode() for v in values if len(v) >= MIN_REDACTED_LENGTH),
+                             key=len, reverse=True)
 
     @classmethod
     def _leaves(cls, node):
@@ -269,6 +312,29 @@ class Secrets:
         if "auth.json" in self.files:
             self.remember(self.files["auth.json"])
         self.values = sorted(set(self.values), key=len, reverse=True)
+
+    def forward_environment(self, names: list[str]) -> list[str]:
+        """Forward exactly `names` from this process's environment (values never enter argv).
+
+        Returns the names whose values are too short to redact from artifacts.
+        """
+        self.forwarded = []
+        short = []
+        for name in names:
+            if not forwardable_env_name(name):
+                raise ValueError(f"--pass-env {name!r} is invalid or reserved (see README: .env forwarding)")
+            if name in self.forwarded:
+                raise ValueError(f"--pass-env {name} given more than once")
+            if name not in os.environ:
+                raise ValueError(f"--pass-env {name} is not set in the environment")
+            self.forwarded.append(name)
+            value = os.environ[name]
+            if len(os.fsencode(value)) >= MIN_REDACTED_LENGTH:
+                self.values.extend(forwarded_value_forms(value))
+            elif value:
+                short.append(name)
+        self.values = sorted(set(self.values), key=len, reverse=True)
+        return short
 
     def check_audit_errors(self, output: Path) -> None:
         if self.oauth:
@@ -401,7 +467,8 @@ def run_one(docker: Docker, task: dict, build: dict, output: Path, timeout: floa
         baseline = checkout_baseline(docker, container, task["base_commit"])
         record["baseline_commit"] = baseline
         record["timing_seconds"]["setup"] = time.monotonic() - setup
-        env = [value for name in secrets.environment for value in ("--env", name)]
+        # `--env NAME` without a value: Docker reads it from this process's environment.
+        env = [value for name in (*secrets.environment, *secrets.forwarded) for value in ("--env", name)]
         if secrets.oauth:
             env += ["--env", "NODE_OPTIONS=--require=/opt/pepi-eval/auth-audit.cjs"]
         command = PI_COMMAND
@@ -519,7 +586,7 @@ def frozen_provider_plan(run: Path) -> dict:
 
 
 def run_tasks(run: Path, timeout: float, network: str, cpus: str, memory: str,
-              secrets_dir: Path | None = None) -> int:
+              secrets_dir: Path | None = None, pass_env: list[str] | tuple[str, ...] = ()) -> int:
     """Return EXIT_OK when every attempt ran (even if the agent failed or timed out),
     EXIT_INFRA when any attempt hit a setup/runner error, EXIT_INTERRUPTED on Ctrl-C/SIGTERM."""
     manifest = read_manifest(run)
@@ -529,6 +596,9 @@ def run_tasks(run: Path, timeout: float, network: str, cpus: str, memory: str,
     plan = frozen_provider_plan(run)
     secrets = Secrets.load(secrets_dir)
     secrets.validate(plan, manifest["versions"]["pi"])
+    for name in secrets.forward_environment(list(pass_env)):
+        print(f"pepi-eval: warning: {name} is shorter than {MIN_REDACTED_LENGTH} bytes; "
+              "its value is forwarded but not redacted from artifacts", file=sys.stderr)
     if (run / "predictions.jsonl").exists() or (run / "attempts").exists():
         raise ValueError("Attempts already exist; use a fresh run directory")
     if set(builds) != {task["instance_id"] for task in manifest["tasks"]}:
@@ -554,6 +624,8 @@ def run_tasks(run: Path, timeout: float, network: str, cpus: str, memory: str,
         "secrets": {name: {"present": name in secrets.files} for name in SECRET_FILES},
         "config_label": manifest.get("config", {}).get("label"),
         "mcp": mcp_policy,
+        # Names only. Omitted when empty so runs without forwarding keep their earlier protocol.
+        **({"forwarded_env_names": sorted(secrets.forwarded)} if secrets.forwarded else {}),
     })
     infra_failed = False
     interrupted = False

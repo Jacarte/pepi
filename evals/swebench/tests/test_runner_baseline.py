@@ -61,6 +61,19 @@ class CheckoutBaselineTests(unittest.TestCase):
             (self.repo / name).chmod(0o755)
         return self.commit("SWE-bench mode setup")
 
+    def setup_files_base(self):
+        # Mirrors SWE-bench Sphinx images: the setup commit rewrites root setup.py/tox.ini.
+        (self.repo / "sub").mkdir()
+        for name in ("setup.py", "tox.ini", "sub/setup.py"):
+            (self.repo / name).write_text("install_requires = ['docutils']\n")
+            (self.repo / name).chmod(0o644)
+        self.base = self.commit("task base with setup files")
+
+    def setup_content_commit(self, *names):
+        for name in names:
+            (self.repo / name).write_text("install_requires = ['docutils<0.18']\n")
+        return self.commit("SWE-bench setup")
+
     def run_attempt(self):
         return run_one(self.docker, dict(TASK, base_commit=self.base),
                        {"image_id": "unused"}, self.root / "attempt", 1, "eval", "2", "4g")
@@ -212,6 +225,63 @@ class CheckoutBaselineTests(unittest.TestCase):
         (cache / "ignored.dat").write_bytes(b"setup cache")
         self.assertEqual(checkout_baseline(self.docker, "unused", self.base), self.base)
         self.assertTrue((cache / "ignored.dat").exists())
+
+    def test_root_setup_py_and_tox_ini_content_setup_is_accepted(self):
+        self.setup_files_base()
+        head = self.setup_content_commit("setup.py", "tox.ini")
+        self.assertEqual(checkout_baseline(self.docker, "unused", self.base), head)
+        row = self.run_attempt()
+        self.assertEqual(row["agent_status"], "completed")
+        self.assertEqual(row["baseline_commit"], head)
+        self.assertEqual(row["patch"], "")
+
+    def test_setup_content_with_mode_flips_elsewhere_and_on_setup_py_is_accepted(self):
+        self.setup_files_base()
+        (self.repo / "normal.py").chmod(0o755)
+        (self.repo / "setup.py").chmod(0o755)
+        head = self.setup_content_commit("setup.py", "tox.ini")
+        self.assertEqual(checkout_baseline(self.docker, "unused", self.base), head)
+
+    def test_setup_content_plus_other_content_change_is_rejected(self):
+        self.setup_files_base()
+        (self.repo / "normal.py").write_text("changed\n")
+        self.setup_content_commit("setup.py")
+        self.assert_rejected_before_launch("content/tree")
+
+    def test_nested_setup_py_content_change_is_rejected(self):
+        self.setup_files_base()
+        self.setup_content_commit("sub/setup.py")
+        self.assert_rejected_before_launch("content/tree")
+
+    def test_setup_py_deletion_and_symlink_are_rejected(self):
+        self.setup_files_base()
+        path = self.repo / "setup.py"
+        for change in ("deletion", "symlink"):
+            with self.subTest(change=change):
+                self.git("reset", "--hard", self.base)
+                path.unlink()
+                if change == "symlink":
+                    path.symlink_to("tox.ini")
+                self.commit(change)
+                with self.assertRaisesRegex(ValueError, "content/tree"):
+                    checkout_baseline(self.docker, "unused", self.base)
+        self.assert_rejected_before_launch("content/tree")
+
+    def test_setup_content_export_is_relative_to_head_not_task_base(self):
+        self.setup_files_base()
+        head = self.setup_content_commit("setup.py", "tox.ini")
+        self.docker.agent_edit = lambda: (self.repo / "setup.py").write_text(
+            "install_requires = ['docutils<0.18']\nagent = 1\n")
+        row = self.run_attempt()
+        self.assertEqual(row["agent_status"], "completed")
+        self.assertEqual(row["baseline_commit"], head)
+        self.assertIn("+agent = 1", row["patch"])
+        self.assertNotIn("-install_requires = ['docutils']", row["patch"])
+        self.assertNotIn("+install_requires", row["patch"])
+        self.assertNotIn("tox.ini", row["patch"])
+        diff = next(command for command in self.docker.commands if "--cached" in command)
+        self.assertIn(head, diff)
+        self.assertNotIn(self.base, diff)
 
     def test_dirty_index_worktree_untracked_and_modes_are_rejected(self):
         self.mode_setup()
