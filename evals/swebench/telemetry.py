@@ -146,7 +146,7 @@ def collect_run(run: Path) -> list[dict]:
     return results
 
 
-if __name__ == "__main__":
+def main() -> int:
     import argparse
     parser = argparse.ArgumentParser(description="Reduce archived parent/child usage without model calls")
     parser.add_argument("run", type=Path)
@@ -157,3 +157,8 @@ if __name__ == "__main__":
               f"{sum(row['accounting_status'] == 'available' for row in rows)} with available accounting")
     except (OSError, ValueError, KeyError) as error:
         parser.exit(2, f"pepi-eval telemetry: {error}\n")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -6,11 +6,13 @@ Review $@ and publish the result only after I approve it.
 
 ## 1. Launch one async review workflow
 
-Make exactly ONE top-level call. Write the orchestration yourself as an inline
-`workflowScript`; do not reference a script file path.
+Make exactly ONE top-level call. Write the orchestration yourself as one fenced
+`js workflow` block in this same reply, then call `subagent` with `workflow: true`.
+If the tool reports the block did not reach it, write the script to a temp file
+and pass its path as `workflow` instead.
 
 ```
-subagent({ workflowScript: "<script you compose below>", args: { target: "$@" }, async: true })
+subagent({ workflow: true, args: { target: "$@" }, async: true })
 ```
 
 The script never publishes. It runs in two stages. Collect must finish before

@@ -84,12 +84,13 @@ class PrepareConfigTests(unittest.TestCase):
                 self.prepare(base / "repo", base / "run-1", config_dir=base / "injected")
             self.assertFalse((base / "run-1").exists())  # failed prepare cleans up
 
-    def test_mcp_requires_explicit_drop(self):
+    def test_native_mcp_is_default_and_drop_is_explicit(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
             write_settings(base / "repo", packages=["npm:pi-mcp-adapter"])
-            with self.assertRaisesRegex(ValueError, "--drop-mcp"):
-                self.prepare(base / "repo", base / "run-1")
+            enabled = self.prepare(base / "repo", base / "run-1")
+            self.assertTrue(enabled["config"]["mcp"]["enabled"])
+            self.assertFalse(enabled["config"]["dropped_features"]["mcp"])
             manifest = self.prepare(base / "repo", base / "run-2", drop_mcp=True)
             dropped = manifest["config"]["dropped_features"]
             self.assertTrue(dropped["mcp"])
@@ -122,9 +123,9 @@ class PrepareConfigTests(unittest.TestCase):
 class SecretTests(unittest.TestCase):
     def secrets_dir(self, base, mode=0o600, name="auth.json"):
         directory = base / "secrets"
-        directory.mkdir()
+        directory.mkdir(mode=0o700)
         path = directory / name
-        path.write_text(json.dumps({"litellm": {"apiKey": SENTINEL}}))
+        path.write_text(json.dumps({"litellm": {"type": "api_key", "key": SENTINEL}}))
         path.chmod(mode)
         return directory
 
@@ -199,8 +200,8 @@ class SecretTests(unittest.TestCase):
             finally:
                 os.umask(old)
         with tempfile.TemporaryDirectory() as directory:
-            with self.assertRaisesRegex(ValueError, "Unexpected"):
-                Secrets.load(self.secrets_dir(Path(directory), name="mcp.json"))
+            loaded = Secrets.load(self.secrets_dir(Path(directory), name="mcp.json"))
+            self.assertIn("mcp.json", loaded.files)
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaisesRegex(ValueError, "Unexpected"):
                 Secrets.load(self.secrets_dir(Path(directory), name="notes.txt"))
@@ -425,14 +426,6 @@ class RunnerFixTests(unittest.TestCase):
 
 
 class ProfileHardeningTests(unittest.TestCase):
-    def test_declares_mcp_tokens_keys_and_malformed_values(self):
-        from evals.swebench.prepare import declares_mcp
-        self.assertTrue(declares_mcp({"packages": ["npm:pi-mcp-adapter@1.0.0"]}))
-        self.assertTrue(declares_mcp({"mcpServers": {}}))
-        self.assertTrue(declares_mcp({"litellm": {"mcp": {"enabled": True}}}))
-        self.assertFalse(declares_mcp({"packages": ["npm:pi-subagents"], "litellm": "weird"}))
-        self.assertFalse(declares_mcp({"packages": "not-a-list"}))
-
     def test_dropped_package_specs_do_not_carry_url_credentials(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)

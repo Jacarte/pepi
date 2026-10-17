@@ -109,8 +109,9 @@ Show the plan as a table. `--dry-run`: stop here. Only report-only rows: go to s
 
 ## 5. Execute (one async workflow)
 
-Make exactly ONE top-level call, script composed inline:
-`subagent({ async: true, cwd: "<root>", workflowScript: "<script>", args: { service, vcs, date, slices, baseline, rules } })`,
+Make exactly ONE top-level call, script written as one fenced `js workflow` block in this same reply (if the tool
+reports the block did not reach it, write the script to a temp file and pass its path as `workflow`):
+`subagent({ async: true, cwd: "<root>", workflow: true, args: { service, vcs, date, slices, baseline, rules } })`,
 `slices` = the non-report-only rows as JSON, `baseline` = the scout's `build && test`, `rules` = the `## Rules` bullets
 verbatim (string array). Script rules: task strings are arrays joined with `"\n"`; plain helpers only, no async
 helpers; `await` every `runs.*`; end with `return`. Skeleton:

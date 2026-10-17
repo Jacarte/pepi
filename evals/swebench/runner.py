@@ -3,21 +3,27 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import platform
+import re
 import shutil
+import shlex
 import signal
 import stat
 import subprocess
+import sys
 import time
 import uuid
 from pathlib import Path
 
+from .build_preview import BuildPreview
 from .common import UID, read_json, read_manifest, write_json
+from .mcp import native_mcp_available, validate_mcp_secret
+from .profile import validate_url
 
 CREDENTIALS = ("LITELLM_BASE_URL", "LITELLM_API_KEY")
-# mcp.json is not injected: MCP is always dropped from the profile (see prepare.declares_mcp).
-SECRET_FILES = ("auth.json",)
+SECRET_FILES = ("auth.json", "mcp.json")
 SECRET_DIR = "/run/pepi-secrets"  # tmpfs inside the container; never part of an image layer
 AGENT_DIR = "/opt/pepi-agent"
 EXIT_OK, EXIT_USAGE, EXIT_INFRA, EXIT_INTERRUPTED = 0, 2, 3, 130
@@ -25,9 +31,41 @@ EXIT_OK, EXIT_USAGE, EXIT_INFRA, EXIT_INTERRUPTED = 0, 2, 3, 130
 FORBIDDEN_NETWORKS = ("host", "bridge", "default")
 PI_COMMAND = (
     "source /opt/miniconda3/etc/profile.d/conda.sh && conda activate testbed && "
-    "exec pi --print --mode json --session-dir /output/sessions "
+    "exec pi ${PEPI_EVAL_MCP_FLAG:-} --print --mode json --session-dir /output/sessions "
     "--append-system-prompt /opt/pepi-eval/instructions.md @/input/issue.md"
 )
+# Root-level files whose content SWE-bench image setup commits rewrite (e.g. Sphinx pins).
+SETUP_CONTENT_PATHS = (b"setup.py", b"tox.ini")
+# `run --pass-env NAME` policy (authoritative; evals/pepi-eval.sh mirrors it for early feedback).
+# These names steer shells, loaders, interpreters, the Docker client or this runner; LITELLM_* use
+# the frozen-provider path and PEPI_EVAL_* configure the eval itself, so neither is forwarded.
+RESERVED_ENV_NAMES = frozenset({
+    "PATH", "HOME", "USER", "SHELL", "PWD", "OLDPWD", "TMPDIR", "IFS", "ENV", "BASH_ENV",
+    "SHELLOPTS", "BASHOPTS", "PS4", "PROMPT_COMMAND", "CDPATH", "GLOBIGNORE", "POSIXLY_CORRECT",
+    "NODE_OPTIONS", "NODE_PATH",
+})
+RESERVED_ENV_PREFIXES = ("LD_", "DYLD_", "BASH_FUNC_", "DOCKER_", "PYTHON", "PEPI_EVAL_", "LITELLM_")
+# Shorter values are too common to scrub from patches/logs without corrupting them.
+MIN_REDACTED_LENGTH = 8
+
+
+def forwardable_env_name(name: str) -> bool:
+    return (re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) is not None
+            and name not in RESERVED_ENV_NAMES and not name.startswith(RESERVED_ENV_PREFIXES))
+
+
+def forwarded_value_forms(value: str) -> set[bytes]:
+    """Byte forms of a forwarded value as artifacts store it: raw (any bytes, via the
+    surrogateescape round trip of os.environ), JSON-escaped as in Pi's JSONL events/sessions,
+    and each stripped line (diffs prefix every line of a multi-line value with +/-/space).
+    Forms shorter than MIN_REDACTED_LENGTH are left out."""
+    texts = {value} | {line.strip() for line in value.splitlines() if line.strip()}
+    forms = set()
+    for text in texts:
+        forms.add(os.fsencode(text))
+        for ascii_only in (True, False):
+            forms.add(json.dumps(text, ensure_ascii=ascii_only)[1:-1].encode("utf-8", "surrogateescape"))
+    return {form for form in forms if len(form) >= MIN_REDACTED_LENGTH}
 
 
 class Docker:
@@ -51,12 +89,13 @@ def build_images(run: Path, platform_name: str) -> None:
         started = time.monotonic()
         log_path = run / f"build-{task['instance_id']}.log"
         try:
-            with log_path.open("wb") as log:
+            with log_path.open("wb") as log, BuildPreview(run, task["instance_id"], log_path):
                 docker.call("build", "--platform", platform_name, "--tag", image,
                             "--build-arg", f"NODE_IMAGE={manifest['node_image']}",
                             "--build-arg", f"TASK_IMAGE={task['image']}",
                             "--build-arg", f"PI_VERSION={manifest['versions']['pi']}",
-                            "--build-arg", f"LITELLM_VERSION={manifest['versions']['pi-provider-litellm']}",
+                            *(["--build-arg", f"LITELLM_VERSION={manifest['versions']['pi-provider-litellm']}"]
+                              if "pi-provider-litellm" in manifest["versions"] else []),
                             "--build-arg", f"SUBAGENTS_VERSION={manifest['versions']['pi-subagents']}",
                             str(run / "build"), stdout=log, stderr=subprocess.STDOUT)
         except subprocess.CalledProcessError as error:
@@ -104,11 +143,52 @@ def export_patch(docker: Docker, container: str, baseline: str) -> bytes:
     return patch.stdout
 
 
+def checkout_baseline(docker: Docker, container: str, base_commit: str) -> str:
+    """Accept clean image setup commits only if paths and blobs match the task base.
+
+    Exception: root-level SETUP_CONTENT_PATHS may also change content (regular file on
+    both sides). The baseline stays HEAD, so exported patches exclude the setup commit.
+    """
+    command = ("exec", "--user", UID, "--workdir", "/testbed", container,
+               "git", "-c", "core.fsmonitor=false", "-c", "core.fileMode=true")
+    baseline = docker.text(*command, "rev-parse", "HEAD")
+    # Raw, full object IDs and NUL paths avoid text/binary, quoting and rename heuristics.
+    # Image setup may flip regular-file executable bits and rewrite SETUP_CONTENT_PATHS;
+    # no other tree delta is safe.
+    delta = docker.call(*command, "diff", "--raw", "--no-abbrev", "-z", "--no-renames",
+                        "--no-ext-diff", "--no-textconv", "--ignore-submodules=none",
+                        base_commit, baseline, "--", capture_output=True).stdout
+    if delta:
+        fields = delta.split(b"\0")
+        valid = fields[-1] == b"" and len(fields) % 2 == 1
+        for index in range(0, len(fields) - 1, 2):
+            header = fields[index].split()
+            path = fields[index + 1]
+            if (len(header) != 5 or header[0] not in (b":100644", b":100755")
+                    or header[1] not in (b"100644", b"100755")
+                    or header[4] != b"M" or not path
+                    or (path not in SETUP_CONTENT_PATHS
+                        and (header[0][1:] == header[1] or header[2] != header[3]))):
+                valid = False
+                break
+        if not valid:
+            raise ValueError("Task checkout content/tree does not match its baseline")
+    dirty = docker.call(*command, "status", "--porcelain=v1", "-z", "--untracked-files=all",
+                        "--ignore-submodules=none", capture_output=True).stdout
+    if dirty:
+        raise ValueError("Task checkout is dirty (index, worktree or untracked entries)")
+    return baseline
+
+
 class Secrets:
     """Secret files to inject at run time, plus every value that must be redacted."""
 
     def __init__(self, files: dict[str, bytes] | None = None):
         self.files = files or {}
+        self.environment = list(CREDENTIALS)  # direct run_one legacy compatibility
+        self.forwarded: list[str] = []  # explicit `run --pass-env` names
+        self.oauth = False
+        self.audit_failed = False
         values = {os.environ[name] for name in CREDENTIALS[1:] if os.environ.get(name)}
         for content in self.files.values():
             try:
@@ -116,7 +196,8 @@ class Secrets:
             except ValueError:
                 values.add(content.decode("utf-8", "replace").strip())
         # Longest first so a value containing another is fully replaced.
-        self.values = sorted((v.encode() for v in values if len(v) >= 8), key=len, reverse=True)
+        self.values = sorted((v.encode() for v in values if len(v) >= MIN_REDACTED_LENGTH),
+                             key=len, reverse=True)
 
     @classmethod
     def _leaves(cls, node):
@@ -133,6 +214,10 @@ class Secrets:
     def load(cls, directory: Path | None) -> "Secrets":
         if directory is None:
             return cls()
+        if directory.is_symlink() or not directory.is_dir():
+            raise ValueError("Secrets directory must be a real directory, not a symlink")
+        if stat.S_IMODE(directory.stat().st_mode) & 0o077:
+            raise ValueError("Secrets directory is accessible by group/others; run chmod 700")
         files = {}
         for path in sorted(directory.iterdir()):
             if path.name not in SECRET_FILES or not path.is_file() or path.is_symlink():
@@ -142,6 +227,149 @@ class Secrets:
                 raise ValueError(f"{path.name} is readable by group/others; run chmod 600")
             files[path.name] = path.read_bytes()
         return cls(files)
+
+    def remember(self, content: bytes) -> None:
+        try:
+            data = json.loads(content)
+        except (ValueError, UnicodeError):
+            raise ValueError("Invalid runtime credential JSON") from None
+        self.values = sorted(set(self.values) | {v.encode() for v in self._leaves(data) if v},
+                             key=len, reverse=True)
+
+    def validate(self, plan: dict, pi_version: str) -> None:
+        self.environment = []
+        self.oauth = False
+        try:
+            auth = json.loads(self.files.get("auth.json", b"{}"))
+        except (ValueError, UnicodeError):
+            raise ValueError("Invalid auth.json JSON") from None
+        if not isinstance(auth, dict):
+            raise ValueError("auth.json must be an object")
+        allowed_env = {
+            "litellm": {"LITELLM_BASE_URL"},
+            "cloudflare-workers-ai": {"CLOUDFLARE_ACCOUNT_ID"},
+            "cloudflare-ai-gateway": {"CLOUDFLARE_ACCOUNT_ID", "CLOUDFLARE_GATEWAY_ID"},
+            "azure": {"AZURE_OPENAI_BASE_URL", "AZURE_OPENAI_RESOURCE_NAME", "AZURE_OPENAI_API_VERSION"},
+            "google-vertex": {"GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_LOCATION"},
+            "amazon-bedrock": {"AWS_REGION", "AWS_DEFAULT_REGION"},
+        }
+        for name, entry in auth.items():
+            if name not in plan["required_providers"]:
+                raise ValueError("auth.json contains a provider outside the frozen plan")
+            if not isinstance(entry, dict):
+                raise ValueError("Invalid auth.json credential")
+            if "baseUrl" in entry:
+                if name != "litellm":
+                    raise ValueError("OAuth baseUrl is supported only for LiteLLM")
+                validate_url(entry["baseUrl"])
+            if entry.get("type") == "oauth":
+                if (not all(isinstance(entry.get(k), str) and entry[k] for k in ("access", "refresh"))
+                        or type(entry.get("expires")) not in (int, float)
+                        or not math.isfinite(entry["expires"]) or entry["expires"] <= 0):
+                    raise ValueError("OAuth requires access, refresh and numeric expires (Pi schema)")
+                if pi_version != "1.1.0":
+                    raise ValueError("OAuth credential journaling supports the inspected Pi 1.1.0 auth-write contract only")
+                self.oauth = True
+            elif entry.get("type") == "api_key":
+                key = entry.get("key")
+                if not isinstance(key, str) or not key or any(c in key for c in "!$\n\r"):
+                    raise ValueError("API keys must be literal; commands and environment references are unsupported")
+            else:
+                raise ValueError("auth.json credentials require Pi type api_key or oauth")
+            env = entry.get("env", {})
+            if not isinstance(env, dict) or any(k not in allowed_env.get(name, set()) or not isinstance(v, str)
+                    or not v or any(c in v for c in "!$\n\r") for k, v in env.items()):
+                raise ValueError("Unsupported credential env: use literal approved provider configuration only")
+            for k, v in env.items():
+                if k.endswith("BASE_URL"):
+                    validate_url(v)
+            if name == "openai-codex" and entry.get("type") != "oauth":
+                raise ValueError("openai-codex requires Pi OAuth, not an OpenAI API key")
+        for name in plan["required_providers"]:
+            if name == "litellm":
+                entry = auth.get(name, {})
+                base = (entry.get("baseUrl") if entry.get("type") == "oauth" else
+                        entry.get("env", {}).get("LITELLM_BASE_URL"))
+                if base:
+                    validate_url(base)
+                else:
+                    if not os.environ.get("LITELLM_BASE_URL"):
+                        raise ValueError("Set LITELLM_BASE_URL and LITELLM_API_KEY; do not use sudo")
+                    validate_url(os.environ["LITELLM_BASE_URL"])
+                    self.environment.append("LITELLM_BASE_URL")
+                if name not in auth:
+                    if not os.environ.get("LITELLM_API_KEY"):
+                        raise ValueError("Set LITELLM_BASE_URL and LITELLM_API_KEY; do not use sudo")
+                    key = os.environ["LITELLM_API_KEY"]
+                    if len(key) > 65536 or any(c.isspace() or ord(c) < 32 for c in key):
+                        raise ValueError("LITELLM_API_KEY must be a nonempty literal token without whitespace/control characters")
+                    self.environment.append("LITELLM_API_KEY")
+            elif name not in auth:
+                raise ValueError(f"Frozen provider {name} requires runtime auth.json; host environment is not forwarded")
+        for name in self.environment:
+            if os.environ.get(name):
+                self.values.append(os.environ[name].encode())
+        if "auth.json" in self.files:
+            self.remember(self.files["auth.json"])
+        self.values = sorted(set(self.values), key=len, reverse=True)
+
+    def forward_environment(self, names: list[str]) -> list[str]:
+        """Forward exactly `names` from this process's environment (values never enter argv).
+
+        Returns the names whose values are too short to redact from artifacts.
+        """
+        self.forwarded = []
+        short = []
+        for name in names:
+            if not forwardable_env_name(name):
+                raise ValueError(f"--pass-env {name!r} is invalid or reserved (see README: .env forwarding)")
+            if name in self.forwarded:
+                raise ValueError(f"--pass-env {name} given more than once")
+            if name not in os.environ:
+                raise ValueError(f"--pass-env {name} is not set in the environment")
+            self.forwarded.append(name)
+            value = os.environ[name]
+            if len(os.fsencode(value)) >= MIN_REDACTED_LENGTH:
+                self.values.extend(forwarded_value_forms(value))
+            elif value:
+                short.append(name)
+        self.values = sorted(set(self.values), key=len, reverse=True)
+        return short
+
+    def check_audit_errors(self, output: Path) -> None:
+        if self.oauth:
+            for path in output.rglob("*"):
+                if path.is_file() and not path.is_symlink():
+                    if b"PEPI_EVAL_AUTH_AUDIT_FAILED" in path.read_bytes():
+                        self.audit_failed = True
+                        raise RuntimeError("Credential journaling failed; artifacts discarded")
+
+    def collect_auth(self, docker: Docker, container: str) -> None:
+        if not self.oauth:
+            return
+        # No docker cp/logging: collect private tmpfs data through captured stdout into memory.
+        script = (
+            "const f=require('fs'),d='/run/pepi-secrets',a=d+'/auth.json',j=d+'/auth-journal.jsonl';"
+            "try { if(f.readdirSync(d).some(n=>n.startsWith('auth-pending-'))) throw 0;"
+            "for(const p of [a,j]) { if(!f.lstatSync(p).isFile() || f.statSync(p).size>1048576) throw 0; }"
+            "if(f.realpathSync('/opt/pepi-agent/auth.json')!==a) throw 0;"
+            "process.stdout.write(JSON.stringify({auth:JSON.parse(f.readFileSync(a,'utf8')),"
+            "history:f.readFileSync(j,'utf8').trim().split('\\n').map(s=>JSON.parse(s))}));"
+            "} catch { process.exit(2); }"
+        )
+        try:
+            result = docker.call("exec", "--user", UID, container, "node", "-e", script, capture_output=True)
+            data = json.loads(result.stdout)
+            if not isinstance(data["auth"], dict) or not isinstance(data["history"], list) or not data["history"]:
+                raise ValueError()
+            for snapshot in [*data["history"], data["auth"]]:
+                if not isinstance(snapshot, dict):
+                    raise ValueError()
+                self.remember(json.dumps(snapshot).encode())
+            self.files["auth.json"] = json.dumps(data["auth"]).encode()
+        except Exception:
+            self.audit_failed = True
+            raise RuntimeError("Credential journal collection failed; artifacts discarded") from None
 
     def redact(self, data: bytes) -> tuple[bytes, int]:
         count = 0
@@ -183,6 +411,10 @@ class Secrets:
 
     def inject(self, docker: Docker, container: str) -> None:
         # Values travel over stdin only: never argv, env, `docker cp` (unsupported on tmpfs) or logs.
+        if self.oauth:
+            content = json.dumps(json.loads(self.files["auth.json"])).encode() + b"\n"
+            docker.call("exec", "-i", "--user", UID, container, "sh", "-c",
+                        f"umask 077; cat > {SECRET_DIR}/auth-journal.jsonl", input=content, capture_output=True)
         for name, content in self.files.items():
             docker.call("exec", "-i", "--user", UID, container, "sh", "-c",
                         f"umask 077; cat > {SECRET_DIR}/{name}", input=content, capture_output=True)
@@ -202,7 +434,7 @@ def decode_patch(raw: bytes, record: dict) -> str:
 
 def run_one(docker: Docker, task: dict, build: dict, output: Path, timeout: float,
             network: str, cpus: str, memory: str, secrets: Secrets | None = None,
-            run_id: str = "") -> dict:
+            run_id: str = "", disable_mcp: bool = False, provider_plan: dict | None = None) -> dict:
     secrets = secrets or Secrets()
     container = f"pepi-eval-{uuid.uuid4().hex}"
     record = {"schema_version": 1, "instance_id": task["instance_id"], "attempt_id": 1,
@@ -232,18 +464,19 @@ def run_one(docker: Docker, task: dict, build: dict, output: Path, timeout: floa
         docker.call("start", container, capture_output=True)
         secrets.inject(docker, container)
         docker.call("cp", str(issue), f"{container}:/input/issue.md", capture_output=True)
-        baseline = docker.text("exec", "--user", UID, "--workdir", "/testbed", container,
-                               "git", "rev-parse", "HEAD")
-        # Official images may add an empty setup commit; compare trees, not HEAD IDs.
-        delta = docker.text("exec", "--user", UID, "--workdir", "/testbed", container,
-                            "git", "diff", "--stat", task["base_commit"], baseline, "--")
-        dirty = docker.text("exec", "--user", UID, "--workdir", "/testbed", container,
-                            "git", "status", "--porcelain")
-        if delta or dirty:
-            raise ValueError("Task checkout does not match its clean baseline")
+        baseline = checkout_baseline(docker, container, task["base_commit"])
         record["baseline_commit"] = baseline
         record["timing_seconds"]["setup"] = time.monotonic() - setup
-        env = [value for name in CREDENTIALS for value in ("--env", name)]
+        # `--env NAME` without a value: Docker reads it from this process's environment.
+        env = [value for name in (*secrets.environment, *secrets.forwarded) for value in ("--env", name)]
+        if secrets.oauth:
+            env += ["--env", "NODE_OPTIONS=--require=/opt/pepi-eval/auth-audit.cjs"]
+        command = PI_COMMAND
+        if provider_plan:
+            parent = provider_plan["parent"]
+            command += " --provider " + shlex.quote(parent["provider"]) + " --model " + shlex.quote(parent["model"])
+        if disable_mcp:
+            env += ["--env", "PEPI_EVAL_MCP_FLAG=--no-mcp"]
         started = time.monotonic()
         record["agent_status"] = "completed"
         with (output / "parent.events.jsonl").open("wb") as stdout, \
@@ -252,13 +485,15 @@ def run_one(docker: Docker, task: dict, build: dict, output: Path, timeout: floa
                 # PEPI_EVAL_OUTPUT is consumed by the telemetry extension in a later PR.
                 docker.call("exec", "--user", UID, "--workdir", "/testbed", *env,
                             "--env", "PEPI_EVAL_OUTPUT=/output", container,
-                            "bash", "-c", PI_COMMAND, stdout=stdout, stderr=stderr, timeout=timeout)
+                            "bash", "-c", command, stdout=stdout, stderr=stderr, timeout=timeout)
             except subprocess.TimeoutExpired:
                 record["agent_status"] = "timeout"
             except subprocess.CalledProcessError as error:
                 record["agent_status"] = "agent_error"
                 record["errors"].append(f"Pi exit code: {error.returncode}")
         stop_agents(docker, container)
+        secrets.collect_auth(docker, container)
+        secrets.check_audit_errors(output)
         raw_patch = export_patch(docker, container, baseline)
         record["timing_seconds"]["agent_wall"] = time.monotonic() - started
         stop_agents(docker, container)
@@ -289,11 +524,26 @@ def _finish_attempt(docker, container, created, create_returned, output, record,
         try:
             if create_returned:
                 stop_agents(docker, container)
+                secrets.collect_auth(docker, container)
+                if secrets.audit_failed:
+                    raise RuntimeError("Credential collection failed earlier; artifacts discarded")
                 artifacts = output / "artifacts"
                 artifacts.mkdir(parents=True, exist_ok=True)
                 docker.call("cp", f"{container}:/output/.", str(artifacts), capture_output=True)
+                secrets.check_audit_errors(output)
         except Exception as error:
-            record["errors"].append(secrets.redact_text(f"Artifact collection failed: {error}"))
+            if secrets.oauth:
+                secrets.audit_failed = True
+                raw_patch = b""
+                record["errors"] = ["Credential/artifact collection failed; artifacts discarded"]
+                record["agent_status"] = "runner_error"
+                for target in output.iterdir():
+                    if target.is_dir():
+                        shutil.rmtree(target)
+                    else:
+                        target.unlink()
+            else:
+                record["errors"].append(secrets.redact_text(f"Artifact collection failed: {error}"))
         finally:
             try:
                 docker.call("rm", "--force", container, capture_output=True)
@@ -306,8 +556,9 @@ def _finish_attempt(docker, container, created, create_returned, output, record,
         raw_patch, patch_hits = secrets.redact(raw_patch)
         record["secret_redactions"] = redactions + patch_hits
         if removed:
-            record["removed_unredactable"] = removed
+            record["removed_unredactable"] = [secrets.redact_text(name) for name in removed]
         record["patch"] = decode_patch(raw_patch, record)
+        record["errors"] = [secrets.redact_text(error) for error in record["errors"]]
         (output / "patch.diff").write_bytes(raw_patch)
         write_json(output / "attempt.json", {k: v for k, v in record.items() if k != "patch"})
     except Exception as error:  # never lose the prediction row; never leave raw artifacts
@@ -321,16 +572,33 @@ def _finish_attempt(docker, container, created, create_returned, output, record,
                 target.unlink(missing_ok=True)
 
 
+def frozen_provider_plan(run: Path) -> dict:
+    read_manifest(run)
+    path = run / "build/provider-plan.json"
+    if path.is_file():
+        return read_json(path)
+    # Pre-profile-support runs were exclusively LiteLLM. Keep their original invocation.
+    profile = read_json(run / "build/profile/settings.json")
+    if profile.get("defaultProvider") != "litellm":
+        raise ValueError("Legacy prepared run is not LiteLLM; prepare a new run")
+    return {"required_providers": ["litellm"], "parent": {
+        "provider": "litellm", "model": profile["defaultModel"]}}
+
+
 def run_tasks(run: Path, timeout: float, network: str, cpus: str, memory: str,
-              secrets_dir: Path | None = None) -> int:
+              secrets_dir: Path | None = None, pass_env: list[str] | tuple[str, ...] = ()) -> int:
     """Return EXIT_OK when every attempt ran (even if the agent failed or timed out),
     EXIT_INFRA when any attempt hit a setup/runner error, EXIT_INTERRUPTED on Ctrl-C/SIGTERM."""
     manifest = read_manifest(run)
     builds = read_json(run / "builds.json")
     if network in FORBIDDEN_NETWORKS or network.startswith("container:"):
         raise ValueError("Use an isolated operator-managed Docker network, not host/bridge/default/container:*")
-    if any(not os.environ.get(name) for name in CREDENTIALS):
-        raise ValueError("Set LITELLM_BASE_URL and LITELLM_API_KEY; do not use sudo")
+    plan = frozen_provider_plan(run)
+    secrets = Secrets.load(secrets_dir)
+    secrets.validate(plan, manifest["versions"]["pi"])
+    for name in secrets.forward_environment(list(pass_env)):
+        print(f"pepi-eval: warning: {name} is shorter than {MIN_REDACTED_LENGTH} bytes; "
+              "its value is forwarded but not redacted from artifacts", file=sys.stderr)
     if (run / "predictions.jsonl").exists() or (run / "attempts").exists():
         raise ValueError("Attempts already exist; use a fresh run directory")
     if set(builds) != {task["instance_id"] for task in manifest["tasks"]}:
@@ -342,7 +610,11 @@ def run_tasks(run: Path, timeout: float, network: str, cpus: str, memory: str,
         raise ValueError(f"Docker network not found: {network}") from None
     if resolved in FORBIDDEN_NETWORKS:
         raise ValueError(f"Network {network} resolves to {resolved}; use an isolated operator-managed network")
-    secrets = Secrets.load(secrets_dir)
+    policy_path = run / "build/mcp/policy.json"
+    mcp_policy = read_json(policy_path) if policy_path.is_file() else {"enabled": False, "commands": []}
+    if "mcp.json" in secrets.files:
+        validate_mcp_secret(secrets.files["mcp.json"], mcp_policy, manifest["versions"]["pi"])
+    disable_mcp = not mcp_policy["enabled"] and native_mcp_available(manifest["versions"]["pi"])
     write_json(run / "execution.json", {
         "timeout_seconds": timeout, "network": network, "network_policy": "operator-managed; not verified",
         "cpus": float(cpus), "memory": memory, "concurrency": 1, "host": platform.platform(),
@@ -351,6 +623,9 @@ def run_tasks(run: Path, timeout: float, network: str, cpus: str, memory: str,
         # Names and presence only: never values or hashes of secrets.
         "secrets": {name: {"present": name in secrets.files} for name in SECRET_FILES},
         "config_label": manifest.get("config", {}).get("label"),
+        "mcp": mcp_policy,
+        # Names only. Omitted when empty so runs without forwarding keep their earlier protocol.
+        **({"forwarded_env_names": sorted(secrets.forwarded)} if secrets.forwarded else {}),
     })
     infra_failed = False
     interrupted = False
@@ -358,13 +633,13 @@ def run_tasks(run: Path, timeout: float, network: str, cpus: str, memory: str,
     model_name = f"{label}-{manifest['config_id']}" if label else manifest["config_id"]
     with (run / "predictions.jsonl").open("x", encoding="utf-8") as predictions:
         for task in manifest["tasks"]:
-            if interrupted:
+            if interrupted or secrets.audit_failed:
                 row = {"instance_id": task["instance_id"], "agent_status": "not_started", "patch": ""}
             else:
                 try:
                     row = run_one(Docker(), task, builds[task["instance_id"]],
                                   run / "attempts" / task["instance_id"], timeout, network, cpus,
-                                  memory, secrets, manifest["run_id"])
+                                  memory, secrets, manifest["run_id"], disable_mcp, plan)
                 except Exception as error:  # keep every selected ID in predictions.jsonl
                     row = {"instance_id": task["instance_id"], "agent_status": "runner_error", "patch": "",
                            "errors": [secrets.redact_text(f"{type(error).__name__}: {error}")]}

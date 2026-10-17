@@ -2,12 +2,11 @@
   "lastChangelogVersion": "1.1.0",
   "theme": "dark",
   "packages": [
-    "npm:pi-provider-litellm",
-    "npm:pi-web-access",
-    "npm:pi-subagents",
+    "npm:pi-subagents@0.78.0",
     "npm:pi-mcp-adapter",
     "npm:@vndv/pi-codegraph",
-    "npm:@amaster.ai/pi-memory-mem0"
+    "npm:@amaster.ai/pi-memory-mem0",
+    "npm:pi-ketch"
   ],
   "defaultModel": "gpt-6-luna",
   "defaultProvider": "openai-codex",
@@ -27,24 +26,78 @@
         "model": "gpt-6-astra"
       },
       "delegate": {
-        "model": "gpt-6-luna"
+        "model": "gpt-6-luna",
+        "tools": [
+          "read",
+          "grep",
+          "find",
+          "ls",
+          "bash",
+          "edit",
+          "write",
+          "contact_supervisor",
+          "jev_route"
+        ],
+        "subagentOnlyExtensions": [
+          "/Users/javier.cabrera/.pi/agent/extensions/pi-typesafe-router.ts",
+          "/Users/javier.cabrera/.pi/agent/extensions/prompt-logger.ts"
+        ]
       },
       "researcher": {
         "model": "gpt-6.1-sol"
       },
       "worker": {
-        "model": "gpt-6-luna"
+        "model": "gpt-6-luna",
+        "tools": [
+          "read",
+          "grep",
+          "find",
+          "ls",
+          "bash",
+          "edit",
+          "write",
+          "contact_supervisor",
+          "jev_route"
+        ],
+        "subagentOnlyExtensions": [
+          "/Users/javier.cabrera/.pi/agent/extensions/pi-typesafe-router.ts",
+          "/Users/javier.cabrera/.pi/agent/extensions/prompt-logger.ts"
+        ]
       },
       "scout": {
         "model": "gpt-6-luna"
       },
       "reviewer": {
-        "model": "gpt-6.1-sol",
+        "model": "gpt-6-astra",
         "skills": [
           "go-reviewer"
         ]
+      },
+      "deep-worker": {
+        "model": "gpt-6-astra",
+        "skills": [
+          "go-reviewer"
+        ],
+        "tools": [
+          "read",
+          "grep",
+          "find",
+          "ls",
+          "bash",
+          "edit",
+          "write",
+          "contact_supervisor",
+          "jev_route"
+        ],
+        "subagentOnlyExtensions": [
+          "/Users/javier.cabrera/.pi/agent/extensions/pi-typesafe-router.ts",
+          "/Users/javier.cabrera/.pi/agent/extensions/prompt-logger.ts"
+        ]
       }
-    }
+    },
+    "defaultSubagentOnlyExtensions": [
+      "/Users/javier.cabrera/.pi/agent/extensions/prompt-logger.ts"
+    ]
   },
   "pi-memory-mem0": {
     "mode": "self-hosted",

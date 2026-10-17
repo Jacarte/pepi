@@ -103,4 +103,6 @@ def read_manifest(run: Path) -> dict:
     for task in manifest["tasks"]:
         if hashlib.sha256(task["problem_statement"].encode()).hexdigest() != task["problem_sha256"]:
             raise ValueError(f"Issue text was modified: {task['instance_id']}")
+    from .preset import validate_selection
+    validate_selection(run, manifest)
     return manifest
