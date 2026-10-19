@@ -51,6 +51,11 @@ case "$2" in
     venv) mkdir -p "$3/bin" && cp "$0" "$3/bin/python" && : > "$3/pyvenv.cfg"; exit 0 ;;
     pip) [ -n "$FAKE_PIP_NOOP" ] || : > "$FAKE_STATE/pip-installed"; exit 0 ;;
 esac
+# FAKE_TEST_EDITS: what `reporting test-edits` prints (tasks whose patch modifies existing tests).
+[ "$2 $3" != "evals.swebench.reporting test-edits" ] || echo "${FAKE_TEST_EDITS:-0}"
+# FAKE_TEST_CHECKOUT: what `reporting test-checkout` prints ("<regraded> <unrewritable>" task counts);
+# unset prints nothing, so the restored regrade offer is skipped as uncountable.
+[ "$2 $3" != "evals.swebench.reporting test-checkout" ] || [ -z "${FAKE_TEST_CHECKOUT+x}" ] || echo "$FAKE_TEST_CHECKOUT"
 if [ -n "$FAKE_IDS_LOG" ]; then
     while [ "$#" -gt 0 ]; do
         if [ "$1" = "--ids" ]; then cat "$2" > "$FAKE_IDS_LOG"; break; fi
@@ -482,13 +487,17 @@ fi
         })
         self.assertEqual(result.returncode, 0, result.stderr)
         calls = [shlex.split(line) for line in self.log.read_text().splitlines()]
-        self.assertEqual(len(calls), 6, calls)
+        # telemetry, grade, test-edits and test-checkout (strict/restored regrade offers; skipped without
+        # a count) and summarize.
+        self.assertEqual(len(calls), 8, calls)
         prepared = calls[0][calls[0].index('--out') + 1]
         for call in calls[1:]:
             target = call[2] if call[1] == 'evals.swebench.telemetry' else call[3]
             self.assertEqual(target, prepared, call)
         self.assertNotIn('Run name (from runs/)', result.stderr)
         self.assertNotIn('Available runs:', result.stderr)
+        self.assertIn('Could not count test-file edits; strict regrade skipped', result.stderr)
+        self.assertIn('Could not count tasks for the test-checkout repair; restored regrade skipped', result.stderr)
 
     def test_blank_tty_run_name_fails_before_runner_for_each_step(self):
         for command in ('build', 'run', 'report'):
@@ -1118,3 +1127,250 @@ exec python3 "$FAKE_INSPECTOR" "$@"
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class StripTestEditsScriptTests(ScriptHarness):
+    """`report`/`all` grade step: the strict regrade is opt-in and -y never answers it."""
+
+    def report_env(self, extra=None):
+        run = Path(self.runs_tmpdir.name) / 'strict-run'
+        run.mkdir(exist_ok=True)
+        (run / 'manifest.json').write_text('{"tasks": []}')
+        (run / 'predictions.jsonl').write_text('{}\n')
+        return {'PEPI_EVAL_RUN_NAME': 'strict-run', **(extra or {})}
+
+    def grade_calls(self):
+        lines = self.log.read_text().splitlines() if self.log.exists() else []
+        return [line for line in lines if 'evals.swebench.reporting grade' in line], \
+               [line for line in lines if 'evals.swebench.reporting test-edits' in line]
+
+    def test_non_tty_unset_skips_strict_regrade_even_with_yes(self):
+        result = self.run_script(['-y', 'report'], env_extra=self.report_env({'FAKE_TEST_EDITS': '2'}))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        grades, counts = self.grade_calls()
+        self.assertEqual(len(grades), 1)
+        self.assertNotIn('--strip-test-edits', grades[0])
+        self.assertEqual(len(counts), 1)
+        self.assertIn('2 task patch(es) modify existing test files', result.stderr)
+        self.assertIn('strict regrade skipped (no terminal)', result.stderr)
+
+    def test_env_1_runs_the_strict_regrade_with_the_same_grading_options(self):
+        result = self.run_script(['report'], env_extra=self.report_env(
+            {'FAKE_TEST_EDITS': '1', 'PEPI_EVAL_STRIP_TEST_EDITS': '1', 'PEPI_EVAL_WORKERS': '3'}))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        grades, _ = self.grade_calls()
+        self.assertEqual(len(grades), 2)
+        self.assertEqual(grades[1], grades[0] + ' --strip-test-edits')
+        self.assertIn('--workers 3', grades[1])
+
+    def test_env_0_skips_and_no_test_edits_records_strict_without_prompting(self):
+        result = self.run_script(['report'], env_extra=self.report_env(
+            {'FAKE_TEST_EDITS': '4', 'PEPI_EVAL_STRIP_TEST_EDITS': '0'}))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual([len(calls) for calls in self.grade_calls()], [1, 0])
+        self.log.unlink()
+        # No patch modifies existing tests: the (Docker-free) strict regrade records strict = official,
+        # without a question even on a non-terminal.
+        result = self.run_script(['report'], env_extra=self.report_env({'FAKE_TEST_EDITS': '0'}))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        grades, counts = self.grade_calls()
+        self.assertEqual((len(grades), len(counts)), (2, 1))
+        self.assertEqual(grades[1], grades[0] + ' --strip-test-edits')
+        self.assertNotIn('modify existing test files;', result.stderr)
+        self.assertNotIn('[y/N]', result.stderr)
+        self.assertIn('recording strict score = official', result.stderr)
+
+    def test_invalid_value_exits_2(self):
+        result = self.run_script(['report'], env_extra=self.report_env(
+            {'FAKE_TEST_EDITS': '1', 'PEPI_EVAL_STRIP_TEST_EDITS': 'yes'}))
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('PEPI_EVAL_STRIP_TEST_EDITS must be 0 or 1', result.stderr)
+
+    def test_dry_run_reads_nothing_and_only_notes_the_option(self):
+        result = self.run_script(['--dry-run', '-y', 'report'], env_extra=self.report_env({'FAKE_TEST_EDITS': '3'}))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn('--strip-test-edits', result.stdout)
+        self.assertIn('offers a strict regrade', result.stderr)
+        self.assertEqual(self.grade_calls()[1], [])
+        result = self.run_script(['--dry-run', '-y', 'report'], env_extra=self.report_env(
+            {'PEPI_EVAL_STRIP_TEST_EDITS': '1'}))
+        self.assertIn('--strip-test-edits', result.stdout)
+
+    def tty_answer(self, env, answer):
+        master, slave = pty.openpty()
+        process = subprocess.Popen(['bash', str(self.script_path), '-y', 'report'], stdin=slave, stdout=slave,
+                                   stderr=slave, cwd=self.launch, env=self.script_env(env))
+        os.close(slave)
+        output = b''
+        try:
+            deadline = time.monotonic() + 8
+            answered = False
+            while time.monotonic() < deadline:
+                if select.select([master], [], [], 0.1)[0]:
+                    try: chunk = os.read(master, 65536)
+                    except OSError: break
+                    if not chunk: break
+                    output += chunk
+                    if b'test-file changes removed' in output and b'[y/N]' in output and not answered:
+                        os.write(master, answer.encode() + b'\n')
+                        answered = True
+                elif process.poll() is not None:
+                    break
+            process.wait(timeout=3)
+            return process.returncode, output.decode(), answered
+        finally:
+            if process.poll() is None:
+                process.terminate(); process.wait(timeout=3)
+            os.close(master)
+
+    def test_terminal_prompt_defaults_to_no_and_yes_runs_it_despite_dash_y(self):
+        for answer, expected in (('', 1), ('n', 1), ('y', 2)):
+            with self.subTest(answer=answer):
+                if self.log.exists():
+                    self.log.unlink()
+                status, output, asked = self.tty_answer(self.report_env({'FAKE_TEST_EDITS': '2'}), answer)
+                self.assertTrue(asked, output)
+                self.assertEqual(status, 0, output)
+                self.assertEqual(len(self.grade_calls()[0]), expected, output)
+
+
+class RestoreTestFilesScriptTests(ScriptHarness):
+    """`report`/`all` grade step: the restored regrade is opt-in and -y never answers it."""
+
+    def report_env(self, extra=None):
+        run = Path(self.runs_tmpdir.name) / 'restore-run'
+        run.mkdir(exist_ok=True)
+        (run / 'manifest.json').write_text('{"tasks": []}')
+        (run / 'predictions.jsonl').write_text('{}\n')
+        # Isolate the restored offer: the strict one is answered by its own variable.
+        return {'PEPI_EVAL_RUN_NAME': 'restore-run', 'PEPI_EVAL_STRIP_TEST_EDITS': '0', **(extra or {})}
+
+    def restore_calls(self):
+        lines = self.log.read_text().splitlines() if self.log.exists() else []
+        return [line for line in lines if 'evals.swebench.reporting grade' in line], \
+               [line for line in lines if 'evals.swebench.reporting test-checkout' in line]
+
+    def test_non_tty_unset_skips_restored_regrade_even_with_yes(self):
+        result = self.run_script(['-y', 'report'], env_extra=self.report_env({'FAKE_TEST_CHECKOUT': '2 1'}))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        grades, counts = self.restore_calls()
+        self.assertEqual((len(grades), len(counts)), (1, 1))
+        self.assertNotIn('--restore-test-files', grades[0])
+        self.assertIn("2 task(s) modify files that their eval script's checkout may fail to reset", result.stderr)
+        self.assertIn("1 task(s) have an eval script whose test checkout cannot be repaired", result.stderr)
+        self.assertIn('restored regrade skipped (no terminal)', result.stderr)
+
+    def test_only_unrepairable_scripts_are_not_recorded_as_official_and_need_an_answer(self):
+        # Nothing to regrade but some restored grades would be unknown: never "restored = official" silently.
+        result = self.run_script(['-y', 'report'], env_extra=self.report_env({'FAKE_TEST_CHECKOUT': '0 2'}))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        grades, counts = self.restore_calls()
+        self.assertEqual((len(grades), len(counts)), (1, 1))
+        self.assertNotIn('recording restored score = official', result.stderr)
+        self.assertIn("2 task(s) have an eval script whose test checkout cannot be repaired", result.stderr)
+        self.assertIn('restored regrade skipped (no terminal)', result.stderr)
+
+    def test_unparsable_counts_skip_the_restored_regrade(self):
+        for printed in ('2', '1 x', ''):
+            with self.subTest(printed=printed):
+                if self.log.exists():
+                    self.log.unlink()
+                result = self.run_script(['report'], env_extra=self.report_env({'FAKE_TEST_CHECKOUT': printed}))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(len(self.restore_calls()[0]), 1)
+                self.assertIn('Could not count tasks for the test-checkout repair; restored regrade skipped',
+                              result.stderr)
+
+    def test_env_1_runs_the_restored_regrade_with_the_same_grading_options(self):
+        result = self.run_script(['report'], env_extra=self.report_env(
+            {'FAKE_TEST_CHECKOUT': '1 0', 'PEPI_EVAL_RESTORE_TEST_FILES': '1', 'PEPI_EVAL_WORKERS': '3'}))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        grades, counts = self.restore_calls()
+        self.assertEqual((len(grades), len(counts)), (2, 0))
+        self.assertEqual(grades[1], grades[0] + ' --restore-test-files')
+        self.assertIn('--workers 3', grades[1])
+
+    def test_env_0_skips_and_nothing_to_repair_records_restored_without_prompting(self):
+        result = self.run_script(['report'], env_extra=self.report_env(
+            {'FAKE_TEST_CHECKOUT': '4 1', 'PEPI_EVAL_RESTORE_TEST_FILES': '0'}))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual([len(calls) for calls in self.restore_calls()], [1, 0])
+        self.log.unlink()
+        # Nothing to repair: the (Docker-free) restored regrade records restored = official, without a
+        # question even on a non-terminal.
+        result = self.run_script(['report'], env_extra=self.report_env({'FAKE_TEST_CHECKOUT': '0 0'}))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        grades, counts = self.restore_calls()
+        self.assertEqual((len(grades), len(counts)), (2, 1))
+        self.assertEqual(grades[1], grades[0] + ' --restore-test-files')
+        self.assertNotIn('[y/N]', result.stderr)
+        self.assertIn('recording restored score = official', result.stderr)
+
+    def test_invalid_restore_value_exits_2(self):
+        result = self.run_script(['report'], env_extra=self.report_env(
+            {'FAKE_TEST_CHECKOUT': '1 0', 'PEPI_EVAL_RESTORE_TEST_FILES': 'yes'}))
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('PEPI_EVAL_RESTORE_TEST_FILES must be 0 or 1', result.stderr)
+
+    def test_dry_run_reads_nothing_and_only_notes_the_restore_option(self):
+        result = self.run_script(['--dry-run', '-y', 'report'], env_extra=self.report_env({'FAKE_TEST_CHECKOUT': '3 0'}))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn('--restore-test-files', result.stdout)
+        self.assertIn('eval-script test checkout repaired', result.stderr)
+        self.assertEqual(self.restore_calls()[1], [])
+        result = self.run_script(['--dry-run', '-y', 'report'], env_extra=self.report_env(
+            {'PEPI_EVAL_RESTORE_TEST_FILES': '1'}))
+        self.assertIn('--restore-test-files', result.stdout)
+
+    def tty_restore_answer(self, env, answer, prompt=b'Repair the eval-script test checkout'):
+        master, slave = pty.openpty()
+        process = subprocess.Popen(['bash', str(self.script_path), '-y', 'report'], stdin=slave, stdout=slave,
+                                   stderr=slave, cwd=self.launch, env=self.script_env(env))
+        os.close(slave)
+        output = b''
+        try:
+            deadline = time.monotonic() + 8
+            answered = False
+            while time.monotonic() < deadline:
+                if select.select([master], [], [], 0.1)[0]:
+                    try: chunk = os.read(master, 65536)
+                    except OSError: break
+                    if not chunk: break
+                    output += chunk
+                    if prompt in output and b'[y/N]' in output and not answered:
+                        os.write(master, answer.encode() + b'\n')
+                        answered = True
+                elif process.poll() is not None:
+                    break
+            process.wait(timeout=3)
+            return process.returncode, output.decode(), answered
+        finally:
+            if process.poll() is None:
+                process.terminate(); process.wait(timeout=3)
+            os.close(master)
+
+    def test_terminal_restore_prompt_defaults_to_no_and_yes_runs_it_despite_dash_y(self):
+        for answer, expected in (('', 1), ('n', 1), ('y', 2)):
+            with self.subTest(answer=answer):
+                if self.log.exists():
+                    self.log.unlink()
+                status, output, asked = self.tty_restore_answer(self.report_env({'FAKE_TEST_CHECKOUT': '2 0'}), answer)
+                self.assertTrue(asked, output)
+                self.assertEqual(status, 0, output)
+                grades = self.restore_calls()[0]
+                self.assertEqual(len(grades), expected, output)
+                self.assertEqual(any('--restore-test-files' in line for line in grades), expected == 2)
+
+    def test_terminal_prompt_for_only_unrepairable_scripts_defaults_to_no(self):
+        for answer, expected in (('', 1), ('y', 2)):
+            with self.subTest(answer=answer):
+                if self.log.exists():
+                    self.log.unlink()
+                status, output, asked = self.tty_restore_answer(
+                    self.report_env({'FAKE_TEST_CHECKOUT': '0 3'}), answer,
+                    prompt=b'Record a test-checkout repaired score with 3 unknown grade(s)')
+                self.assertTrue(asked, output)
+                self.assertEqual(status, 0, output)
+                grades = self.restore_calls()[0]
+                self.assertEqual(len(grades), expected, output)
+                self.assertNotIn('recording restored score = official', output)

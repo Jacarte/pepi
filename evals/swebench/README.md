@@ -54,6 +54,8 @@ sandbox, so scope/revoke it appropriately; this is not a secrets-isolation syste
 `prepare` freezes selected issue texts, model choices, AGENTS.md and workflows.
 It omits personal skills (including role skill overrides), memory, web, the MCP
 adapter, router and budget polling; LiteLLM's gateway skills/MCP remain disabled.
+Host skills are never frozen; `run` can copy them for one run only after consent
+(see [Host skills](#host-skills)).
 Native Pi MCP is enabled by default; use `--drop-mcp` to disable it explicitly.
 This is a named benchmark variant, not every feature of your desktop setup.
 The source commit and effective profile hash are recorded. Only issue text goes
@@ -259,6 +261,48 @@ disabled with `enabled: false` or `disabled: true`. It prints kept and dropped s
 (with reasons) and env/header/oauth key names, never values, and continues without MCP when
 none survive. See [the evals README](../README.md) for consent and cleanup.
 
+## Host skills
+
+By default the agent sees no skills. `evals/pepi-eval.sh run` can copy your global skills from
+`~/.pi/agent/skills` and `~/.agents/skills` after a separate `[y/N]` (default **No**), or with
+`PEPI_EVAL_USE_HOST_SKILLS=1`; `0` disables the proposal, `-y` never consents, `.env` cannot set
+it, and dry-run never reads the directories. Sources are scanned in Pi's own user order
+(`<agent-dir>/skills` before `~/.agents/skills`, as in Pi's `package-manager.js`); the first skill of
+a name wins, as on the host. Only top-level directories with a `SKILL.md` count. A skill is copied
+whole or dropped with a reason: any symlink (never followed, including a symlinked source
+directory or a sub-directory swapped for one during the scan, which is walked through directory
+descriptors), hard-linked files, special files, credential-like names (case-insensitive: `.env*`,
+`auth.json`, `mcp.json`, `.netrc`, `.npmrc`, `.pypirc`, `credentials*`, `id_rsa*`/`id_dsa*`/
+`id_ecdsa*`/`id_ed25519*`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.keystore`, `*.jks`) or `.git`
+entries, a file over 1 MiB, a skill over 5 MiB, 200 files, 200 directories or 16 levels, a file
+matching the narrate secret/token pattern, a PEM private key or a quoted credential assignment
+(`"apiKey": "<8+ token characters>"`), or containing this run's credential values, a missing
+`SKILL.md`, or a name outside `[A-Za-z0-9._-]{1,64}`; at most 50 skills. The prompt lists each
+skill's name, file count, size and number of scripts, plus every dropped entry and its reason,
+never contents. Skill names and descriptions go into the agent's system prompt; any skill file it
+reads reaches the model provider and is kept, unredacted, in the run's logs
+(`attempts/*/parent.events.jsonl`, `attempts/*/artifacts/sessions/`).
+
+A skill holding a value this run redacts fails the run before any container starts, naming the
+skill (never the value): the adapter checks the gateway URL/key and the `auth.json`/`mcp.json` it
+stages (also `LITELLM_BASE_URL` when no frozen provider needs it), and the runner re-checks every
+redacted value, including forwarded `.env` values and `PEPI_EVAL_SECRETS_DIR` files.
+
+After a terminal `y` the list is pinned (`PEPI_EVAL_HOST_SKILLS_SHA256`, via the environment): if
+the skills changed since they were shown, `run` stops with exit 2 (`host skills changed since
+approval; re-run`). The copy goes to a private temporary directory (`run --skills-dir`, 700
+directories, 600 files, 700 for executables) that the adapter deletes afterwards, also on
+SIGINT/SIGTERM. The runner re-validates it, then extracts it as root into a per-container tmpfs at
+`/opt/pepi-agent/skills` (`<agent-dir>/skills` for `PI_CODING_AGENT_DIR=/opt/pepi-agent`, Pi docs
+`configuration.md`): root-owned, readable and executable by the agent UID, not writable, never in an
+image layer. `execution.json` records `skills` as `{name, sha256, files}` (content digest over sorted
+paths, executable bits and bytes); without skills the key is omitted. Pi's default discovery loads
+them for the parent; pi-subagents children launch with `--no-skills` unless the agent sets
+`inheritSkills` (default false), but still resolve skills an agent declares by name from
+`<agent-dir>/skills`. `config_id` does not include these run-time skills. Skill use is partly
+observable: `telemetry.json` `skill_reads` counts the parent's `read` calls below
+`/opt/pepi-agent/skills/<name>/` (a lower bound; see [TELEMETRY.md](TELEMETRY.md)).
+
 **Local npm servers:** add a non-secret `mcp-packages.json` to your injected config:
 
 ```json
@@ -320,6 +364,86 @@ outcomes, see `attempt.json`), `2` usage/configuration error, `3` any `setup_err
 `runner_error` (or a failed `docker build`), `130` interrupted. SIGTERM (CI cancel) is
 handled like Ctrl-C so containers are removed. If a runner is killed hard, clean up with
 `docker ps -aq --filter label=pepi-eval.run=<run_id> | xargs -r docker rm -f`.
+
+## Test-file edits
+
+Some task eval scripts do not restore the agent's test edits before applying the reference
+test patch, so an edited existing test can decide the official grade. In
+`django__django-11141`, `eval.sh` runs `git checkout <base> tests/migrations/test_loader.py
+tests/migrations/test_migrations_namespace_package/0001_initial.py`; the second path does not
+exist yet, so git restores nothing (`error: pathspec ... did not match any file(s) known to git`
+in `runs/cmp-base-1/grading/*/logs/evaluation/*/*/django__django-11141/test_output.txt`). Runs that
+flipped the existing `test_load_empty_dir` assertion were graded resolved; a run that left the
+tests alone was not.
+
+`summarize` therefore always flags, from the graded patch (`predictions.jsonl`, the same text as
+`attempts/<id>/patch.diff` when that is UTF-8), which test-like files each patch touches
+(`evals/swebench/testpaths.py`: a `tests`/`__tests__` directory at any depth, a top-level
+`test/` or `testing/` directory, or `test_*.py`, `*_test.py`, `*_tests.py`, `conftest.py`,
+`*.test.js`/`.ts`). Nested `test`/`testing` packages are library code (`django/test/testcases.py`,
+`sympy/testing/runtests.py`, `lib/matplotlib/testing/decorators.py`) and are not test-like. Per task:
+`test_edit_kind` (`none`, `added_only`, `modified_existing`, or `unknown` for a non-git diff),
+`test_files_touched` (up to 10 paths) and counts. Totals: `tasks_modifying_existing_tests` and
+`resolved_with_test_edits`; `summary.md` notes them. Adding a test to an existing file also counts
+as modifying it: most such edits are harmless, the strict score tells.
+
+The strict regrade is opt-in: `reporting grade RUN ... --strip-test-edits`, or in
+`pepi-eval.sh` `PEPI_EVAL_STRIP_TEST_EDITS=1` (on a terminal it asks, default No, only when
+a patch modifies existing tests; `-y` never answers it; when none does, the script records
+strict = official without asking, which needs no Docker). It regrades only the tasks whose patch
+modifies existing test files, with **every** test-like per-file diff block removed (added test
+files too, so they cannot collide with the reference test patch), under a fresh `*-strict-*` run
+ID in `grading-strict/<id>/` with its record in `grading-strict.json`. `grading/` and
+`grading.json` are never touched. A patch that is empty once stripped is `empty_patch`, not
+graded. Other tasks keep their official outcome. `summarize` then adds `resolved_strict` /
+`grading_status_strict` per task and `resolved_strict` in total (`Resolved: 17/20 (strict, test
+edits removed: 16/20)`); without a strict regrade no strict keys appear. Changed predictions,
+a changed test-path policy (`STRIP_POLICY_VERSION`), or regraded tasks whose grading inputs
+(`tasks/<id>` and `sweb.yaml`) differ from the official grading's make `summarize` refuse a stale
+or mixed strict regrade; `grade --strip-test-edits` refuses a task repo that differs from the
+official grading's before grading. The official score is unchanged; the strict one is an
+integrity check, not proof of intent.
+
+Known blind spot: a patch that only adds test files (`added_only`, e.g. a new `conftest.py`) is
+not regraded, although a new `conftest.py` can change test collection; its strict outcome is the
+official one.
+
+### Repaired test checkout (`--restore-test-files`)
+
+The strict regrade removes the agent's test-file changes; the restored regrade instead repairs the
+eval script, closer to what the benchmark intends. Each task's `eval.sh` resets the test files with
+one `git checkout <base> <path>...` (before the reference test patch and again at the end). git
+aborts the whole command when any listed path is absent from `<base>`, typically a file the test
+patch creates; 136 of the 2,519 local tasks list such a path (`django__django-11141` is the one in
+Verified20 v1). `reporting grade RUN ... --restore-test-files` (or `PEPI_EVAL_RESTORE_TEST_FILES=1`;
+same terminal question, default No, `-y` never answers it; it records restored = official without
+Docker only when no task qualifies and no eval script is unrewritable) regrades only tasks whose patch
+modifies an existing file that a checkout line lists, with the **patch unchanged** and, in that
+regrade's own task-repo copy only, each checkout line of the exact form `git checkout <40-hex sha>
+<plain relative paths>` (no `.`, `..` or empty components, no trailing `/`) rewritten to
+`if git cat-file -e <sha>:<path> 2>/dev/null; then git checkout <sha> -- <path>; fi` per path
+(`evals/swebench/evalscript.py`; every other byte is kept, rewriting is idempotent, POSIX sh/bash
+3.2). The harness reads `eval.sh` from the frozen `--task-repo` copy (`swebench.task.repo` maps it to
+`eval_script`), so that copy is where the repair belongs; `~/swe-bench-tasks` and the official frozen
+copy are never changed. The checkout line is the authoritative list of the files grading resets, so
+it is intersected with **every** existing file the patch modifies, renames or deletes, not only files
+the test-path heuristic calls tests (a listed fixture counts too; the strict regrade still uses the
+heuristic). A task whose patch changes an existing file and whose `eval.sh` is missing, not UTF-8 or
+has any other line mentioning `git ... checkout` (e.g. `cd x && git checkout`, `git -c k=v checkout`,
+`git checkout-index`, a comment) is `unrewritable`: which files it resets is unknown, so it is not
+regraded and is unknown in the restored score, which is then a lower bound. Tasks whose checkout never
+lists the modified files, or whose patch changes no existing file, keep their official outcome (the
+repair changes nothing for them).
+
+Results go to `grading-restored/<run>-restored-<uuid>/` and `grading-restored.json` (per task: the
+original/rewritten `eval.sh` SHA-256 and rewritten line count). `summarize` adds
+`resolved_restored`/`grading_status_restored`, `resolved_restored`/`unknown_grades_restored` and
+`Resolved: 18/20 (strict, test edits removed: 17/20; test-checkout repaired: 17/20)` for the
+variants that exist. Like strict, it refuses restored data after predictions change, after a
+`RESTORE_POLICY_VERSION` or selection change, or when the regraded inputs differ from the official
+grading's inputs with the same repair applied. `reporting test-checkout RUN` prints
+`<regraded> <unrewritable>`: how many tasks the restored regrade would regrade and how many it could
+not repair; `pepi-eval.sh` asks (default No) whenever either is above 0.
 
 ## Tests
 

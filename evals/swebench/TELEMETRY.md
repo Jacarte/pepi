@@ -17,6 +17,11 @@ parent/per-child usage, Pi-estimated cost, active-child status, parent tool
 counts/durations, retries and compaction observations. The raw parent stream
 also provides a parent-only per-model breakdown. Agent wall time is recorded
 by the outside runner; parallel child durations are not summed as wall time.
+Optional `skill_reads` (`{skill name: count}`) and `skill_reads_invalid_names` count parent
+`read` tool calls of absolute paths below `/opt/pepi-agent/skills/<name>/` (consented host
+skills; `..` is resolved first, so escapes are ignored). Names and counts only, never paths or
+content; a lower bound, because relative paths and `bash`/`cat` reads are not counted. Older
+`telemetry.json` files lack both fields.
 
 Count final `message_end` usage once, not streaming snapshots or copies in
 turn/agent-end. A turn is one assistant response with its tool activity, not an

@@ -256,7 +256,8 @@ class HostMcpAdapterTests(unittest.TestCase):
         with patch.object(sys, "argv", ["host_auth", "R", "--", "cmd"]), \
                 patch.object(host_auth, "run_with_host_auth", return_value=0) as legacy:
             host_auth.main()
-        legacy.assert_called_once_with(Path("R"), ["cmd"], auth=True, mcp=False, approved_mcp_sha256=None)
+        legacy.assert_called_once_with(Path("R"), ["cmd"], auth=True, mcp=False, approved_mcp_sha256=None,
+                                       skills=False, approved_skills_sha256=None)
         for env, approved in (({}, None), ({HOST_MCP_SHA256_ENV: "abc"}, "abc")):
             with self.subTest(env=env), patch.dict(os.environ, env), \
                     patch.object(sys, "argv", ["host_auth", "R", "--mcp", "--", "cmd", "--", "x"]), \
@@ -265,7 +266,8 @@ class HostMcpAdapterTests(unittest.TestCase):
                     os.environ.pop(HOST_MCP_SHA256_ENV, None)
                 host_auth.main()
             mcp_only.assert_called_once_with(Path("R"), ["cmd", "--", "x"], auth=False, mcp=True,
-                                             approved_mcp_sha256=approved)
+                                             approved_mcp_sha256=approved, skills=False,
+                                             approved_skills_sha256=None)
 
 
 INSPECTOR = '''import json, os, pathlib, stat, sys, time

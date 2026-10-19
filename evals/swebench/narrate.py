@@ -16,7 +16,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .common import read_json
+from .common import SECRET_PATTERN, read_json
 from .reporting import compare
 
 EXIT_OK, EXIT_USAGE, EXIT_PI, EXIT_INTERRUPTED = 0, 2, 3, 130
@@ -62,10 +62,16 @@ Rules:
   unresolved" or similar wording that implies both sides had the same outcome.
 - agent_errors are sanitized error strings from the attempt record. Quote or summarize only those; do not
   guess the cause of an error beyond them.
-- Include a short "Tools and MCPs" paragraph per run from tool_usage, subagent_usage and mcp: the dominant
-  tools by calls, tool errors, and subagent use (children and agent names, or that none were used). If
+- Include a short "Tools and MCPs" paragraph per run from tool_usage, subagent_usage and mcp. Its first line
+  must be "Subagent calls: <agent> N, <agent> M" from subagent_usage.invocations_by_agent in that order, or
+  "Subagent calls: none" only when it is empty AND tasks_without_subagent_accounting and
+  tool_usage.tasks_missing_telemetry are both 0. When it is empty and either is above 0, write
+  "Subagent calls: unknown (subagent accounting unavailable)". When it has entries and
   tasks_without_subagent_accounting is above 0, say subagent use is unknown for those tasks and do not say
-  no subagents were used. MCP servers count as configured only when configured_servers is non-empty;
+  no subagents were used. If subagent_count_cross_check is not "consistent", say so ("not_comparable":
+  counts could not be cross-checked against subagent tool calls; "children_more_than_tool_calls": one
+  subagent call can launch several children; "children_fewer_than_tool_calls": some subagent tool calls
+  have no accounted child). Then the dominant tools by calls and tool errors. MCP servers count as configured only when configured_servers is non-empty;
   provisioned_commands are installed binaries, not configured servers. Report direct MCP tool calls from
   mcp_tools_called and mcp_calls_total. If configured_but_unused is true, say
   "no direct mcp__* tool calls observed" (not that the servers went unused). If
@@ -75,7 +81,38 @@ Rules:
   telemetry_coverage_partial is true, say per-tool telemetry covers only tasks_with_tool_breakdown of the tasks.
 - For each comparison, use tool_usage_differences to call out tools or MCPs used by only one run and the
   large_call_shifts, plus differences in MCP configuration, direct MCP calls, codemode calls and subagent
-  counts. Present these as context only; do not claim they caused any win, regression or change.
+  counts. From subagent_invocation_differences, state each agent's baseline and candidate invocations and
+  difference, naming agents used by only one run. Present these as context only; do not claim they caused
+  any win, regression or change.
+- skills.available lists the host skills copied into each run (names and short content hashes); say
+  which were available, or that none were. Host skills apply to the parent agent only: pi-subagents
+  children do not see them unless an agent sets inheritSkills: true or declares skills by name. A run's
+  config_label (config_id) does not include host skills (skills.in_config_id is false); identify the skill
+  set by skills.list_sha256_prefix. Skill use is only partly observable (usage_observable "partial"):
+  state skills.reads (read counts and tasks_reading per skill) as a lower bound per skills.reads_note;
+  0 reads does not prove a skill had no effect, and never claim a skill caused an outcome. If skills
+  were available and tasks_missing_read_telemetry is above 0, say read counts are missing for those tasks. For comparisons,
+  mention skills_differences (skills only in one run, content_changed) as context only, never as a cause;
+  if skills_confounded is true, say the comparison is confounded: skills changed together with
+  skills_confounded_with, so their effects cannot be separated.
+- test_edits says whether each run's patches edited existing test files. Some official task eval scripts
+  reset test files with one `git checkout` that aborts when a listed path does not exist yet, so the
+  agent's edits to existing test files can stay in place during grading. If resolved_with_test_edits is
+  above 0, say the resolved count includes that many tasks whose patch edited existing test files and name
+  them from test_edits.tasks. Report the official resolved count, then each score that is not null:
+  resolved_strict (test-file changes removed, those tasks regraded) and resolved_restored (eval-script test
+  checkout repaired, patch unchanged, those tasks regraded). If resolved_restored is not null,
+  call it the integrity check closest to the benchmark's intent; if only resolved_strict is not null,
+  call it the integrity check; if both are null, say no strict score is available. If
+  unknown_grades_strict or unknown_grades_restored is above 0, say that many strict or restored grades are
+  unknown, so that score is a lower bound; name restored_unrewritable_tasks as tasks whose eval-script
+  checkout could not be repaired.
+  If test_edits.checked is false, say test-file edits were not checked for that run.
+  Never claim cheating or intent; say "edited existing test files".
+- For each comparison, if strict_comparison_available is true, also report strict_wins and
+  strict_regressions; otherwise say strict scores are not available for that comparison. If
+  restored_comparison_available is true, also report restored_wins and restored_regressions. Mention
+  test_edit_kind_differences as context only.
 - Plain language, under about 25 lines overall, no tables.
 - End with exactly one line: "Caveat: {CAVEAT}"
 
@@ -155,6 +192,11 @@ def task_facts(run: Path, row: dict) -> dict:
              "estimated_cost_usd": row["estimated_cost_usd"]}
     if row["agent_status"] != "completed" or row["grading_status"] != "resolved":
         facts["agent_errors"] = agent_errors(run, row["instance_id"])
+    if row.get("test_edit_kind") in TEST_EDIT_KINDS:
+        facts["test_edit_kind"] = row["test_edit_kind"]
+    for key in ("grading_status_strict", "grading_status_restored"):
+        if row.get(key) in GRADING_STATUSES:
+            facts[key] = row[key]
     return facts
 
 
@@ -167,6 +209,8 @@ MCP_GENERIC_TOOLS = frozenset({"list_mcp_resources", "list_mcp_resource_template
 # docs/mcp.md: the default `codemode` exposure calls MCP tools from inside codemode scripts, so only the
 # `codemode` tool call is visible and it cannot be attributed to a server.
 CODEMODE_TOOL = "codemode"
+# pi-subagents registers its parent tool as `subagent` (src/extension/index.js); one call may launch several children.
+SUBAGENT_TOOL = "subagent"
 MCP_DETECTION = ("Pi native naming (docs/mcp.md): tool name starts with mcp__ (mcp__<server>__<tool>) or is "
                  "list_mcp_resources/list_mcp_resource_templates/read_mcp_resource; MCP calls made inside "
                  "codemode scripts (the default exposure) are not visible as separate parent tool calls, only "
@@ -196,8 +240,9 @@ def usage_counts(run: Path, summary: dict) -> dict:
     """Untruncated per-run tool/subagent counts from telemetry.json; names sanitized, counts validated."""
     totals = {"calls": 0, "errors": 0, "with": 0, "missing": 0, "breakdown": 0, "invalid_names": 0,
               "malformed": 0, "mcp_calls": 0, "codemode_calls": 0, "tasks_with_children": 0, "children": 0,
-              "unresolved": 0, "subagent_accounting_unavailable": 0}
-    tools, tasks_using, mcp_tools, agents = {}, {}, {}, {}
+              "unresolved": 0, "subagent_accounting_unavailable": 0, "subagent_accounting_not_available": 0,
+              "skill_read_telemetry": 0, "skill_reads_invalid": 0}
+    tools, tasks_using, mcp_tools, agents, agent_tasks, skill_reads, skill_tasks = {}, {}, {}, {}, {}, {}, {}
     for row in summary["instances"]:
         telemetry = load_telemetry(run, row["instance_id"])
         if telemetry is None:
@@ -231,6 +276,7 @@ def usage_counts(run: Path, summary: dict) -> dict:
                 totals["mcp_calls"] += calls
             totals["codemode_calls"] += calls if raw_name == CODEMODE_TOOL else 0
         totals["subagent_accounting_unavailable"] += telemetry.get("accounting_status") == "unavailable"
+        totals["subagent_accounting_not_available"] += telemetry.get("accounting_status") != "available"
         children = telemetry.get("children")
         children = children if isinstance(children, list) else []
         totals["tasks_with_children"] += bool(children)
@@ -239,9 +285,23 @@ def usage_counts(run: Path, summary: dict) -> dict:
             agent = safe_name(child.get("agent") if isinstance(child, dict) else None)
             totals["invalid_names"] += agent == INVALID_NAME
             agents[agent] = agents.get(agent, 0) + 1
+            agent_tasks.setdefault(agent, set()).add(row["instance_id"])
         totals["unresolved"] += count(telemetry.get("unresolved_async_children")) or 0
+        reads = telemetry.get("skill_reads")  # optional: absent in telemetry.json written before it existed
+        if isinstance(reads, dict):
+            totals["skill_read_telemetry"] += 1
+            totals["skill_reads_invalid"] += count(telemetry.get("skill_reads_invalid_names")) or 0
+            for raw_name, raw_reads in reads.items():
+                name, value = safe_name(raw_name), count(raw_reads)
+                if value is None:
+                    totals["malformed"] += 1
+                elif name == INVALID_NAME:
+                    totals["skill_reads_invalid"] += value
+                elif value:
+                    skill_reads[name] = skill_reads.get(name, 0) + value
+                    skill_tasks.setdefault(name, set()).add(row["instance_id"])
     return {"totals": totals, "tools": tools, "tasks_using": tasks_using, "mcp_tools": mcp_tools,
-            "agents": agents}
+            "agents": agents, "agent_tasks": agent_tasks, "skill_reads": skill_reads, "skill_tasks": skill_tasks}
 
 
 def tool_coverage_partial(totals: dict) -> bool:
@@ -267,13 +327,42 @@ def tool_usage_facts(usage: dict) -> dict:
             "by_tool": by_tool}
 
 
+def subagent_count_cross_check(usage: dict) -> str:
+    """Accounted children (one per subagent invocation) against parent `subagent` tool calls.
+
+    One `subagent` tool call can launch several children (parallel tasks or chains), so more children than
+    tool calls is expected; only fewer children than tool calls means some launches have no accounted child.
+    The counts are only comparable when every task has telemetry, a per-tool breakdown and accounting_status
+    "available" (unavailable/partial accounting can drop children).
+    """
+    totals = usage["totals"]
+    if (totals["with"] == 0 or tool_coverage_partial(totals) or totals["subagent_accounting_not_available"] > 0):
+        return "not_comparable"
+    children, tool_calls = totals["children"], usage["tools"].get(SUBAGENT_TOOL, 0)
+    if children < tool_calls:
+        return "children_fewer_than_tool_calls"
+    return "children_more_than_tool_calls" if children > tool_calls else "consistent"
+
+
 def subagent_usage_facts(usage: dict) -> dict:
-    totals, agents = usage["totals"], usage["agents"]
+    totals, agents, agent_tasks = usage["totals"], usage["agents"], usage["agent_tasks"]
+    # A list, not a dict: canonical() sorts keys, which would lose the invocations-descending order.
     return {"tasks_with_children": totals["tasks_with_children"], "total_children": totals["children"],
             "unresolved_async_children_total": totals["unresolved"],
             "tasks_without_subagent_accounting": totals["subagent_accounting_unavailable"],
-            "by_agent": [{"agent": name, "children": agents[name]}
-                         for name in sorted(agents, key=lambda name: (-agents[name], name))]}
+            "invocations_by_agent": [{"agent": name, "invocations": agents[name],
+                                      "tasks_using": len(agent_tasks[name])}
+                                     for name in sorted(agents, key=lambda name: (-agents[name], name))],
+            "subagent_tool_calls": usage["tools"].get(SUBAGENT_TOOL, 0),
+            "subagent_count_cross_check": subagent_count_cross_check(usage)}
+
+
+def subagent_invocation_differences(baseline: dict, candidate: dict) -> list:
+    """Per-agent child counts for the union of agents in both runs, zeros explicit, sorted by agent name."""
+    agents = [usage["agents"] for usage in (baseline, candidate)]
+    return [{"agent": name, "baseline": agents[0].get(name, 0), "candidate": agents[1].get(name, 0),
+             "difference": agents[1].get(name, 0) - agents[0].get(name, 0)}
+            for name in sorted(set(agents[0]) | set(agents[1]))]
 
 
 def mcp_facts(summary: dict, usage: dict) -> dict:
@@ -326,9 +415,97 @@ def tool_usage_differences(baseline: dict, candidate: dict, baseline_mcp: dict, 
                                               for usage in (baseline, candidate))}
 
 
+# Short digest prefix shown for each host skill: enough to tell content changes apart.
+SKILL_HASH_PREFIX = 12
+
+
+def skill_records(value) -> list:
+    """Sanitized {name, sha256_prefix} per recorded skill (execution.json `skills`), sorted by name."""
+    records = []
+    for item in value if isinstance(value, list) else []:
+        if isinstance(item, dict):
+            digest = item.get("sha256")
+            valid = isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest)
+            records.append({"name": safe_name(item.get("name")),
+                            "sha256_prefix": digest[:SKILL_HASH_PREFIX] if valid else None})
+    return sorted(records, key=lambda record: (record["name"], record["sha256_prefix"] or ""))
+
+
+SKILL_READS_NOTE = ("lower bound: only `read` tool calls of absolute paths below /opt/pepi-agent/skills/<name>/ "
+                    "are counted (not bash/cat reads); a skill's name and description are in the system prompt "
+                    "and may influence the agent without any read")
+
+
+def skills_list_prefix(records: list) -> str | None:
+    """Short digest of a run's host-skill list (names and hash prefixes); None without skills.
+
+    config_id covers only the frozen configuration, not skills copied at run time."""
+    if not records:
+        return None
+    pairs = [[record["name"], record["sha256_prefix"]] for record in records]
+    return hashlib.sha256(json.dumps(pairs, separators=(",", ":")).encode()).hexdigest()[:SKILL_HASH_PREFIX]
+
+
+def skills_facts(summary: dict, usage: dict) -> dict:
+    protocol = summary.get("protocol") if isinstance(summary.get("protocol"), dict) else {}
+    available = skill_records(protocol.get("skills"))
+    reads, tasks = usage["skill_reads"], usage["skill_tasks"]
+    # Available skills are listed with explicit zeros; reads of other names are listed too.
+    names = sorted({record["name"] for record in available} | set(reads), key=lambda name: (-reads.get(name, 0), name))
+    with_telemetry = usage["totals"]["skill_read_telemetry"]
+    return {"available": available, "list_sha256_prefix": skills_list_prefix(available), "in_config_id": False,
+            "usage_observable": "partial", "reads_note": SKILL_READS_NOTE,
+            "reads": [{"name": name, "reads": reads.get(name, 0), "tasks_reading": len(tasks.get(name, ()))}
+                      for name in names],
+            "reads_invalid_names": usage["totals"]["skill_reads_invalid"],
+            "tasks_with_read_telemetry": with_telemetry,
+            "tasks_missing_read_telemetry": len(summary["instances"]) - with_telemetry}
+
+
+def skills_differences(baseline: dict, candidate: dict) -> dict:
+    sides = [{record["name"]: record["sha256_prefix"] for record in run["skills"]["available"]}
+             for run in (baseline, candidate)]
+    return {"only_in_baseline": sorted(set(sides[0]) - set(sides[1])),
+            "only_in_candidate": sorted(set(sides[1]) - set(sides[0])),
+            "content_changed": sorted(name for name in set(sides[0]) & set(sides[1])
+                                      if sides[0][name] != sides[1][name])}
+
+
 def infrastructure_failures(summary: dict) -> list:
     return sorted(row["instance_id"] for row in summary["instances"]
                   if row["agent_status"] in INFRASTRUCTURE_FAILURE_STATUSES)
+
+
+TEST_EDIT_KINDS = frozenset({"none", "added_only", "modified_existing", "unknown"})
+GRADING_STATUSES = frozenset({"resolved", "unresolved", "empty_patch", "grading_error", "not_graded"})
+TEST_EDIT_TASKS_LISTED = 20
+
+
+def restored_unrewritable_tasks(summary: dict) -> list:
+    """Task IDs whose eval-script checkout could not be repaired (restored grade unknown); only IDs of this
+    summary's (already validated) instances are kept."""
+    restored = summary.get("restored_grading")
+    raw = restored.get("unrewritable_ids") if isinstance(restored, dict) else None
+    known = {row["instance_id"] for row in summary["instances"]}
+    return sorted(value for value in raw if isinstance(value, str) and value in known)[:TEST_EDIT_TASKS_LISTED] \
+        if isinstance(raw, list) else []
+
+
+def test_edit_facts(summary: dict) -> dict:
+    """Counts and task IDs only: test file paths never go into the prompt."""
+    rows = summary["instances"]
+    scores = {"resolved_strict": count(summary.get("resolved_strict")),
+              "unknown_grades_strict": count(summary.get("unknown_grades_strict")),
+              "resolved_restored": count(summary.get("resolved_restored")),
+              "unknown_grades_restored": count(summary.get("unknown_grades_restored")),
+              "restored_unrewritable_tasks": restored_unrewritable_tasks(summary)}
+    if not all(row.get("test_edit_kind") in TEST_EDIT_KINDS for row in rows):
+        return {"checked": False, "tasks_modifying_existing_tests": None, "resolved_with_test_edits": None,
+                **scores, "tasks": []}
+    modified = [row for row in rows if row["test_edit_kind"] == "modified_existing"]
+    return {"checked": True, "tasks_modifying_existing_tests": len(modified),
+            "resolved_with_test_edits": sum(row["resolved"] is True for row in modified), **scores,
+            "tasks": sorted(row["instance_id"] for row in modified)[:TEST_EDIT_TASKS_LISTED]}
 
 
 def run_facts(run: Path, summary: dict, usage: dict) -> dict:
@@ -348,7 +525,8 @@ def run_facts(run: Path, summary: dict, usage: dict) -> dict:
         "infrastructure_failures": infrastructure_failures(summary),
         "tasks": [task_facts(run, row) for row in summary["instances"]],
         "tool_usage": tool_usage_facts(usage), "subagent_usage": subagent_usage_facts(usage),
-        "mcp": mcp_facts(summary, usage),
+        "mcp": mcp_facts(summary, usage), "skills": skills_facts(summary, usage),
+        "test_edits": test_edit_facts(summary),
     }
 
 
@@ -376,8 +554,10 @@ def build_facts(summaries: list, runs: list) -> dict:
     for index, candidate in enumerate(summaries[1:], start=1):
         result = compare(summaries[0], candidate)
         result = {key: value for key, value in result.items() if key != "selection"}
-        result["configuration_differences"] = scrub_values(
-            safe_name_lists(result["configuration_differences"]))
+        differences = safe_name_lists(result["configuration_differences"])
+        if isinstance(differences.get("skills"), dict):
+            differences["skills"] = {side: skill_records(value) for side, value in differences["skills"].items()}
+        result["configuration_differences"] = scrub_values(differences)
         # resolved_delta alone is untrustworthy when any grade is unknown, so use paired flips only.
         result["exceeds_noise_threshold"] = (
             not result["inconclusive"]
@@ -386,6 +566,24 @@ def build_facts(summaries: list, runs: list) -> dict:
             summaries[0], candidate)
         result["tool_usage_differences"] = tool_usage_differences(
             usages[0], usages[index], facts["runs"][0]["mcp"], facts["runs"][index]["mcp"])
+        result["subagent_invocation_differences"] = subagent_invocation_differences(usages[0], usages[index])
+        result["skills_differences"] = skills_differences(facts["runs"][0], facts["runs"][index])
+        # Skills changed together with another setting: their effects cannot be told apart.
+        others = sorted(key for key in result["configuration_differences"] if key != "skills")
+        others += ["config_id"] if summaries[0]["config_id"] != candidate["config_id"] else []
+        skills_differ = "skills" in result["configuration_differences"] or any(result["skills_differences"].values())
+        result["skills_confounded_with"] = others if skills_differ else []
+        result["skills_confounded"] = bool(skills_differ and others)
+        result["strict_comparison_available"] = "strict_wins" in result
+        result["restored_comparison_available"] = "restored_wins" in result
+        for key in ("baseline_resolved_strict", "candidate_resolved_strict",
+                    "baseline_resolved_restored", "candidate_resolved_restored"):
+            if key in result:
+                result[key] = count(result[key])
+        result["test_edit_kind_differences"] = [
+            {"instance_id": row["instance_id"],
+             **{side: row[side] if row[side] in TEST_EDIT_KINDS else "unknown" for side in ("baseline", "candidate")}}
+            for row in result.get("test_edit_kind_differences", [])]
         facts["comparisons"].append(result)
     if len(summaries) > 1:
         status = [{row["instance_id"]: row["grading_status"] for row in summary["instances"]} for summary in summaries]
@@ -402,13 +600,6 @@ def canonical(facts: dict) -> str:
 
 def build_prompt(facts_text: str) -> str:
     return PROMPT_TEMPLATE.replace("{facts}", facts_text)
-
-
-SECRET_PATTERN = re.compile(
-    r"(?i)\b(?:sk-[A-Za-z0-9_*-]{6,}|bearer\s+\S+)"
-    r"|\bAIza[0-9A-Za-z_-]{20,}|\bgh[pousr]_[A-Za-z0-9]{20,}|\bgithub_pat_[A-Za-z0-9_]{20,}"
-    r"|\bxox[bp]-[A-Za-z0-9-]{10,}|\bAKIA[0-9A-Z]{16}\b"
-    r"|(?:api[_-]?key|token|secret)\s*[:=]\s*\S+")
 
 
 def scrub(text: str) -> str:
@@ -481,8 +672,18 @@ def write_output(path: Path, text: str, force: bool) -> None:
     temporary.replace(path)
 
 
+def host_skills_label(summary: dict) -> str:
+    """Header note: config_id excludes host skills copied at run time, so name the skill set beside it."""
+    protocol = summary.get("protocol") if isinstance(summary.get("protocol"), dict) else {}
+    records = skill_records(protocol.get("skills"))
+    if not records:
+        return "no host skills"
+    return f"+ {len(records)} host skill{'s' if len(records) != 1 else ''} {skills_list_prefix(records)}"
+
+
 def document(narrative: str, summaries: list, model: str | None, facts_sha256: str) -> str:
-    runs = ", ".join(f"{summary['run_id']} ({summary['config_id']})" for summary in summaries)
+    runs = ", ".join(f"{summary['run_id']} ({summary['config_id']}; {host_skills_label(summary)})"
+                     for summary in summaries)
     return (f"# Run narrative\n\n"
             f"- Generated: {datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}\n"
             f"- Runs (first is baseline): {runs}\n"

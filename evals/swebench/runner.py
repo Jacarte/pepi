@@ -18,7 +18,8 @@ import uuid
 from pathlib import Path
 
 from .build_preview import BuildPreview
-from .common import UID, read_json, read_manifest, write_json
+from .common import MIN_REDACTED_LENGTH, UID, read_json, read_manifest, write_json
+from .host_skills import Skill, load_staged_skills, skills_archive, skills_tmpfs_kib
 from .mcp import native_mcp_available, validate_mcp_secret
 from .profile import validate_url
 
@@ -26,6 +27,9 @@ CREDENTIALS = ("LITELLM_BASE_URL", "LITELLM_API_KEY")
 SECRET_FILES = ("auth.json", "mcp.json")
 SECRET_DIR = "/run/pepi-secrets"  # tmpfs inside the container; never part of an image layer
 AGENT_DIR = "/opt/pepi-agent"
+# Pi's user skills directory (<agent-dir>/skills, PI_CODING_AGENT_DIR=/opt/pepi-agent). Consented host
+# skills go to a root-owned tmpfs here: readable by the agent UID, not writable, never in an image layer.
+SKILLS_DIR = f"{AGENT_DIR}/skills"
 EXIT_OK, EXIT_USAGE, EXIT_INFRA, EXIT_INTERRUPTED = 0, 2, 3, 130
 # Any Docker network that is not an isolated, operator-managed one.
 FORBIDDEN_NETWORKS = ("host", "bridge", "default")
@@ -45,8 +49,6 @@ RESERVED_ENV_NAMES = frozenset({
     "NODE_OPTIONS", "NODE_PATH",
 })
 RESERVED_ENV_PREFIXES = ("LD_", "DYLD_", "BASH_FUNC_", "DOCKER_", "PYTHON", "PEPI_EVAL_", "LITELLM_")
-# Shorter values are too common to scrub from patches/logs without corrupting them.
-MIN_REDACTED_LENGTH = 8
 
 
 def forwardable_env_name(name: str) -> bool:
@@ -434,7 +436,8 @@ def decode_patch(raw: bytes, record: dict) -> str:
 
 def run_one(docker: Docker, task: dict, build: dict, output: Path, timeout: float,
             network: str, cpus: str, memory: str, secrets: Secrets | None = None,
-            run_id: str = "", disable_mcp: bool = False, provider_plan: dict | None = None) -> dict:
+            run_id: str = "", disable_mcp: bool = False, provider_plan: dict | None = None,
+            skills: list[Skill] | None = None) -> dict:
     secrets = secrets or Secrets()
     container = f"pepi-eval-{uuid.uuid4().hex}"
     record = {"schema_version": 1, "instance_id": task["instance_id"], "attempt_id": 1,
@@ -452,6 +455,8 @@ def run_one(docker: Docker, task: dict, build: dict, output: Path, timeout: floa
         issue.chmod(0o644)  # docker cp keeps the mode; the agent UID must be able to read it
         tmpfs = (["--tmpfs", f"{SECRET_DIR}:rw,noexec,nosuid,size=1m,mode=0700,uid={UID},gid={UID}"]
                  if secrets.files else [])
+        if skills:
+            tmpfs += ["--tmpfs", f"{SKILLS_DIR}:rw,exec,nosuid,nodev,size={skills_tmpfs_kib(skills)}k,mode=0755"]
         label = ["--label", f"pepi-eval.run={run_id}"] if run_id else []
         try:
             docker.call("create", "--name", container, "--init", "--network", network, *label,
@@ -463,6 +468,10 @@ def run_one(docker: Docker, task: dict, build: dict, output: Path, timeout: floa
             created = True  # a timed-out or interrupted create may still have made the container
         docker.call("start", container, capture_output=True)
         secrets.inject(docker, container)
+        if skills:
+            # As root (the image's user): root-owned files the agent UID can read but not change.
+            docker.call("exec", "-i", container, "tar", "-x", "-f", "-", "-C", SKILLS_DIR,
+                        input=skills_archive(skills), capture_output=True)
         docker.call("cp", str(issue), f"{container}:/input/issue.md", capture_output=True)
         baseline = checkout_baseline(docker, container, task["base_commit"])
         record["baseline_commit"] = baseline
@@ -593,7 +602,8 @@ def frozen_mcp_policy(run: Path) -> dict:
 
 
 def run_tasks(run: Path, timeout: float, network: str, cpus: str, memory: str,
-              secrets_dir: Path | None = None, pass_env: list[str] | tuple[str, ...] = ()) -> int:
+              secrets_dir: Path | None = None, pass_env: list[str] | tuple[str, ...] = (),
+              skills_dir: Path | None = None) -> int:
     """Return EXIT_OK when every attempt ran (even if the agent failed or timed out),
     EXIT_INFRA when any attempt hit a setup/runner error, EXIT_INTERRUPTED on Ctrl-C/SIGTERM."""
     manifest = read_manifest(run)
@@ -606,6 +616,8 @@ def run_tasks(run: Path, timeout: float, network: str, cpus: str, memory: str,
     for name in secrets.forward_environment(list(pass_env)):
         print(f"pepi-eval: warning: {name} is shorter than {MIN_REDACTED_LENGTH} bytes; "
               "its value is forwarded but not redacted from artifacts", file=sys.stderr)
+    # After forwarding: a skill must not carry any value this run redacts.
+    skills = load_staged_skills(skills_dir, secrets.values) if skills_dir else []
     if (run / "predictions.jsonl").exists() or (run / "attempts").exists():
         raise ValueError("Attempts already exist; use a fresh run directory")
     if set(builds) != {task["instance_id"] for task in manifest["tasks"]}:
@@ -636,6 +648,8 @@ def run_tasks(run: Path, timeout: float, network: str, cpus: str, memory: str,
         **({"forwarded_env_names": sorted(secrets.forwarded)} if secrets.forwarded else {}),
         # Server names only, from the injected mcp.json; omitted without one, as above.
         **({"mcp_servers": mcp_servers} if mcp_servers else {}),
+        # Skill names, content digests and file counts; omitted without consented skills, as above.
+        **({"skills": [skill.record() for skill in skills]} if skills else {}),
     })
     infra_failed = False
     interrupted = False
@@ -649,7 +663,7 @@ def run_tasks(run: Path, timeout: float, network: str, cpus: str, memory: str,
                 try:
                     row = run_one(Docker(), task, builds[task["instance_id"]],
                                   run / "attempts" / task["instance_id"], timeout, network, cpus,
-                                  memory, secrets, manifest["run_id"], disable_mcp, plan)
+                                  memory, secrets, manifest["run_id"], disable_mcp, plan, skills)
                 except Exception as error:  # keep every selected ID in predictions.jsonl
                     row = {"instance_id": task["instance_id"], "agent_status": "runner_error", "patch": "",
                            "errors": [secrets.redact_text(f"{type(error).__name__}: {error}")]}

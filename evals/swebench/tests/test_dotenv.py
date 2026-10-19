@@ -320,7 +320,9 @@ class DotenvScriptTests(ScriptHarness):
         self.assertEqual(sorted(steps), sorted([
             "evals.swebench prepare", "evals.swebench build", "evals.swebench run",
             "evals.swebench.telemetry " + str(Path(self.runs_tmpdir.name) / "fresh"),
-            "evals.swebench.reporting grade", "evals.swebench.reporting summarize"]))
+            "evals.swebench.reporting grade", "evals.swebench.reporting test-edits",
+            "evals.swebench.reporting test-checkout",
+            "evals.swebench.reporting summarize"]))
         for step, env in steps.items():
             for name in candidates:
                 self.assertEqual(name in env, step == "evals.swebench run", (step, name))

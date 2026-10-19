@@ -62,6 +62,9 @@ def build_parser() -> argparse.ArgumentParser:
                      help="forward this environment variable into the task container by name (repeatable); "
                           "the value comes from this process's environment, is readable by the agent and "
                           "its MCP servers, and is redacted from artifacts")
+    run.add_argument("--skills-dir", type=Path,
+                     help="chmod-700 directory of skill directories (each with SKILL.md); mounted read-only "
+                          "at /opt/pepi-agent/skills for Pi to discover")
     return parser
 
 
@@ -93,7 +96,7 @@ def main(argv=None) -> int:
         elif args.command == "run":
             return run_tasks(args.run.resolve(), args.timeout_seconds, args.network, str(args.cpus),
                              args.memory, args.secrets_dir.absolute() if args.secrets_dir else None,
-                             args.pass_env)
+                             args.pass_env, args.skills_dir.absolute() if args.skills_dir else None)
     except (ValueError, OSError, ImportError, KeyError) as error:
         print(f"pepi-eval: {error}", file=sys.stderr)
         return EXIT_USAGE

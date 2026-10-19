@@ -31,6 +31,10 @@ shell_litellm_base_url=""
 # value is dropped, and only the adapter subshell exports it (never argv, never the container).
 host_mcp_sha256=""
 unset -v PEPI_EVAL_HOST_MCP_SHA256
+# Same for the host skill list (see decide_host_skills).
+host_skills_sha256=""
+host_skills_approved=0
+unset -v PEPI_EVAL_HOST_SKILLS_SHA256
 
 is_tty() { [[ -t 0 && -t 1 ]]; }
 is_ci() { [[ ! -t 0 ]]; }
@@ -130,7 +134,7 @@ dotenv_reserved() {
 dotenv_shell_only() {
     case "$1" in
         PEPI_EVAL_YES|PEPI_EVAL_USE_HOST_AUTH|PEPI_EVAL_USE_HOST_MCP|PEPI_EVAL_AUTO_FIX|PEPI_EVAL_USE_DOTENV) return 0 ;;
-        PEPI_EVAL_HOST_MCP_SHA256) return 0 ;;
+        PEPI_EVAL_USE_HOST_SKILLS|PEPI_EVAL_HOST_MCP_SHA256|PEPI_EVAL_HOST_SKILLS_SHA256) return 0 ;;
         PEPI_EVAL_VENV|PEPI_EVAL_SWEBENCH_REPO|PEPI_EVAL_SECRETS_DIR|PEPI_EVAL_NETWORK) return 0 ;;
     esac
     return 1
@@ -420,6 +424,146 @@ decide_host_mcp() {
         host_mcp_sha256=$digest
     fi
     return 0
+}
+
+# Decide whether the run step copies the host's global skills (sets host_skills_approved). Same
+# consent rules as host mcp.json: -y never consents, unset asks on a terminal only, dry-run reads
+# nothing. The preview lists names and sizes, never contents; a terminal approval also sets
+# host_skills_sha256, and the adapter refuses a skill list that no longer matches.
+decide_host_skills() {
+    local sources="$HOME/.pi/agent/skills and $HOME/.agents/skills" preview count digest reply
+    host_skills_approved=0
+    host_skills_sha256=""
+    if [[ -n "${PEPI_EVAL_USE_HOST_SKILLS+x}" && "$PEPI_EVAL_USE_HOST_SKILLS" != "0" && "$PEPI_EVAL_USE_HOST_SKILLS" != "1" ]]; then
+        die "PEPI_EVAL_USE_HOST_SKILLS must be 0 or 1" 2
+    fi
+    [[ "${PEPI_EVAL_USE_HOST_SKILLS:-}" != "0" ]] || return 0
+    local present=0
+    [[ -e "$HOME/.pi/agent/skills" || -L "$HOME/.pi/agent/skills" || -e "$HOME/.agents/skills" || -L "$HOME/.agents/skills" ]] && present=1
+    if [[ "${DRY_RUN:-}" == "1" ]]; then
+        if [[ "$present" == "1" || "${PEPI_EVAL_USE_HOST_SKILLS:-}" == "1" ]]; then
+            printf 'pepi-eval: dry-run: host skills (%s) not read; a real run asks before copying them (PEPI_EVAL_USE_HOST_SKILLS)\n' "$sources" >&2
+        fi
+        return 0
+    fi
+    if [[ "$present" != "1" ]]; then
+        [[ "${PEPI_EVAL_USE_HOST_SKILLS:-}" == "1" ]] && die "No host skills directory found ($sources)" 2
+        return 0
+    fi
+    if [[ "${PEPI_EVAL_USE_HOST_SKILLS:-}" != "1" ]] && ! is_tty; then
+        printf 'pepi-eval: host skills not copied (no terminal); set PEPI_EVAL_USE_HOST_SKILLS=1 in the shell to copy them\n' >&2
+        return 0
+    fi
+    if ! preview=$(python3 -m evals.swebench.host_skills --preview); then
+        [[ "${PEPI_EVAL_USE_HOST_SKILLS:-}" == "1" ]] && die "Host skills not usable (see above)" 2
+        warn "Not proposing host skills (see above)"
+        return 0
+    fi
+    read -r count digest <<<"$preview"
+    [[ "$count" =~ ^[0-9]+$ && "$digest" =~ ^[0-9a-f]{64}$ ]] || die "Invalid host skills preview" 3
+    if [[ "$count" == "0" ]]; then
+        warn "No host skill can be used in this eval; continuing without host skills"
+        return 0
+    fi
+    if [[ "${PEPI_EVAL_USE_HOST_SKILLS:-}" == "1" ]]; then
+        host_skills_approved=1
+        return 0
+    fi
+    printf '%s' 'Allow temporary host skills copy? [y/N]: ' >&2
+    read -r reply || reply=""
+    if [[ "$reply" =~ ^([Yy]|[Yy][Ee][Ss])$ ]]; then
+        host_skills_approved=1
+        host_skills_sha256=$digest
+    fi
+    return 0
+}
+
+# Whether `grade` also runs the strict regrade (test-file changes removed, only tasks whose patch
+# modifies existing test files; results in grading-strict/, the official grading is kept).
+# PEPI_EVAL_STRIP_TEST_EDITS=1/0; unset asks on a terminal when such a patch exists (default No),
+# and records strict = official without asking when none exists.
+# -y/PEPI_EVAL_YES never answers it. Returns 0 to regrade.
+decide_strip_test_edits() {
+    local run_dir=$1 count reply
+    if [[ -n "${PEPI_EVAL_STRIP_TEST_EDITS+x}" && "$PEPI_EVAL_STRIP_TEST_EDITS" != "0" && "$PEPI_EVAL_STRIP_TEST_EDITS" != "1" ]]; then
+        die "PEPI_EVAL_STRIP_TEST_EDITS must be 0 or 1" 2
+    fi
+    [[ "${PEPI_EVAL_STRIP_TEST_EDITS:-}" != "0" ]] || return 1
+    # Explicit opt-in: the regrade itself finds the tasks (none means strict equals official).
+    [[ "${PEPI_EVAL_STRIP_TEST_EDITS:-}" == "1" ]] && return 0
+    if [[ "${DRY_RUN:-}" == "1" ]]; then
+        printf 'pepi-eval: dry-run: a real run offers a strict regrade when patches modify existing test files (PEPI_EVAL_STRIP_TEST_EDITS)\n' >&2
+        return 1
+    fi
+    # Optional step: a failed count skips it instead of blocking summarize.
+    if ! count=$("$PEPI_PYTHON" -m evals.swebench.reporting test-edits "$run_dir") || [[ ! "$count" =~ ^[0-9]+$ ]]; then
+        warn "Could not count test-file edits; strict regrade skipped"
+        return 1
+    fi
+    if [[ "$count" == "0" ]]; then
+        # Nothing to regrade: the strict regrade only writes its record (no Docker, no model calls),
+        # so the strict score is recorded as equal to the official one and compare can pair it.
+        printf 'pepi-eval: no task patch modifies existing test files; recording strict score = official\n' >&2
+        return 0
+    fi
+    warn "$count task patch(es) modify existing test files; the official score keeps those edits"
+    if ! is_tty; then
+        printf 'pepi-eval: strict regrade skipped (no terminal); set PEPI_EVAL_STRIP_TEST_EDITS=1 to run it\n' >&2
+        return 1
+    fi
+    printf '%s' "Regrade those $count task(s) with test-file changes removed (local Docker, no model calls)? [y/N]: " >&2
+    read -r reply || reply=""
+    [[ "$reply" =~ ^([Yy]|[Yy][Ee][Ss])$ ]]
+}
+
+# Whether `grade` also runs the restored regrade (eval.sh test-file checkout repaired so it resets the
+# existing files the patch modified even when it lists a path absent from the base commit; patch
+# unchanged; only tasks whose patch modifies an existing file the checkout lists; results in
+# grading-restored/, the official grading is kept).
+# PEPI_EVAL_RESTORE_TEST_FILES=1/0; unset asks on a terminal when a task would be regraded or has an eval
+# script whose checkout cannot be repaired (its restored grade is unknown) (default No), and records
+# restored = official without asking only when neither exists.
+# -y/PEPI_EVAL_YES never answers it. Returns 0 to regrade.
+decide_restore_test_files() {
+    local run_dir=$1 counts selected unrewritable reply counts_pattern='^([0-9]+) ([0-9]+)$'
+    if [[ -n "${PEPI_EVAL_RESTORE_TEST_FILES+x}" && "$PEPI_EVAL_RESTORE_TEST_FILES" != "0" && "$PEPI_EVAL_RESTORE_TEST_FILES" != "1" ]]; then
+        die "PEPI_EVAL_RESTORE_TEST_FILES must be 0 or 1" 2
+    fi
+    [[ "${PEPI_EVAL_RESTORE_TEST_FILES:-}" != "0" ]] || return 1
+    # Explicit opt-in: the regrade itself finds the tasks (none means restored equals official).
+    [[ "${PEPI_EVAL_RESTORE_TEST_FILES:-}" == "1" ]] && return 0
+    if [[ "${DRY_RUN:-}" == "1" ]]; then
+        printf 'pepi-eval: dry-run: a real run offers a regrade with the eval-script test checkout repaired when patches modify files that checkout lists (PEPI_EVAL_RESTORE_TEST_FILES)\n' >&2
+        return 1
+    fi
+    # Optional step: a failed count skips it instead of blocking summarize.
+    # `test-checkout` prints "<regraded> <unrewritable>".
+    if ! counts=$("$PEPI_PYTHON" -m evals.swebench.reporting test-checkout "$run_dir") \
+            || [[ ! "$counts" =~ $counts_pattern ]]; then
+        warn "Could not count tasks for the test-checkout repair; restored regrade skipped"
+        return 1
+    fi
+    selected=${BASH_REMATCH[1]}
+    unrewritable=${BASH_REMATCH[2]}
+    if [[ "$selected" == "0" && "$unrewritable" == "0" ]]; then
+        # Nothing to regrade: the restored regrade only writes its record (no Docker, no model calls).
+        printf 'pepi-eval: no task patch modifies a file its eval script resets; recording restored score = official\n' >&2
+        return 0
+    fi
+    [[ "$selected" == "0" ]] || warn "$selected task(s) modify files that their eval script's checkout may fail to reset"
+    [[ "$unrewritable" == "0" ]] \
+        || warn "$unrewritable task(s) have an eval script whose test checkout cannot be repaired; their restored grade would be unknown (lower bound)"
+    if ! is_tty; then
+        printf 'pepi-eval: restored regrade skipped (no terminal); set PEPI_EVAL_RESTORE_TEST_FILES=1 to run it\n' >&2
+        return 1
+    fi
+    if [[ "$selected" == "0" ]]; then
+        printf '%s' "Record a test-checkout repaired score with $unrewritable unknown grade(s) (no Docker, no model calls)? [y/N]: " >&2
+    else
+        printf '%s' "Repair the eval-script test checkout and regrade $selected task(s) (local Docker, no model calls; $unrewritable unknown)? [y/N]: " >&2
+    fi
+    read -r reply || reply=""
+    [[ "$reply" =~ ^([Yy]|[Yy][Ee][Ss])$ ]]
 }
 
 # `prepare` rejects auth.json, mcp.json and .env anywhere under --config-dir.
@@ -1030,6 +1174,7 @@ cmd_run() {
     fi
     # Host mcp.json consent comes second and is independent of the auth answer.
     decide_host_mcp "$run_dir"
+    decide_host_skills
     if [[ "$use_host_auth" != "1" && "$providers" == *"litellm"* && ! -f "${PEPI_EVAL_SECRETS_DIR:-/nonexistent}/auth.json" ]]; then
         local base_url
         if [[ -n "${LITELLM_BASE_URL:-}" ]]; then
@@ -1097,12 +1242,13 @@ cmd_run() {
     # The approved .env candidates are exported only inside the subshell that execs the
     # runner (directly or via the host-auth adapter, whose child inherits them), so no other
     # step or host tool sees them. The command is fixed in "$@" before any export.
-    if [[ ( "$use_host_auth" == "1" || "$host_mcp_approved" == "1" ) && "${DRY_RUN:-}" != "1" ]]; then
-        # Adapter owns the private temp directory and cleanup; tokens never enter argv/env.
-        # One directory holds every consented host file (auth.json and/or mcp.json).
+    if [[ ( "$use_host_auth" == "1" || "$host_mcp_approved" == "1" || "$host_skills_approved" == "1" ) && "${DRY_RUN:-}" != "1" ]]; then
+        # Adapter owns the private temp directories and cleanup; tokens never enter argv/env.
+        # One directory holds every consented host file (auth.json and/or mcp.json); skills get another.
         local host_auth_pid="" host_auth_status=0 host_python host_files=()
         [[ "$use_host_auth" == "1" ]] && host_files+=(--auth)
         [[ "$host_mcp_approved" == "1" ]] && host_files+=(--mcp)
+        [[ "$host_skills_approved" == "1" ]] && host_files+=(--skills)
         host_python=$(command -v python3) || die "python3 not found" 3
         # Bash otherwise defers traps while waiting for a foreground child. Forward and
         # reap the adapter so it can stop the runner and remove its credentials first.
@@ -1110,8 +1256,9 @@ cmd_run() {
         # `( ... exec ) &` keeps $! the adapter's own PID for the trap above.
         ( set -- "$host_python" -m evals.swebench.host_auth "$run_dir" "${host_files[@]}" -- "${run_cmd[@]}"
           dotenv_export_forwarded || exit 2
-          unset -v PEPI_EVAL_HOST_MCP_SHA256
+          unset -v PEPI_EVAL_HOST_MCP_SHA256 PEPI_EVAL_HOST_SKILLS_SHA256
           [[ -z "$host_mcp_sha256" ]] || export PEPI_EVAL_HOST_MCP_SHA256="$host_mcp_sha256"
+          [[ -z "$host_skills_sha256" ]] || export PEPI_EVAL_HOST_SKILLS_SHA256="$host_skills_sha256"
           exec "$@" ) & host_auth_pid=$!
         wait "$host_auth_pid" || host_auth_status=$?
         trap - INT TERM
@@ -1200,6 +1347,22 @@ cmd_report() {
         [[ $grade_exit -eq 2 || $grade_exit -eq 130 ]] && fail_step grade "$grade_exit"
         warn "Grade step exited with code $grade_exit (see grading/<id>/grader.log)"
     }
+    
+    if decide_strip_test_edits "$run_dir"; then
+        run_cmd "${grade_cmd[@]}" --strip-test-edits || {
+            local strict_exit=$?
+            [[ $strict_exit -eq 2 || $strict_exit -eq 130 ]] && fail_step grade "$strict_exit"
+            warn "Strict regrade exited with code $strict_exit (see grading-strict/<id>/grader.log)"
+        }
+    fi
+
+    if decide_restore_test_files "$run_dir"; then
+        run_cmd "${grade_cmd[@]}" --restore-test-files || {
+            local restored_exit=$?
+            [[ $restored_exit -eq 2 || $restored_exit -eq 130 ]] && fail_step grade "$restored_exit"
+            warn "Restored regrade exited with code $restored_exit (see grading-restored/<id>/grader.log)"
+        }
+    fi
     
     next_step
     step_header "summarize"
@@ -1303,7 +1466,7 @@ Commands:
   help       Show this help
 
 Options:
-  -y, --yes           Accept defaults and provider usage (NOT host auth/mcp consent)
+  -y, --yes           Accept defaults and provider usage (NOT host auth/mcp/skills consent)
   --dry-run           Print commands (shell-quoted, key masked) without running
   -h, --help          Show this help
 
@@ -1344,12 +1507,33 @@ Optional PEPI_EVAL_* env vars:
                         dropped server names and env/header key names (never values).
                         SECRETS_DIR wins; not proposed with DROP_MCP=1. Dry-run never reads it.
                         Shares the private temporary directory with a host-auth copy.
+  USE_HOST_SKILLS       1 explicitly consents to a temporary copy of the host skills in
+                        ~/.pi/agent/skills and ~/.agents/skills (Pi's order; first name wins),
+                        mounted read-only at /opt/pepi-agent/skills; 0 disables the proposal;
+                        unset asks on TTY only (default No) after listing each skill's name,
+                        file count, size and scripts, and every dropped skill with its reason
+                        (symlinks, credential-like files, .git, >1 MiB file, >5 MiB/200 files,
+                        secret/token patterns, bad names). Skill text reaches the model provider.
+                        Dry-run never reads them.
+  STRIP_TEST_EDITS      1 also runs the strict regrade after grading: only tasks whose patch
+                        modifies existing test files, with every test-file change removed, into
+                        grading-strict/ (official grading kept); 0 skips it; unset asks on TTY
+                        only when such a patch exists (default No); with none, strict = official
+                        is recorded without Docker. -y never answers it.
+  RESTORE_TEST_FILES    1 also runs the restored regrade after grading: only tasks whose patch
+                        modifies an existing file their eval.sh `git checkout` lists, with
+                        that checkout made per-path (git aborts the whole checkout when one path
+                        is absent from the base commit) and the patch unchanged, into
+                        grading-restored/ (official grading kept); 0 skips it; unset asks on TTY
+                        only when such a task, or an unrepairable eval script (grade unknown),
+                        exists (default No); with neither, restored = official is recorded
+                        without Docker. -y never answers it.
   WORKERS               Grade workers (default 1)
   TEST_TIMEOUT_SECONDS  Grading timeout (default 1800)
   BASELINE_RUN          Baseline for compare
   CANDIDATE_RUN         Candidate for compare
   RUNS_DIR              Override runs directory (default evals/swebench/runs)
-  YES                   Set to 1 to auto-accept defaults/usage, NOT host auth/mcp copies
+  YES                   Set to 1 to auto-accept defaults/usage, NOT host auth/mcp/skills copies
   USE_DOTENV            1 forwards the ./.env container candidates without asking and allows a
                         .env LiteLLM gateway; 0 refuses both; unset asks on a terminal
                         (default No). -y never consents. Shell only, never from .env.
@@ -1360,9 +1544,10 @@ Optional PEPI_EVAL_* env vars:
   not group/world-writable. Prints its path and the loaded NAMES, never values.
   Script settings: PEPI_EVAL_* (except the shell-only ones below), LITELLM_BASE_URL and
   LITELLM_API_KEY override the shell for this script (flags > .env > shell).
-  Shell-only (ignored from .env with a warning): YES USE_HOST_AUTH USE_HOST_MCP AUTO_FIX
-  USE_DOTENV (consent) and VENV SWEBENCH_REPO SECRETS_DIR NETWORK (host code, credentials, egress);
-  HOST_MCP_SHA256 is internal (set by the script, never read from the shell or .env).
+  Shell-only (ignored from .env with a warning): YES USE_HOST_AUTH USE_HOST_MCP USE_HOST_SKILLS
+  AUTO_FIX USE_DOTENV (consent) and VENV SWEBENCH_REPO SECRETS_DIR NETWORK (host code, credentials,
+  egress); HOST_MCP_SHA256 and HOST_SKILLS_SHA256 are internal (set by the script, never read from
+  the shell or .env).
   Ignored: PATH HOME USER SHELL PWD OLDPWD TMPDIR IFS ENV BASH_ENV SHELLOPTS BASHOPTS PS4
   PROMPT_COMMAND CDPATH GLOBIGNORE POSIXLY_CORRECT NODE_OPTIONS NODE_PATH LD_* DYLD_*
   BASH_FUNC_* DOCKER_* PYTHON*, other LITELLM_*, and the script's own variables.

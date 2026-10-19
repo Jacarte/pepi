@@ -1,6 +1,7 @@
 import copy
 import hashlib
 import json
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,7 +9,9 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from evals.swebench.common import DATASET, fingerprint, read_json, runtime_record, write_json
-from evals.swebench.reporting import compare, distribution, file_hash, grade_run, predictions, summarize_run
+from evals.swebench.reporting import (RESTORED_DIRECTORY, RESTORED_RECORD, STRICT_DIRECTORY, STRICT_RECORD, compare,
+                                      distribution, file_hash, grade_run, main, predictions, summarize_run)
+from evals.swebench.tests.test_testpaths import EXISTING_TEST, NEW_TEST, SOURCE, block as test_block
 
 
 class ReportingTests(unittest.TestCase):
@@ -219,6 +222,402 @@ class ReportingTests(unittest.TestCase):
         self.assertEqual(result["wins"], [])
         self.assertEqual(result["inconclusive"], ["owner__repo-2"])
 
+    def with_patches(self, run, patches):
+        """Rewrite predictions with real diffs and keep the official grading record matching them."""
+        with (run / "predictions.jsonl").open("w") as stream:
+            for instance_id, patch_text in patches.items():
+                stream.write(json.dumps({"instance_id": instance_id, "model_name_or_path": "pepi-test",
+                                         "model_patch": patch_text}) + "\n")
+        grading = read_json(run / "grading.json")
+        grading["predictions_sha256"] = file_hash(run / "predictions.jsonl")
+        write_json(run / "grading.json", grading)
+
+    def strict_fixture(self, patches):
+        run, manifest = self.fixture()
+        self.with_patches(run, patches)
+        official = {path.relative_to(run): path.read_bytes() for path in run.rglob("*")
+                    if path.is_file() and path.is_relative_to(run / "grading") or path == run / "grading.json"}
+        return run, manifest, official
+
+    def fake_strict_report(self, run, instance_id, resolved):
+        record = read_json(run / STRICT_RECORD)
+        write_json(run / record["reports"] / "pepi-test" / instance_id / "report.json",
+                   {instance_id: {"resolved": resolved}})
+
+    def test_summary_flags_patches_that_modify_existing_tests(self):
+        run, _ = self.fixture()
+        self.with_patches(run, {"owner__repo-1": SOURCE + EXISTING_TEST, "owner__repo-2": SOURCE + NEW_TEST})
+        result = summarize_run(run)
+        first, second = result["instances"]
+        self.assertEqual((first["test_edit_kind"], first["test_files_touched"], first["patch_touches_tests"]),
+                         ("modified_existing", ["tests/migrations/test_loader.py"], True))
+        self.assertEqual((second["test_edit_kind"], second["test_files_added"]), ("added_only", 1))
+        self.assertEqual((result["tasks_modifying_existing_tests"], result["resolved_with_test_edits"]), (1, 1))
+        self.assertNotIn("resolved_strict", result)
+        self.assertNotIn("resolved_strict", first)
+        markdown = (run / "summary.md").read_text()
+        self.assertIn("Note: 1 of 1 resolved tasks modified existing test files; regrade with "
+                      "`reporting grade --strip-test-edits` for a strict score.", markdown)
+        self.assertNotIn("strict, test edits removed", markdown)
+        self.assertIn("tests/migrations/test_loader.py", (run / "summary.csv").read_text())
+
+    def test_summary_without_test_edits_has_no_warning(self):
+        run, _ = self.fixture()
+        self.with_patches(run, {"owner__repo-1": SOURCE, "owner__repo-2": ""})
+        result = summarize_run(run)
+        self.assertEqual([row["test_edit_kind"] for row in result["instances"]], ["none", "none"])
+        self.assertEqual(result["instances"][1]["grading_status"], "empty_patch")
+        self.assertNotIn("Note:", (run / "summary.md").read_text())
+
+    def test_strict_regrade_grades_only_modified_existing_tasks_without_touching_official_grading(self):
+        run, manifest, official = self.strict_fixture(
+            {"owner__repo-1": SOURCE + EXISTING_TEST + NEW_TEST, "owner__repo-2": SOURCE + NEW_TEST})
+        with patch("evals.swebench.reporting.subprocess.run", return_value=SimpleNamespace(returncode=0)) as execute:
+            self.assertEqual(grade_run(run, run / "task-source", 2, 60, strip_test_edits=True), 0)
+        arguments = read_json(Path(execute.call_args.args[0][-1]))
+        record = read_json(run / STRICT_RECORD)
+        self.assertIn("-strict-", arguments["run_id"])
+        self.assertEqual(arguments["run_id"], record["run_id"])
+        self.assertEqual((arguments["instance_ids"], record["selected_ids"], record["graded_ids"]),
+                         (["owner__repo-1"], ["owner__repo-1"], ["owner__repo-1"]))
+        self.assertEqual(arguments["expected_tasks"], manifest["tasks"][:1])
+        stripped = [json.loads(line) for line in Path(arguments["predictions_path"]).read_text().splitlines()]
+        self.assertEqual(stripped, [{"instance_id": "owner__repo-1", "model_name_or_path": "pepi-test",
+                                     "model_patch": SOURCE}])
+        self.assertTrue(Path(arguments["predictions_path"]).is_relative_to(run / STRICT_DIRECTORY))
+        self.assertEqual({path.name for path in (Path(arguments["task_repo"]) / "tasks").iterdir()},
+                         {"owner__repo-1"})
+        self.assertEqual(record["removed_test_file_blocks"], {"owner__repo-1": 2})
+        self.assertEqual({path.relative_to(run): path.read_bytes() for path in run.rglob("*")
+                          if path.is_file() and path.is_relative_to(run / "grading") or path == run / "grading.json"},
+                         official)
+
+        self.fake_strict_report(run, "owner__repo-1", False)
+        result = summarize_run(run)
+        first, second = result["instances"]
+        self.assertEqual((first["resolved"], first["resolved_strict"], first["grading_status_strict"]),
+                         (True, False, "unresolved"))
+        # Outside the strict selection the official outcome is reused (here an evaluator error).
+        self.assertEqual((second["resolved_strict"], second["grading_status_strict"]), (None, "grading_error"))
+        self.assertEqual((result["resolved"], result["resolved_strict"], result["unknown_grades_strict"]), (1, 0, 1))
+        self.assertEqual(result["strict_grading"]["selected_tasks"], 1)
+        markdown = (run / "summary.md").read_text()
+        self.assertIn("Resolved: **1/2 (50.0%)** (strict, test edits removed: 0/2; 1 unknown).", markdown)
+        self.assertIn("Note: 1 of 1 resolved tasks modified existing test files; see strict score.", markdown)
+
+    def test_strict_regrade_of_a_test_only_patch_is_an_empty_patch_without_grading(self):
+        run, _, _ = self.strict_fixture({"owner__repo-1": EXISTING_TEST, "owner__repo-2": SOURCE})
+        with patch("evals.swebench.reporting.subprocess.run") as execute:
+            self.assertEqual(grade_run(run, run / "task-source", 2, 60, strip_test_edits=True), 0)
+        execute.assert_not_called()
+        record = read_json(run / STRICT_RECORD)
+        self.assertEqual((record["graded_ids"], record["empty_after_strip_ids"]), ([], ["owner__repo-1"]))
+        first = summarize_run(run)["instances"][0]
+        self.assertEqual((first["resolved_strict"], first["grading_status_strict"]), (False, "empty_patch"))
+
+    def test_strict_regrade_without_test_edits_equals_the_official_score(self):
+        run, _, _ = self.strict_fixture({"owner__repo-1": SOURCE, "owner__repo-2": SOURCE + NEW_TEST})
+        with patch("evals.swebench.reporting.subprocess.run") as execute:
+            grade_run(run, run / "task-source", 2, 60, strip_test_edits=True)
+        execute.assert_not_called()
+        result = summarize_run(run)
+        self.assertEqual((result["resolved"], result["resolved_strict"]), (1, 1))
+
+    def test_stale_strict_regrade_is_refused(self):
+        run, _, _ = self.strict_fixture({"owner__repo-1": SOURCE + EXISTING_TEST, "owner__repo-2": SOURCE})
+        with patch("evals.swebench.reporting.subprocess.run", return_value=SimpleNamespace(returncode=0)):
+            grade_run(run, run / "task-source", 2, 60, strip_test_edits=True)
+        self.with_patches(run, {"owner__repo-1": SOURCE + EXISTING_TEST + "\n", "owner__repo-2": SOURCE})
+        with self.assertRaisesRegex(ValueError, "strict regrade"):
+            summarize_run(run)
+        self.with_patches(run, {"owner__repo-1": SOURCE + EXISTING_TEST, "owner__repo-2": SOURCE})
+        record = read_json(run / STRICT_RECORD)
+        (run / record["predictions"]).write_text("{}\n")
+        with self.assertRaisesRegex(ValueError, "Strict regrade predictions changed"):
+            summarize_run(run)
+
+    def test_strict_regrade_refuses_task_inputs_that_differ_from_the_official_grading(self):
+        run, _, _ = self.strict_fixture({"owner__repo-1": SOURCE + EXISTING_TEST, "owner__repo-2": SOURCE})
+        changed = run / "changed-source"
+        changed.mkdir()
+        (changed / "sweb.yaml").write_text("datasets: []")
+        for name, text in (("owner__repo-1", "another grader"), ("owner__repo-2", "synthetic grader")):
+            (changed / "tasks" / name).mkdir(parents=True)
+            (changed / "tasks" / name / "test.patch").write_text(text)
+        with patch("evals.swebench.reporting.subprocess.run") as execute, \
+                self.assertRaisesRegex(ValueError, "differ from the official grading for: owner__repo-1;"):
+            grade_run(run, changed, 2, 60, strip_test_edits=True)
+        execute.assert_not_called()
+        self.assertFalse((run / STRICT_DIRECTORY).exists())
+        self.assertFalse((run / STRICT_RECORD).exists())
+
+    def test_summary_refuses_a_strict_regrade_mixed_with_a_later_official_grading(self):
+        run, _, _ = self.strict_fixture({"owner__repo-1": SOURCE + EXISTING_TEST, "owner__repo-2": SOURCE})
+        with patch("evals.swebench.reporting.subprocess.run", return_value=SimpleNamespace(returncode=0)):
+            grade_run(run, run / "task-source", 2, 60, strip_test_edits=True)
+        self.fake_strict_report(run, "owner__repo-1", True)
+        self.assertEqual(summarize_run(run)["resolved_strict"], 1)
+        record = read_json(run / STRICT_RECORD)
+        self.assertEqual(set(record["task_input_fingerprints"]), {"owner__repo-1"})
+        # The official grading is redone from a changed task repo after the strict regrade.
+        (run / "task-source/tasks/owner__repo-1/test.patch").write_text("another grader")
+        grading = read_json(run / "grading.json")
+        grading["grader_sha256"] = fingerprint(run / "task-source")
+        write_json(run / "grading.json", grading)
+        with self.assertRaisesRegex(ValueError, "strict regrade used other grading inputs .*owner__repo-1"):
+            summarize_run(run)
+
+    LISTED = ("cd /testbed\ngit checkout " + "b" * 40 + " tests/migrations/test_loader.py tests/new/0001_initial.py\n"
+              "git apply -v -\n: '>>>>> Start Test Output'\n./runtests.py\n: '>>>>> End Test Output'\n"
+              "git checkout " + "b" * 40 + " tests/migrations/test_loader.py tests/new/0001_initial.py\n")
+    NOT_LISTED = "git checkout " + "b" * 40 + " tests/other/test_x.py\n./runtests.py\n"
+
+    def restored_fixture(self, patches, scripts):
+        """strict_fixture plus eval.sh per task (None: no eval.sh); the official grading record covers them."""
+        run, manifest, _ = self.strict_fixture(patches)
+        for instance_id, script in scripts.items():
+            if script is not None:
+                (run / "task-source/tasks" / instance_id / "eval.sh").write_bytes(
+                    script if isinstance(script, bytes) else script.encode())
+        grading = read_json(run / "grading.json")
+        grading["grader_sha256"] = fingerprint(run / "task-source")
+        write_json(run / "grading.json", grading)
+        official = {path.relative_to(run): path.read_bytes() for path in run.rglob("*")
+                    if path.is_file() and (path.is_relative_to(run / "grading") or path == run / "grading.json"
+                                           or path.is_relative_to(run / "task-source"))}
+        return run, manifest, official
+
+    def official_bytes(self, run):
+        return {path.relative_to(run): path.read_bytes() for path in run.rglob("*")
+                if path.is_file() and (path.is_relative_to(run / "grading") or path == run / "grading.json"
+                                       or path.is_relative_to(run / "task-source"))}
+
+    def fake_restored_report(self, run, instance_id, resolved):
+        record = read_json(run / RESTORED_RECORD)
+        write_json(run / record["reports"] / "pepi-test" / instance_id / "report.json",
+                   {instance_id: {"resolved": resolved}})
+
+    def test_restored_regrade_repairs_only_its_own_eval_script_copy_and_keeps_the_patch(self):
+        patches = {"owner__repo-1": SOURCE + EXISTING_TEST, "owner__repo-2": SOURCE + EXISTING_TEST}
+        run, manifest, official = self.restored_fixture(
+            patches, {"owner__repo-1": self.LISTED, "owner__repo-2": self.NOT_LISTED})
+        with patch("evals.swebench.reporting.subprocess.run", return_value=SimpleNamespace(returncode=0)) as execute:
+            self.assertEqual(grade_run(run, run / "task-source", 2, 60, restore_test_files=True), 0)
+        arguments = read_json(Path(execute.call_args.args[0][-1]))
+        record = read_json(run / RESTORED_RECORD)
+        self.assertIn("-restored-", arguments["run_id"])
+        self.assertEqual(arguments["run_id"], record["run_id"])
+        self.assertEqual((arguments["instance_ids"], record["selected_ids"], record["graded_ids"],
+                          record["not_listed_ids"], record["unrewritable_ids"]),
+                         (["owner__repo-1"], ["owner__repo-1"], ["owner__repo-1"], ["owner__repo-2"], []))
+        self.assertEqual(arguments["expected_tasks"], manifest["tasks"][:1])
+        graded = [json.loads(line) for line in Path(arguments["predictions_path"]).read_text().splitlines()]
+        self.assertEqual(graded, [{"instance_id": "owner__repo-1", "model_name_or_path": "pepi-test",
+                                   "model_patch": patches["owner__repo-1"]}])  # unchanged, unlike strict
+        frozen = Path(arguments["task_repo"])
+        self.assertTrue(frozen.is_relative_to(run / RESTORED_DIRECTORY))
+        script = (frozen / "tasks/owner__repo-1/eval.sh").read_text()
+        self.assertNotIn("\ngit checkout ", "\n" + script)
+        self.assertEqual(script.count("then git checkout " + "b" * 40 + " -- tests/migrations/test_loader.py; fi"), 2)
+        self.assertEqual(script.split("\n")[2:5], self.LISTED.split("\n")[2:5])
+        self.assertEqual(record["eval_scripts"]["owner__repo-1"]["rewritten_lines"], 2)
+        self.assertEqual(record["eval_scripts"]["owner__repo-1"]["original_sha256"],
+                         hashlib.sha256(self.LISTED.encode()).hexdigest())
+        self.assertEqual(record["eval_scripts"]["owner__repo-1"]["rewritten_sha256"],
+                         hashlib.sha256(script.encode()).hexdigest())
+        self.assertEqual(record["restore_policy_version"], 2)
+        # The task repo it read and the official grading (incl. its frozen copy) are byte-identical.
+        self.assertEqual(self.official_bytes(run), official)
+
+        self.fake_restored_report(run, "owner__repo-1", False)
+        result = summarize_run(run)
+        first, second = result["instances"]
+        self.assertEqual((first["resolved"], first["resolved_restored"], first["grading_status_restored"]),
+                         (True, False, "unresolved"))
+        # not_listed keeps the official outcome (here an evaluator error).
+        self.assertEqual((second["resolved_restored"], second["grading_status_restored"]), (None, "grading_error"))
+        self.assertEqual((result["resolved_restored"], result["unknown_grades_restored"]), (0, 1))
+        self.assertEqual((result["restored_grading"]["regraded_tasks"], result["restored_grading"]["unrewritable_tasks"]),
+                         (1, 0))
+        self.assertNotIn("resolved_strict", result)
+        markdown = (run / "summary.md").read_text()
+        self.assertIn("Resolved: **1/2 (50.0%)** (test-checkout repaired: 0/2, 1 unknown).", markdown)
+        self.assertIn("modified existing test files; see the test-checkout repaired score.", markdown)
+
+    def test_restored_regrade_marks_unrewritable_or_missing_eval_scripts_unknown_without_grading(self):
+        quoted = self.LISTED.replace("tests/new/0001_initial.py", "'tests/new/0001 initial.py'", 1)
+        run, _, _ = self.restored_fixture({"owner__repo-1": SOURCE + EXISTING_TEST, "owner__repo-2": EXISTING_TEST},
+                                          {"owner__repo-1": quoted, "owner__repo-2": None})
+        with patch("evals.swebench.reporting.subprocess.run") as execute:
+            self.assertEqual(grade_run(run, run / "task-source", 2, 60, restore_test_files=True), 0)
+        execute.assert_not_called()
+        record = read_json(run / RESTORED_RECORD)
+        self.assertEqual((record["graded_ids"], record["unrewritable_ids"]), ([], ["owner__repo-1", "owner__repo-2"]))
+        self.assertEqual(list((run / RESTORED_DIRECTORY / record["run_id"]).iterdir()),
+                         [run / RESTORED_DIRECTORY / record["run_id"] / "grading.json"])
+        result = summarize_run(run)
+        self.assertEqual([(row["resolved_restored"], row["grading_status_restored"]) for row in result["instances"]],
+                         [(None, "not_graded"), (None, "not_graded")])
+        self.assertEqual((result["resolved"], result["resolved_restored"], result["unknown_grades_restored"]), (1, 0, 2))
+
+    def test_restored_regrade_without_affected_tasks_equals_the_official_score(self):
+        run, _, _ = self.restored_fixture({"owner__repo-1": SOURCE, "owner__repo-2": SOURCE + NEW_TEST},
+                                          {"owner__repo-1": self.LISTED, "owner__repo-2": self.LISTED})
+        with patch("evals.swebench.reporting.subprocess.run") as execute:
+            grade_run(run, run / "task-source", 2, 60, restore_test_files=True)
+        execute.assert_not_called()
+        result = summarize_run(run)
+        self.assertEqual((result["resolved"], result["resolved_restored"]), (1, 1))
+        self.assertEqual([row["grading_status_restored"] for row in result["instances"]],
+                         [row["grading_status"] for row in result["instances"]])
+
+    def test_stale_or_mixed_restored_regrade_is_refused(self):
+        patches = {"owner__repo-1": SOURCE + EXISTING_TEST, "owner__repo-2": SOURCE}
+        run, _, _ = self.restored_fixture(patches, {"owner__repo-1": self.LISTED, "owner__repo-2": self.LISTED})
+        with patch("evals.swebench.reporting.subprocess.run", return_value=SimpleNamespace(returncode=0)):
+            grade_run(run, run / "task-source", 2, 60, restore_test_files=True)
+        self.fake_restored_report(run, "owner__repo-1", True)
+        self.assertEqual(summarize_run(run)["resolved_restored"], 1)
+        self.with_patches(run, {**patches, "owner__repo-1": patches["owner__repo-1"] + "\n"})
+        with self.assertRaisesRegex(ValueError, "Predictions changed after the restored regrade"):
+            summarize_run(run)
+        self.with_patches(run, patches)
+        record = read_json(run / RESTORED_RECORD)
+        write_json(run / RESTORED_RECORD, {**record, "restore_policy_version": 0})
+        with self.assertRaisesRegex(ValueError, "restored regrade used another test-file policy"):
+            summarize_run(run)
+        write_json(run / RESTORED_RECORD, record)
+        # The official grading is redone from a changed task repo after the restored regrade.
+        (run / "task-source/tasks/owner__repo-1/test.patch").write_text("another grader")
+        grading = read_json(run / "grading.json")
+        grading["grader_sha256"] = fingerprint(run / "task-source")
+        write_json(run / "grading.json", grading)
+        with self.assertRaisesRegex(ValueError, "restored regrade used other grading inputs .*owner__repo-1"):
+            summarize_run(run)
+
+    def test_restored_regrade_refuses_a_task_repo_that_differs_from_the_official_grading(self):
+        run, _, _ = self.restored_fixture({"owner__repo-1": SOURCE + EXISTING_TEST, "owner__repo-2": SOURCE},
+                                          {"owner__repo-1": self.LISTED, "owner__repo-2": self.LISTED})
+        changed = run / "changed-source"
+        shutil.copytree(run / "task-source", changed)
+        (changed / "tasks/owner__repo-1/eval.sh").write_text(self.NOT_LISTED + "# edited\n")
+        with patch("evals.swebench.reporting.subprocess.run") as execute, \
+                self.assertRaisesRegex(ValueError, "differ from the official grading for: owner__repo-1;"):
+            grade_run(run, changed, 2, 60, restore_test_files=True)
+        execute.assert_not_called()
+        self.assertFalse((run / RESTORED_DIRECTORY).exists())
+        self.assertFalse((run / RESTORED_RECORD).exists())
+        with self.assertRaisesRegex(ValueError, "Choose one of"):
+            grade_run(run, run / "task-source", 2, 60, strip_test_edits=True, restore_test_files=True)
+
+    def test_strict_and_restored_scores_are_reported_together(self):
+        run, _, _ = self.restored_fixture({"owner__repo-1": SOURCE + EXISTING_TEST, "owner__repo-2": SOURCE},
+                                          {"owner__repo-1": self.LISTED, "owner__repo-2": self.LISTED})
+        with patch("evals.swebench.reporting.subprocess.run", return_value=SimpleNamespace(returncode=0)):
+            grade_run(run, run / "task-source", 2, 60, strip_test_edits=True)
+            grade_run(run, run / "task-source", 2, 60, restore_test_files=True)
+        self.fake_strict_report(run, "owner__repo-1", False)
+        self.fake_restored_report(run, "owner__repo-1", True)
+        result = summarize_run(run)
+        self.assertEqual((result["resolved"], result["resolved_strict"], result["resolved_restored"]), (1, 0, 1))
+        markdown = (run / "summary.md").read_text()
+        self.assertIn("(strict, test edits removed: 0/2; 1 unknown; test-checkout repaired: 1/2, 1 unknown).",
+                      markdown)
+        self.assertIn("see strict and test-checkout repaired scores.", markdown)
+
+    def test_test_checkout_command_prints_regraded_and_unrewritable_counts(self):
+        run, _, _ = self.restored_fixture({"owner__repo-1": SOURCE + EXISTING_TEST, "owner__repo-2": SOURCE + EXISTING_TEST},
+                                          {"owner__repo-1": self.LISTED, "owner__repo-2": self.NOT_LISTED})
+        for extra in ([], ["--task-repo", str(run / "task-source")]):
+            with self.subTest(extra=extra), patch("sys.argv", ["reporting", "test-checkout", str(run), *extra]), \
+                    patch("builtins.print") as printed:
+                self.assertEqual(main(), 0)
+            printed.assert_called_once_with("1 0")
+        # An eval script that cannot be repaired is counted separately (its restored grade is unknown).
+        unrepairable = run / "unrepairable-source"
+        shutil.copytree(run / "task-source", unrepairable)
+        (unrepairable / "tasks/owner__repo-2/eval.sh").write_text("cd /testbed && git checkout " + "b" * 40 + " x.py\n")
+        with patch("sys.argv", ["reporting", "test-checkout", str(run), "--task-repo", str(unrepairable)]), \
+                patch("builtins.print") as printed:
+            self.assertEqual(main(), 0)
+        printed.assert_called_once_with("1 1")
+
+    def test_restored_selection_uses_every_existing_file_the_checkout_lists(self):
+        # The checkout line is authoritative: a listed fixture the test-path heuristic does not call a test
+        # file is still reset by the repair, so a patch editing it is regraded (strict ignores it).
+        listed_fixture = ("git checkout " + "b" * 40 + " data/fixture.json tests/new/0001_initial.py\n./runtests.py\n"
+                          "git checkout " + "b" * 40 + " data/fixture.json tests/new/0001_initial.py\n")
+        fixture = test_block("data/fixture.json")
+        run, _, _ = self.restored_fixture({"owner__repo-1": SOURCE + fixture, "owner__repo-2": SOURCE},
+                                          {"owner__repo-1": listed_fixture, "owner__repo-2": listed_fixture})
+        with patch("evals.swebench.reporting.subprocess.run", return_value=SimpleNamespace(returncode=0)) as execute:
+            self.assertEqual(grade_run(run, run / "task-source", 2, 60, restore_test_files=True), 0)
+        record = read_json(run / RESTORED_RECORD)
+        self.assertEqual((record["selected_ids"], record["not_listed_ids"], record["unrewritable_ids"]),
+                         (["owner__repo-1"], ["owner__repo-2"], []))
+        self.assertEqual(read_json(Path(execute.call_args.args[0][-1]))["instance_ids"], ["owner__repo-1"])
+        self.fake_restored_report(run, "owner__repo-1", False)
+        result = summarize_run(run)
+        self.assertEqual((result["instances"][0]["test_edit_kind"], result["instances"][0]["grading_status_restored"]),
+                         ("none", "unresolved"))
+        self.assertEqual(result["tasks_modifying_existing_tests"], 0)
+
+    def test_pairing_reports_restored_scores(self):
+        run, _ = self.fixture()
+        baseline = summarize_run(run)
+        candidate = copy.deepcopy(baseline)
+        candidate["run_id"] = "candidate"
+        self.assertNotIn("baseline_resolved_restored", compare(baseline, candidate))
+        candidate["resolved_restored"] = 0
+        for row, value in zip(candidate["instances"], (False, None)):
+            row["resolved_restored"] = value
+        one_sided = compare(baseline, candidate)
+        self.assertEqual((one_sided["baseline_resolved_restored"], one_sided["candidate_resolved_restored"]), (None, 0))
+        self.assertNotIn("restored_wins", one_sided)
+        baseline["resolved_restored"] = 1
+        for row, value in zip(baseline["instances"], (True, False)):
+            row["resolved_restored"] = value
+        both = compare(baseline, candidate)
+        self.assertEqual((both["restored_wins"], both["restored_regressions"], both["restored_inconclusive"]),
+                         ([], ["owner__repo-1"], ["owner__repo-2"]))
+        self.assertNotIn("strict_wins", both)
+
+    def test_test_edits_command_prints_the_count(self):
+        run, _ = self.fixture()
+        self.with_patches(run, {"owner__repo-1": SOURCE + EXISTING_TEST, "owner__repo-2": SOURCE + NEW_TEST})
+        with patch("sys.argv", ["reporting", "test-edits", str(run)]), \
+                patch("builtins.print") as printed:
+            self.assertEqual(main(), 0)
+        printed.assert_called_once_with(1)
+
+    def test_pairing_reports_strict_scores_and_test_edit_differences(self):
+        run, _ = self.fixture()
+        self.with_patches(run, {"owner__repo-1": SOURCE + EXISTING_TEST, "owner__repo-2": SOURCE})
+        baseline = summarize_run(run)
+        candidate = copy.deepcopy(baseline)
+        candidate["run_id"] = "candidate"
+        candidate["instances"][1]["test_edit_kind"] = "added_only"
+        result = compare(baseline, candidate)
+        self.assertEqual(result["test_edit_kind_differences"],
+                         [{"instance_id": "owner__repo-2", "baseline": "none", "candidate": "added_only"}])
+        self.assertNotIn("baseline_resolved_strict", result)
+        candidate["resolved_strict"] = 1
+        for row, value in zip(candidate["instances"], (False, True)):
+            row["resolved_strict"] = value
+        one_sided = compare(baseline, candidate)
+        self.assertEqual((one_sided["baseline_resolved_strict"], one_sided["candidate_resolved_strict"]), (None, 1))
+        self.assertNotIn("strict_wins", one_sided)
+        baseline["resolved_strict"] = 1
+        for row, value in zip(baseline["instances"], (True, None)):
+            row["resolved_strict"] = value
+        both = compare(baseline, candidate)
+        self.assertEqual((both["strict_wins"], both["strict_regressions"], both["strict_inconclusive"]),
+                         ([], ["owner__repo-1"], ["owner__repo-2"]))
+        legacy = copy.deepcopy(baseline)
+        for row in legacy["instances"]:
+            del row["test_edit_kind"]
+        self.assertNotIn("test_edit_kind_differences", compare(legacy, candidate))
+
     def test_small_sample_percentile_and_missing_counts(self):
         self.assertEqual(distribution([1, 2, 3, None])["p95"], 3)
         self.assertEqual(distribution([1, None])["missing"], 1)
@@ -234,7 +633,8 @@ class ReportingTests(unittest.TestCase):
             "grader_exit_code", "grading_seconds",
             "latency_all_seconds", "latency_resolved_seconds", "turns_observed",
             "available_accounting_tasks", "observed_estimated_cost_usd", "estimated_total_cost_usd",
-            "estimated_cost_per_resolved", "cost_caveat", "instances"
+            "estimated_cost_per_resolved", "cost_caveat", "instances",
+            "tasks_modifying_existing_tests", "resolved_with_test_edits",
         }
         self.assertEqual(set(result.keys()), required_keys)
         # Per-instance keys that must always be present
@@ -242,7 +642,9 @@ class ReportingTests(unittest.TestCase):
             "instance_id", "resolved", "grading_status", "agent_status",
             "agent_wall_seconds", "setup_seconds", "turns",
             "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens",
-            "estimated_cost_usd", "accounting_status"
+            "estimated_cost_usd", "accounting_status",
+            "patch_touches_tests", "test_files_touched", "test_files_touched_count",
+            "test_files_modified_existing", "test_files_added", "test_edit_kind",
         }
         for instance in result["instances"]:
             self.assertEqual(set(instance.keys()), required_instance_keys)

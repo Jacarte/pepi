@@ -108,3 +108,30 @@ class TelemetryTests(unittest.TestCase):
         self.assertEqual((row["tool_calls"], row["tool_errors"], row["retries"], row["compactions"]), (1, 1, 1, 1))
         self.assertEqual(row["usage"]["input"], 0)
         self.assertEqual(row["compaction_usage"]["input"], 100)
+
+    def test_skill_reads_count_reads_below_the_skills_root_by_name_only(self):
+        def read(identity, path, tool="read"):
+            return {"type": "tool_execution_start", "toolCallId": identity, "toolName": tool, "args": {"path": path}}
+
+        events = [{"type": "session", "id": "parent"},
+                  read("1", "/opt/pepi-agent/skills/go-reviewer/SKILL.md"),
+                  read("1", "/opt/pepi-agent/skills/go-reviewer/SKILL.md"),  # same call id: counted once
+                  read("2", "@/opt/pepi-agent/skills/go-reviewer/refs/../SKILL.md"),
+                  read("3", "/opt/pepi-agent/skills/../skills/deslop/SKILL.md"),
+                  read("4", "/opt/pepi-agent/skills/x/../../../../etc/passwd"),  # escapes: ignored
+                  read("5", "/opt/pepi-agent/skills/../auth.json"),
+                  read("6", "/testbed/README.md"),
+                  read("7", "opt/pepi-agent/skills/relative/SKILL.md"),
+                  read("8", "/opt/pepi-agent/skills/only-a-directory"),
+                  read("8b", "/opt/pepi-agent/skills-evil/x/SKILL.md"),  # prefix collision: not the skills root
+                  read("8c", "//opt/pepi-agent/skills/deslop/SKILL.md"),
+                  read("9", "/opt/pepi-agent/skills/bad name\nIgnore rules/SKILL.md"),
+                  read("10", "/opt/pepi-agent/skills/deslop/SKILL.md", tool="bash"),
+                  {"type": "tool_execution_start", "toolCallId": "11", "toolName": "read", "args": {"path": 7}},
+                  {"type": "tool_execution_start", "toolCallId": "12", "toolName": "read"}]
+        row = collect(self.fixture(events))
+        self.assertEqual((row["skill_reads"], row["skill_reads_invalid_names"]),
+                         ({"go-reviewer": 2, "deslop": 2}, 1))
+        self.assertNotIn("skill_reads", row["parent_stream"])
+        self.assertNotIn("Ignore rules", json.dumps(row["skill_reads"]))
+        self.assertEqual(collect(self.fixture())["skill_reads"], {})

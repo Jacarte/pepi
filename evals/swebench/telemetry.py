@@ -7,9 +7,14 @@ from __future__ import annotations
 
 import json
 import math
+import posixpath
+import re
 from pathlib import Path
 
 FIELDS = ("input", "output", "cacheRead", "cacheWrite", "cost", "turns")
+# Consented host skills live here in the task container (runner.SKILLS_DIR).
+SKILLS_ROOT = "/opt/pepi-agent/skills"
+SKILL_NAME = re.compile(r"[A-Za-z0-9._-]{1,64}")
 
 
 def number(value):
@@ -49,12 +54,32 @@ def records(path: Path, problems: list[str]):
                 problems.append(f"{path.name}:{index}: {error}")
 
 
+def skill_read(args) -> tuple[str, bool] | None:
+    """(skill name, valid) for a `read` call of a file below SKILLS_ROOT/<name>/, else None.
+
+    Only absolute paths count (a leading `@` is stripped, as Pi does); `..` is resolved first, so a
+    path that escapes the skills root is ignored. A lower bound: relative paths and reads through
+    bash/cat are not counted."""
+    path = args.get("path") if isinstance(args, dict) else None
+    if not isinstance(path, str):
+        return None
+    path = path[1:] if path.startswith("@") else path
+    if not path.startswith("/"):
+        return None
+    parts = ("/" + posixpath.normpath(path).lstrip("/")).split("/")
+    root = SKILLS_ROOT.split("/")
+    if len(parts) < len(root) + 2 or parts[:len(root)] != root:
+        return None
+    name = parts[len(root)]
+    return name, bool(SKILL_NAME.fullmatch(name))
+
+
 def parent_stats(path: Path) -> dict:
     problems = []
     result = {"session_id": None, "turns": 0, "assistant_messages": 0,
               "tool_calls": 0, "tool_errors": 0, "retries": 0, "compactions": 0,
               "usage": dict.fromkeys(FIELDS, 0), "compaction_usage": dict.fromkeys(FIELDS, 0),
-              "by_model": {}, "problems": problems}
+              "by_model": {}, "skill_reads": {}, "skill_reads_invalid_names": 0, "problems": problems}
     seen_tools = set()
     ended_tools = set()
     for event in records(path, problems):
@@ -78,6 +103,11 @@ def parent_stats(path: Path) -> dict:
             if identity not in seen_tools:
                 result["tool_calls"] += 1
                 seen_tools.add(identity)
+                read = skill_read(event.get("args")) if event.get("toolName") == "read" else None
+                if read is not None and read[1]:
+                    result["skill_reads"][read[0]] = result["skill_reads"].get(read[0], 0) + 1
+                elif read is not None:
+                    result["skill_reads_invalid_names"] += 1
         elif kind == "tool_execution_end":
             identity = event.get("toolCallId")
             if identity not in ended_tools:
@@ -116,6 +146,8 @@ def collect(attempt: Path) -> dict:
         "cost_source": "pi model-price estimate; not gateway billing",
         "coverage": "session-accounted usage; external calls and hidden provider retries are not guaranteed",
         "parent_tool_timing": last.get("tools"), "problems": problems,
+        # Optional (absent in older telemetry.json): skill names and counts only, never paths/content.
+        "skill_reads": parent.pop("skill_reads"), "skill_reads_invalid_names": parent.pop("skill_reads_invalid_names"),
     }
     if report:
         unresolved = number(report.get("unresolvedAsyncChildren"))

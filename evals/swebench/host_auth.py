@@ -1,6 +1,7 @@
-"""Explicit-consent CLI adapter: filtered host auth/mcp.json live only for one runner child."""
+"""Explicit-consent CLI adapter: filtered host auth/mcp.json and skills live only for one runner child."""
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import hmac
 import json
@@ -15,6 +16,8 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from .common import read_manifest
+from .host_skills import (HOST_SKILLS_SHA256_ENV, collect_host_skills, credential_values, skill_holding,
+                          skills_sha256, stage_skills)
 from .mcp import McpServerRejected, check_mcp_server, native_mcp_available, validate_mcp_secret
 from .runner import Secrets, frozen_mcp_policy, frozen_provider_plan
 
@@ -168,11 +171,14 @@ def preview_host_mcp(run: Path) -> int:
 
 
 def run_with_host_auth(run: Path, command: list[str], auth: bool = True, mcp: bool = False,
-                       approved_mcp_sha256: str | None = None) -> int:
+                       approved_mcp_sha256: str | None = None, skills: bool = False,
+                       approved_skills_sha256: str | None = None) -> int:
     """Stage the consented host files in one private directory for the runner child.
 
     With `approved_mcp_sha256` (the user approved a previewed list), the filtered mcp.json must
-    still hash to it. Never write back to the sources; own cleanup even when interrupted during setup.
+    still hash to it; `approved_skills_sha256` pins the skill list the same way. Skills go to a
+    second private directory (`--skills-dir`). Never write back to the sources; own cleanup even
+    when interrupted during setup.
     """
     child = None
     interrupted = False
@@ -190,7 +196,8 @@ def run_with_host_auth(run: Path, command: list[str], auth: bool = True, mcp: bo
     signals = (signal.SIGINT, signal.SIGTERM)
     previous = {s: signal.signal(s, interrupt) for s in signals}
     stage = "auth"
-    child_env = {name: value for name, value in os.environ.items() if name != HOST_MCP_SHA256_ENV}
+    child_env = {name: value for name, value in os.environ.items()
+                 if name not in (HOST_MCP_SHA256_ENV, HOST_SKILLS_SHA256_ENV)}
     try:
         files = {}
         if auth:
@@ -207,21 +214,57 @@ def run_with_host_auth(run: Path, command: list[str], auth: bool = True, mcp: bo
                       "continuing without host MCP servers", file=sys.stderr)
             else:
                 files["mcp.json"] = content
-        stage = "auth" if auth else "mcp"
+        approved_skills = []
+        if skills:
+            stage = "skills"
+            approved_skills, _ = collect_host_skills(Path.home(), credential_values())
+            if approved_skills_sha256 is not None and not hmac.compare_digest(
+                    skills_sha256(approved_skills).encode(),
+                    approved_skills_sha256.encode("utf-8", "surrogateescape")):
+                print("pepi-eval: error: host skills changed since approval; re-run", file=sys.stderr)
+                return 2
+            if not approved_skills:  # the directories changed since the preview: run without them
+                print("pepi-eval: warning: No host skill can be used in this eval; continuing without host skills",
+                      file=sys.stderr)
+            # The runner refuses a skill holding any value it redacts; check the ones known here
+            # (gateway URL/key, the auth.json/mcp.json staged above) before anything is staged.
+            # Forwarded .env values and --secrets-dir files are still checked by the runner, before
+            # any container starts. LITELLM_BASE_URL counts even when no frozen provider needs it.
+            known = Secrets(files).values + [value.encode("utf-8", "surrogateescape") for value in
+                                             [os.environ.get("LITELLM_BASE_URL", "")] if value]
+            holder = skill_holding(approved_skills, known)
+            if holder is not None:
+                print(f"pepi-eval: error: host skill {holder} contains a credential value of this run (gateway "
+                      "URL/key, auth.json or mcp.json); remove it from the skill or decline host skills",
+                      file=sys.stderr)
+                return 2
+        stage = "auth" if auth else "mcp" if mcp else "skills"
         # Ignore TMPDIR: credentials must not end up under a checkout/build/attempt tree.
         # Block setup/launch windows: no signal may strand a just-created directory/child.
         mask = signal.pthread_sigmask(signal.SIG_BLOCK, signals)
         try:
-            with tempfile.TemporaryDirectory(prefix="pepi-eval-auth-", dir="/tmp") as directory:
-                os.chmod(directory, 0o700)
-                for name, content in files.items():
-                    path = Path(directory) / name
-                    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-                    with os.fdopen(fd, "wb") as stream:
-                        os.fchmod(stream.fileno(), 0o600)
-                        stream.write(content)
+            with contextlib.ExitStack() as directories:
+                arguments = []
+                if auth or mcp:
+                    directory = directories.enter_context(
+                        tempfile.TemporaryDirectory(prefix="pepi-eval-auth-", dir="/tmp"))
+                    os.chmod(directory, 0o700)
+                    for name, content in files.items():
+                        path = Path(directory) / name
+                        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+                        with os.fdopen(fd, "wb") as stream:
+                            os.fchmod(stream.fileno(), 0o600)
+                            stream.write(content)
+                    arguments += ["--secrets-dir", directory]
+                if approved_skills:
+                    skills_directory = directories.enter_context(
+                        tempfile.TemporaryDirectory(prefix="pepi-eval-skills-", dir="/tmp"))
+                    os.chmod(skills_directory, 0o700)
+                    stage = "skills"
+                    stage_skills(approved_skills, Path(skills_directory))
+                    arguments += ["--skills-dir", skills_directory]
                 # This adapter is single-threaded; restore the child's signal mask before exec.
-                child = subprocess.Popen([*command, "--secrets-dir", directory], env=child_env,
+                child = subprocess.Popen([*command, *arguments], env=child_env,
                                          preexec_fn=lambda: signal.pthread_sigmask(signal.SIG_SETMASK, mask))
                 signal.pthread_sigmask(signal.SIG_SETMASK, mask)
                 status = child.wait()
@@ -235,6 +278,9 @@ def run_with_host_auth(run: Path, command: list[str], auth: bool = True, mcp: bo
         if stage == "mcp":
             print("pepi-eval: error: Cannot use host mcp.json (check the frozen MCP policy, source and permissions)",
                   file=sys.stderr)
+        elif stage == "skills":
+            print("pepi-eval: error: Cannot use host skills (check the skills directories and permissions)",
+                  file=sys.stderr)
         else:
             print("pepi-eval: error: Cannot use host auth (check frozen plan, provider credentials, source and permissions)",
                   file=sys.stderr)
@@ -247,8 +293,10 @@ def run_with_host_auth(run: Path, command: list[str], auth: bool = True, mcp: bo
 def main() -> int:
     # Internal adapter; the shell calls this only after separate explicit consent:
     #   RUN --mcp-preview                 names-only summary on stderr, `<count> <sha256>` on stdout
-    #   RUN [--auth] [--mcp] -- COMMAND   stage the consented files (no flag: --auth); with --mcp,
-    #                                     PEPI_EVAL_HOST_MCP_SHA256 (env, never argv) pins the approval
+    #   RUN [--auth] [--mcp] [--skills] -- COMMAND
+    #                                     stage the consented files (no flag: --auth); with --mcp,
+    #                                     PEPI_EVAL_HOST_MCP_SHA256 (env, never argv) pins the approval,
+    #                                     with --skills, PEPI_EVAL_HOST_SKILLS_SHA256 does
     args = sys.argv[1:]
     if len(args) == 2 and args[1] == "--mcp-preview":
         return preview_host_mcp(Path(args[0]))
@@ -257,13 +305,17 @@ def main() -> int:
         return 2
     split = args.index("--", 1)
     flags, command = args[1:split], args[split + 1:]
-    if not command or any(flag not in ("--auth", "--mcp") for flag in flags) or len(set(flags)) != len(flags):
+    if not command or any(flag not in ("--auth", "--mcp", "--skills") for flag in flags) \
+            or len(set(flags)) != len(flags):
         print("pepi-eval: error: Invalid host-auth adapter arguments", file=sys.stderr)
         return 2
     auth = "--auth" in flags or not flags
     mcp = "--mcp" in flags
+    skills = "--skills" in flags
     return run_with_host_auth(Path(args[0]), command, auth=auth, mcp=mcp,
-                              approved_mcp_sha256=os.environ.get(HOST_MCP_SHA256_ENV) if mcp else None)
+                              approved_mcp_sha256=os.environ.get(HOST_MCP_SHA256_ENV) if mcp else None,
+                              skills=skills,
+                              approved_skills_sha256=os.environ.get(HOST_SKILLS_SHA256_ENV) if skills else None)
 
 
 if __name__ == "__main__":

@@ -12,6 +12,14 @@ DATASET = "SWE-bench/SWE-bench_Verified"
 UID = "10101"
 # Secrets are injected at run time only; they must never appear in the frozen build context.
 SECRET_FILE_NAMES = frozenset({"auth.json", "mcp.json", ".env"})
+# Shorter values are too common to scrub from patches/logs without corrupting them.
+MIN_REDACTED_LENGTH = 8
+# Token shapes and `key: value` credential assignments; used to scrub narratives and to refuse host skills.
+SECRET_PATTERN = re.compile(
+    r"(?i)\b(?:sk-[A-Za-z0-9_*-]{6,}|bearer\s+\S+)"
+    r"|\bAIza[0-9A-Za-z_-]{20,}|\bgh[pousr]_[A-Za-z0-9]{20,}|\bgithub_pat_[A-Za-z0-9_]{20,}"
+    r"|\bxox[bp]-[A-Za-z0-9-]{10,}|\bAKIA[0-9A-Z]{16}\b"
+    r"|(?:api[_-]?key|token|secret)\s*[:=]\s*\S+")
 
 
 def identifier(value: str) -> str:
@@ -44,14 +52,17 @@ def write_json(path: Path, value) -> None:
     temporary.replace(path)
 
 
-def fingerprint(directory: Path) -> str:
+def fingerprint(directory: Path, transform=None) -> str:
+    """Hash of every file's relative path and bytes; `transform(relative, data)` substitutes file bytes."""
     digest = hashlib.sha256()
     for path in sorted(directory.rglob("*")):
         if path.is_symlink():
             raise ValueError(f"Symlinks are not allowed in a profile: {path}")
         if path.is_file():
-            digest.update(path.relative_to(directory).as_posix().encode() + b"\0")
-            digest.update(path.read_bytes() + b"\0")
+            relative = path.relative_to(directory).as_posix()
+            data = path.read_bytes()
+            digest.update(relative.encode() + b"\0")
+            digest.update((transform(relative, data) if transform else data) + b"\0")
     return digest.hexdigest()
 
 

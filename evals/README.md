@@ -83,7 +83,31 @@ Its values join the redaction set, and `execution.json` records only the server 
 terminal and without `PEPI_EVAL_USE_HOST_MCP`, nothing is read and one line says how to opt in.
 Dry-run never reads it.
 
+**Host skills:** after the MCP question (also with `PEPI_EVAL_SECRETS_DIR`), `run` offers on a
+terminal (default **No**) to copy the skills in `~/.pi/agent/skills` and `~/.agents/skills`:
+`PEPI_EVAL_USE_HOST_SKILLS=1` consents non-interactively, `0` disables the proposal, `-y` never
+consents. Before asking it lists each skill (name, file count, size, scripts) and each dropped entry
+with a short reason (symlinks, credential-like files, `.git`, size limits, secret/token patterns,
+bad names), never contents. Approved skills are pinned like the MCP list, copied to a private
+temporary directory, mounted read-only at `/opt/pepi-agent/skills` in each task container, and
+deleted afterwards; `execution.json` records names and content digests. Skill text the agent reads
+is sent to the model provider and kept, unredacted, in the run's logs. Without a terminal and without `PEPI_EVAL_USE_HOST_SKILLS`, nothing
+is read and one line says how to opt in. Dry-run never reads them. See
+[Host skills](swebench/README.md#host-skills).
+
 The provider/account usage `run` step separately asks for confirmation; non-interactively pass `-y` (or `PEPI_EVAL_YES=1`).
+
+**Strict regrade:** `summarize` flags patches that modify existing test files (some task eval scripts keep
+such edits when grading). `PEPI_EVAL_STRIP_TEST_EDITS=1` makes the `grade` step also regrade only those
+tasks with every test-file change removed, into `grading-strict/` (the official grading is kept); `0` skips
+it; unset asks on a terminal, default No, only when such a patch exists (with none, strict = official is
+recorded without Docker). `-y` never answers it. `PEPI_EVAL_RESTORE_TEST_FILES=1` (same rules) instead
+regrades only tasks whose patch modifies an existing file their eval script's `git checkout` lists,
+with that checkout repaired (git aborts it when one listed path is absent from the base commit) and the
+patch unchanged, into `grading-restored/`; unset, it also asks when an eval script cannot be repaired
+(its restored grade would be unknown), so restored = official is recorded without asking only when no
+task qualifies and every eval script can be repaired. See
+[Test-file edits](swebench/README.md#test-file-edits).
 Exit codes match `python -m evals.swebench`: 0 ok, 2 usage/configuration, 3 step failure, 130 interrupted.
 
 **Venv repair:** if the SWE-bench venv is missing, cannot import `swebench`, or its Python lacks
@@ -109,7 +133,7 @@ and the loaded names (never values) are printed. Names fall into four groups:
   `LITELLM_BASE_URL`/`LITELLM_API_KEY`. They are never forwarded as extras.
 - **Shell-only** settings are ignored from `.env` with a warning and count only from the shell or
   flags: the consent settings `PEPI_EVAL_YES`, `PEPI_EVAL_USE_HOST_AUTH`, `PEPI_EVAL_USE_HOST_MCP`,
-  `PEPI_EVAL_AUTO_FIX`, `PEPI_EVAL_USE_DOTENV`, and `PEPI_EVAL_VENV`, `PEPI_EVAL_SWEBENCH_REPO` (host code: the venv Python,
+  `PEPI_EVAL_USE_HOST_SKILLS`, `PEPI_EVAL_AUTO_FIX`, `PEPI_EVAL_USE_DOTENV`, and `PEPI_EVAL_VENV`, `PEPI_EVAL_SWEBENCH_REPO` (host code: the venv Python,
   `pip install -e`), `PEPI_EVAL_SECRETS_DIR` (would skip the host-auth prompt) and
   `PEPI_EVAL_NETWORK` (egress containment).
 - **Ignored:** `PATH`, `HOME`, `USER`, `SHELL`, `PWD`, `OLDPWD`, `TMPDIR`, `IFS`, `ENV`, `BASH_ENV`,

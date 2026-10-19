@@ -24,6 +24,9 @@ invoke the official SWE-bench evaluator from the controller environment:
 python -m evals.swebench.telemetry evals/swebench/runs/smoke-01
 python -m evals.swebench.reporting grade evals/swebench/runs/smoke-01 \
   --task-repo /path/to/swe-bench-tasks --workers 2 --test-timeout-seconds 1800
+# Optional integrity check: regrade tasks whose patch modifies existing test files, without them.
+python -m evals.swebench.reporting grade evals/swebench/runs/smoke-01 \
+  --task-repo /path/to/swe-bench-tasks --workers 2 --test-timeout-seconds 1800 --strip-test-edits
 python -m evals.swebench.reporting summarize evals/swebench/runs/smoke-01
 python -m evals.swebench.reporting compare \
   evals/swebench/runs/baseline evals/swebench/runs/candidate > /tmp/pepi-comparison.json
@@ -60,6 +63,27 @@ uses every selected task. Empty patches are unsuccessful; missing/error reports
 are unknown, not fabricated test failures. Agent status and correctness remain
 separate: a timed-out partial patch can still resolve a task.
 
+Test-file edits (see [README](README.md#test-file-edits)): every summary flags tasks whose
+patch touches test-like files (`test_edit_kind`, `tasks_modifying_existing_tests`,
+`resolved_with_test_edits`). `--strip-test-edits` writes a separate strict regrade
+(`grading-strict/`, `grading-strict.json`) of only the tasks modifying existing tests, with all
+test-file changes removed; `summarize` then adds `resolved_strict`, and refuses strict data whose
+regraded tasks used other grading inputs than the official grading. Test-like paths: `tests`/`__tests__`
+directories at any depth, top-level `test/`/`testing/`, and test-file basenames. Comparisons add
+`baseline_/candidate_resolved_strict` when either side has it, `strict_wins`/`strict_regressions`/
+`strict_inconclusive` when both do, and `test_edit_kind_differences` when both summaries have the
+field. `--restore-test-files` writes a separate restored regrade (`grading-restored/`,
+`grading-restored.json`) of only the tasks whose patch modifies an existing file (test-like or not) their
+`eval.sh` checkout lists, with that checkout repaired (per-path, skipping paths absent from the base commit) and
+the patch unchanged; `summarize` then adds `resolved_restored` with the same staleness checks, and
+comparisons add `baseline_/candidate_resolved_restored` and `restored_wins`/`restored_regressions`/
+`restored_inconclusive` likewise. Narrate states when resolved counts include tasks that edited existing
+test files, explains the aborting checkout in one sentence, and reports the restored score as the
+integrity check closest to the benchmark's intent (the strict one when only it exists), saying how many
+strict/restored grades are unknown (that score is then a lower bound) and naming tasks whose eval-script
+checkout could not be repaired (`summary.restored_grading.unrewritable_ids`); task IDs and counts only,
+never paths.
+
 Metrics include all-attempt and resolved-only median/p95 latency (nearest-rank
 p95), turns, input/output/cache token categories and Pi-estimated cost. Cost per
 resolved task includes failed attempts. It is null when accounting is incomplete
@@ -70,7 +94,7 @@ Paired comparisons reject different tasks/issues/baselines and different
 measurement protocols (`COMPARABLE_PROTOCOL_KEYS`: deadline, CPU, memory,
 concurrency, pids limit, host, network and timeout settings), naming the keys
 that differ. Other `execution.json` keys are configuration (config label, secret
-presence, MCP policy, forwarded variable names): differences are reported in
+presence, MCP policy, forwarded variable names, host skill names and digests): differences are reported in
 `configuration_differences` (names, labels and presence flags only), not
 rejected. They show wins, regressions, inconclusive pairs and latency changes on
 jointly resolved tasks. They do not prove hardware, gateway/model snapshots or
@@ -112,14 +136,25 @@ they were not a fair attempt, not a model failure. Unresolved or failed tasks ca
 `attempt.json`/`telemetry.json` files over 1 MiB, nested too deeply to parse, or not
 JSON objects are treated as missing. Configuration-difference strings have the facts
 markers removed, and `mcp_servers`/`forwarded_env_names` items must match the name
-pattern below.
+pattern below. Host skills (`execution.json` `skills`) appear per run as `skills.available`
+(name and a 12-character digest prefix), `skills.list_sha256_prefix` (also printed beside
+`config_id` in the narrative header, because `config_id` does not cover skills copied at run
+time) and `skills.reads` (per-skill `read` counts from `telemetry.json` `skill_reads`, explicit
+zeros for available skills; a lower bound with `usage_observable: "partial"`, and 0 reads does
+not prove no effect). Per comparison they appear as `skills_differences` (only in one run,
+`content_changed`) and `skills_confounded` (with `skills_confounded_with`): true when skills
+differ together with another configuration difference or `config_id`. Host skills reach the
+parent agent only; pi-subagents children see them only with `inheritSkills: true` or declared
+skills.
 
 Tool, subagent and MCP use come only from `attempts/<id>/telemetry.json`: per run
 `tool_usage` (parent tool calls/errors, top 20 tools by calls plus `<other>`;
 `telemetry_coverage_partial` is true when any task lacks `telemetry.json` or a per-tool
 breakdown, `parent_tool_timing.by_tool`), `subagent_usage` (children by agent, unresolved
 async children, `tasks_without_subagent_accounting` for `accounting_status: unavailable`,
-where children are unknown rather than zero) and `mcp`. MCP servers count as configured
+where children are unknown rather than zero; `invocations_by_agent` with `tasks_using`, parent
+`subagent` tool calls and a `subagent_count_cross_check`; the narrative opens each run's Tools and
+MCPs paragraph with "Subagent calls: <agent> N, ..."; comparisons add `subagent_invocation_differences`) and `mcp`. MCP servers count as configured
 only when `mcp_servers` (injected `mcp.json` servers) is non-empty; `protocol.mcp.commands`
 are reported as `provisioned_commands`. Direct MCP tool calls are recognised on the raw tool
 name by Pi's native naming (`mcp__<server>__<tool>` and the generic `*_mcp_resource*`
