@@ -38,6 +38,13 @@ The wrapper copies selected task directories and `sweb.yaml` into a host-only
 snapshot, outside the agent Docker build context. Before grading, the driver
 checks issue text, repository, base commit, image, dataset and split against
 generation. The snapshot may contain gold/test patches: never expose it to Pi.
+Grading uses the manifest's dataset (`prepare --dataset`/`--preset`), so a Multilingual run is
+graded against its imported task repo; `compare` refuses runs of different datasets. When the manifest pins
+per-task grading inputs (`task_input_fingerprints`, Multilingual10), `grade` and both regrades refuse a task repo
+(or a frozen copy) whose inputs differ, naming the tasks, before the grader starts. A preset's
+informational `network_requirements` (host names) are recorded in `execution.json`; `compare`
+reports a difference as a configuration difference, never a pairing blocker, and `narrate`
+mentions them once as context.
 Freeze the task repository commit across experiments; the wrapper cannot prove
 that a grading test changed before its first snapshot.
 
@@ -63,13 +70,20 @@ uses every selected task. Empty patches are unsuccessful; missing/error reports
 are unknown, not fabricated test failures. Agent status and correctness remain
 separate: a timed-out partial patch can still resolve a task.
 
+Git history (see [README](README.md#git-history-after-the-task-base)): each row carries
+`history_pruning` (`pruned`, `refs_only`, `failed`, `skipped`, or `null` for attempts from before the
+change) and the summary `tasks_history_not_pruned` (`refs_only` + `failed`); `summary.md` notes a non-zero
+count, and narrate lists those task IDs (`history_not_pruned`) as an integrity caveat without claiming
+the agent read that history.
+
 Test-file edits (see [README](README.md#test-file-edits)): every summary flags tasks whose
 patch touches test-like files (`test_edit_kind`, `tasks_modifying_existing_tests`,
 `resolved_with_test_edits`). `--strip-test-edits` writes a separate strict regrade
 (`grading-strict/`, `grading-strict.json`) of only the tasks modifying existing tests, with all
 test-file changes removed; `summarize` then adds `resolved_strict`, and refuses strict data whose
-regraded tasks used other grading inputs than the official grading. Test-like paths: `tests`/`__tests__`
-directories at any depth, top-level `test/`/`testing/`, and test-file basenames. Comparisons add
+regraded tasks used other grading inputs than the official grading. Test-like paths: `tests`/`__tests__`/
+`testdata` directories at any depth, top-level `test/`/`testing/`/`spec/`/`specs/`, `src/test/`,
+`packages/<name>/test/`, and per-language test-file basenames (README). Comparisons add
 `baseline_/candidate_resolved_strict` when either side has it, `strict_wins`/`strict_regressions`/
 `strict_inconclusive` when both do, and `test_edit_kind_differences` when both summaries have the
 field. `--restore-test-files` writes a separate restored regrade (`grading-restored/`,

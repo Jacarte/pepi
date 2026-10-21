@@ -5,21 +5,26 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from evals.swebench.runner import PI_COMMAND, checkout_baseline, export_patch, run_one
+from evals.swebench.runner import HISTORY_PRUNE_SCRIPT, PI_COMMAND, checkout_baseline, export_patch, run_one
 from evals.swebench.tests.test_runner import FakeDocker, TASK
 
 
 class LocalCheckoutDocker(FakeDocker):
-    def __init__(self, repo, git, agent_edit=None):
+    def __init__(self, repo, git, agent_edit=None, env=None):
         super().__init__()
         self.repo = repo
         self.git = git
+        self.env = env
         self.agent_edit = agent_edit
 
     def call(self, *args, **kwargs):
         if "git" in args:
             self.commands.append(args)
             return self.git(*args[args.index("git") + 1:])
+        if HISTORY_PRUNE_SCRIPT in args:  # the real script, in the real repository
+            self.commands.append(args)
+            return subprocess.run(["sh", "-c", HISTORY_PRUNE_SCRIPT], cwd=self.repo, env=self.env,
+                                  capture_output=True, check=True)
         if "bash" in args and self.agent_edit:
             self.agent_edit()
         return super().call(*args, **kwargs)
@@ -45,7 +50,7 @@ class CheckoutBaselineTests(unittest.TestCase):
             (self.repo / name).write_bytes(b"before\x00\xff" if name == "binary.dat" else b"old = 1\n")
             (self.repo / name).chmod(0o644)
         self.base = self.commit("task base")
-        self.docker = LocalCheckoutDocker(self.repo, self.git)
+        self.docker = LocalCheckoutDocker(self.repo, self.git, env=self.env)
 
     def git(self, *args):
         return subprocess.run(["git", *args], cwd=self.repo, env=self.env,

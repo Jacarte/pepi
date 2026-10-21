@@ -894,9 +894,62 @@ ask_yes() {
     [[ "$reply" =~ ^[Yy]$ ]]
 }
 
+# Task preset: verified20-v1 (default) or multilingual10-v1. It supplies the default IDs, task repo
+# and Pi timeout; an explicit PEPI_EVAL_IDS/TASK_REPO/TIMEOUT_SECONDS/DATASET still wins.
+preset_name() { printf '%s\n' "${PEPI_EVAL_PRESET:-verified20-v1}"; }
+check_preset() {
+    case "$(preset_name)" in
+        verified20-v1|multilingual10-v1) ;;
+        *) die "PEPI_EVAL_PRESET must be verified20-v1 or multilingual10-v1" 2 ;;
+    esac
+}
+default_ids_file() { printf '%s\n' "$eval_dir/presets/$(preset_name).ids"; }
+default_task_repo() {
+    if [[ "$(preset_name)" == "multilingual10-v1" ]]; then
+        printf '%s\n' "$HOME/swe-bench-tasks-multilingual"
+    else
+        printf '%s\n' "$HOME/swe-bench-tasks"
+    fi
+}
+
+# Task repo default for an existing run, from what its manifest froze: the Multilingual10 preset's import
+# location, or ~/swe-bench-tasks for Verified (also manifests without a dataset). Fails for any other dataset:
+# the manifest records no task repo path, so PEPI_EVAL_TASK_REPO must name it. Without a manifest (dry-run),
+# PEPI_EVAL_PRESET decides as before prepare. Grading still refuses inputs that differ from a preset's pins.
+run_default_task_repo() {
+    local kind
+    [[ -f "$1/manifest.json" ]] || { default_task_repo; return 0; }
+    kind=$(python3 -c 'import json, sys
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+preset = ((data.get("selection") or {}).get("preset") or {}).get("id")
+dataset = data.get("dataset", "SWE-bench/SWE-bench_Verified")
+print("multilingual10-v1" if preset == "custom-multilingual10-v1"
+      else "verified" if dataset == "SWE-bench/SWE-bench_Verified" else "dataset " + dataset)' "$1/manifest.json") ||
+        return 1
+    case "$kind" in
+        multilingual10-v1) printf '%s\n' "$HOME/swe-bench-tasks-multilingual" ;;
+        verified) printf '%s\n' "$HOME/swe-bench-tasks" ;;
+        *) warn "The run's manifest records $kind but no task repo; set PEPI_EVAL_TASK_REPO"; return 1 ;;
+    esac
+}
+
+# Print "<timeout seconds><TAB><space-separated network requirement host names>" for the run's
+# frozen preset (manifest), or for PEPI_EVAL_PRESET before prepare (dry-run). Display only.
+preset_run_defaults() {
+    python3 -c 'import json, pathlib, sys
+manifest = pathlib.Path(sys.argv[1]) / "manifest.json"
+if manifest.is_file():
+    data = json.loads(manifest.read_text(encoding="utf-8"))
+    preset, names = (data.get("selection") or {}).get("preset") or {}, data.get("network_requirements") or []
+else:
+    preset = json.loads(pathlib.Path(sys.argv[2]).read_text(encoding="utf-8"))
+    names = preset.get("network_requirements") or []
+print("%d\t%s" % (int(preset.get("timeout_seconds", 300)), " ".join(names)))' "$1" "$eval_dir/presets/$(preset_name).json"
+}
+
 # Resolve IDs: file or temp file from comma-sep
 prepare_ids_file() {
-    local ids_input="${PEPI_EVAL_IDS:-$eval_dir/presets/verified20-v1.ids}"
+    local ids_input="${PEPI_EVAL_IDS:-$(default_ids_file)}"
     local ids_file
     
     if [[ -f "$ids_input" ]]; then
@@ -964,7 +1017,8 @@ cmd_check() {
     
     setup_venv
     check_repo "${PEPI_EVAL_SWEBENCH_REPO:-$HOME/SWE-bench}"
-    check_repo "${PEPI_EVAL_TASK_REPO:-$HOME/swe-bench-tasks}"
+    check_preset
+    check_repo "${PEPI_EVAL_TASK_REPO:-$(default_task_repo)}"
     
     printf 'pepi-eval: ✓ swebench module ready\n' >&2
     printf 'pepi-eval: ✓ task-repo ready\n' >&2
@@ -974,6 +1028,7 @@ cmd_check() {
 
 cmd_prepare() {
     step_header "prepare"
+    check_preset
     
     setup_venv
     
@@ -997,7 +1052,7 @@ cmd_prepare() {
     fi
     subagents_version=$(ask SUBAGENTS_VERSION "Subagents version" "$(get_subagents_version)") || return 2
     node_image=$(ask NODE_IMAGE "Node image" "node:22-bookworm-slim") || return 2
-    task_repo=$(ask TASK_REPO "Task repo path" "${PEPI_EVAL_TASK_REPO:-$HOME/swe-bench-tasks}") || return 2
+    task_repo=$(ask TASK_REPO "Task repo path" "${PEPI_EVAL_TASK_REPO:-$(default_task_repo)}") || return 2
     
     local drop_mcp
     drop_mcp=$(ask DROP_MCP "Disable native MCP? 1=yes 0=no" "0") || return 2
@@ -1016,6 +1071,8 @@ cmd_prepare() {
     )
     
     [[ -n "$litellm_version" ]] && prepare_cmd+=(--litellm-version "$litellm_version")
+    [[ "$(preset_name)" != "verified20-v1" ]] && prepare_cmd+=(--preset "$(preset_name)")
+    [[ -n "${PEPI_EVAL_DATASET:-}" ]] && prepare_cmd+=(--dataset "$PEPI_EVAL_DATASET")
     [[ -n "${PEPI_EVAL_PROFILE:-}" ]] && prepare_cmd+=(--profile "$PEPI_EVAL_PROFILE")
     # Injected, non-secret config; missing files fall back to the repository copies.
     if [[ -n "${PEPI_EVAL_CONFIG_DIR:-}" ]]; then
@@ -1031,7 +1088,7 @@ cmd_prepare() {
     local prepare_status=0
     run_cmd "${prepare_cmd[@]}" || prepare_status=$?
     # The IDs file is ours (and removed) unless the user passed an existing file.
-    [[ -f "${PEPI_EVAL_IDS:-$eval_dir/presets/verified20-v1.ids}" ]] || rm -f "$ids_file"
+    [[ -f "${PEPI_EVAL_IDS:-$(default_ids_file)}" ]] || rm -f "$ids_file"
     if [[ $prepare_status -ne 0 ]]; then
         fail_step prepare "$prepare_status"
     fi
@@ -1102,6 +1159,7 @@ cmd_build() {
 
 cmd_run() {
     step_header "run"
+    check_preset
     
     setup_venv
     
@@ -1197,11 +1255,16 @@ cmd_run() {
     fi
 
     # Optional run parameters
-    local network timeout_s cpus memory
+    local network timeout_s cpus memory preset_defaults default_timeout network_hosts
+    preset_defaults=$(preset_run_defaults "$run_dir") || die "Invalid run manifest or preset definition" 2
+    IFS=$'\t' read -r default_timeout network_hosts <<< "$preset_defaults"
     network=$(ask NETWORK "Docker network" "pepi-eval") || return 2
-    timeout_s=$(ask TIMEOUT_SECONDS "Pi invocation timeout (seconds)" "300") || return 2
+    timeout_s=$(ask TIMEOUT_SECONDS "Pi invocation timeout (seconds)" "$default_timeout") || return 2
     cpus=$(ask CPUS "CPU count" "4") || return 2
     memory=$(ask MEMORY "Memory" "8g") || return 2
+    if [[ -n "$network_hosts" ]]; then
+        warn "this preset needs outbound access to: ${network_hosts// /, }; your network $network must allow it (operator-managed, not verified)"
+    fi
 
     confirm_dotenv_forwarding
     
@@ -1225,6 +1288,11 @@ cmd_run() {
         --memory "$memory"
     )
     
+    # Seconds for removing git history after the task base before the agent starts (runner default 120; 0 disables).
+    if [[ -n "${PEPI_EVAL_HISTORY_PRUNE_TIMEOUT:-}" ]]; then
+        run_cmd+=(--history-prune-timeout "$PEPI_EVAL_HISTORY_PRUNE_TIMEOUT")
+    fi
+
     # auth.json (chmod 600) is injected into a tmpfs by the runner, never via --config-dir.
     # Builtin providers use auth.json; only frozen LiteLLM dependencies prompt for env credentials.
     if [[ -n "${PEPI_EVAL_SECRETS_DIR:-}" ]]; then
@@ -1321,13 +1389,18 @@ cmd_report() {
     
     local task_repo workers timeout_grade
     
+    # The run's manifest, not PEPI_EVAL_PRESET, picks the default task repo; an explicit TASK_REPO wins.
+    local default_repo="${PEPI_EVAL_TASK_REPO:-}"
+    if [[ -z "$default_repo" ]]; then
+        default_repo=$(run_default_task_repo "$run_dir") || die "No default task repo for run $run_name" 2
+    fi
     # In dry-run, use defaults; otherwise ask
     if [[ "${DRY_RUN:-}" == "1" ]]; then
-        task_repo="${PEPI_EVAL_TASK_REPO:-$HOME/swe-bench-tasks}"
+        task_repo="$default_repo"
         workers="1"
         timeout_grade="1800"
     else
-        task_repo=$(ask TASK_REPO "Task repo path" "${PEPI_EVAL_TASK_REPO:-$HOME/swe-bench-tasks}") || return 2
+        task_repo=$(ask TASK_REPO "Task repo path" "$default_repo") || return 2
         workers=$(ask WORKERS "Grade workers" "1") || return 2
         timeout_grade=$(ask TEST_TIMEOUT_SECONDS "Test timeout (seconds)" "1800") || return 2
     fi
@@ -1479,6 +1552,10 @@ Optional PEPI_EVAL_* env vars:
   AUTO_FIX              1 runs proposed venv fix commands without asking; 0 never runs them;
                         unset asks on a terminal (default No). -y/YES never consents.
   SWEBENCH_REPO         SWE-bench source (default ~/SWE-bench)
+  PRESET                Task preset: verified20-v1 (default) or multilingual10-v1 (imported
+                        with python -m evals.swebench.multilingual import); sets the default
+                        IDS, TASK_REPO (~/swe-bench-tasks-multilingual) and TIMEOUT_SECONDS (600)
+  DATASET               Dataset name recorded and graded (default: the preset's)
   TASK_REPO             Task definitions (default ~/swe-bench-tasks)
   IDS                   Task IDs: comma-sep or file (default custom Verified20 v1)
   RUN_NAME              Run directory name (default smoke-YYYYMMDD-HHMM)
@@ -1492,7 +1569,8 @@ Optional PEPI_EVAL_* env vars:
   DROP_MCP              1 disables native MCP (default: 0, enabled; Pi >= 1.1.0)
   PLATFORM              Docker build platform (default linux/amd64)
   NETWORK               Docker network (default pepi-eval)
-  TIMEOUT_SECONDS       Per-task Pi invocation timeout (default 300; excludes setup/export)
+  TIMEOUT_SECONDS       Per-task Pi invocation timeout (default 300, or the preset's; excludes setup/export)
+  HISTORY_PRUNE_TIMEOUT Seconds to remove git history after the task base before Pi starts (default 120; 0 disables)
   CPUS                  CPU count (default 4)
   MEMORY                Memory (default 8g)
   SECRETS_DIR           chmod-700 directory with chmod-600 auth.json/mcp.json (runtime only)

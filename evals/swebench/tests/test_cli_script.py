@@ -408,6 +408,16 @@ class PepiEvalTest(ScriptHarness):
         self.assertEqual(args['run'].timeout_seconds, 1200)
         self.assertTrue(ids.exists())
 
+    def test_history_prune_timeout_is_forwarded_only_when_set(self):
+        for extra, expected in (({}, 120), ({'PEPI_EVAL_HISTORY_PRUNE_TIMEOUT': '0'}, 0),
+                                ({'PEPI_EVAL_HISTORY_PRUNE_TIMEOUT': '300'}, 300)):
+            result = self.run_script(['--dry-run', '-y', 'all'], stdin='', env_extra={
+                'PEPI_EVAL_PROFILE': 'codex', 'PEPI_EVAL_RUN_NAME': 'prune', **extra})
+            self.assertEqual(result.returncode, 0, result.stderr)
+            commands = {argv[0]: argv for argv in self.printed_commands(result)}
+            self.assertEqual('--history-prune-timeout' in commands['run'], bool(extra))
+            self.assertEqual(build_parser().parse_args(commands['run']).history_prune_timeout, expected)
+
     def test_comma_ids_and_one_task_smoke_forward_exact_ids_then_remove_temp(self):
         captured = Path(self.fake.name) / 'captured.ids'
         for ids in ('sympy__sympy-20590', 'a__b-1,c__d-2'):
@@ -1127,6 +1137,49 @@ exec python3 "$FAKE_INSPECTOR" "$@"
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class ReportTaskRepoDefaultTests(ScriptHarness):
+    """`report` takes its default task repo from the run's manifest, not from PEPI_EVAL_PRESET."""
+
+    def report(self, manifest, extra=None):
+        run = Path(self.runs_tmpdir.name) / 'repo-run'
+        run.mkdir(exist_ok=True)
+        (run / 'manifest.json').write_text(json.dumps(manifest))
+        (run / 'predictions.jsonl').write_text('{}\n')
+        if self.log.exists():
+            self.log.unlink()
+        result = self.run_script(['report'], env_extra={'PEPI_EVAL_RUN_NAME': 'repo-run',
+                                                        'PEPI_EVAL_STRIP_TEST_EDITS': '0',
+                                                        'PEPI_EVAL_RESTORE_TEST_FILES': '0', **(extra or {})})
+        lines = self.log.read_text().splitlines() if self.log.exists() else []
+        grades = [shlex.split(line) for line in lines if 'evals.swebench.reporting grade' in line]
+        return result, [argv[argv.index('--task-repo') + 1] for argv in grades]
+
+    def test_multilingual_run_defaults_to_its_import_even_with_another_preset_set(self):
+        manifest = {'tasks': [], 'dataset': 'SWE-bench/SWE-bench_Multilingual',
+                    'selection': {'preset': {'id': 'custom-multilingual10-v1'}}}
+        result, repos = self.report(manifest, {'PEPI_EVAL_PRESET': 'verified20-v1'})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(repos, [str(self.home / 'swe-bench-tasks-multilingual')])
+
+    def test_verified_and_legacy_manifests_keep_the_verified_default(self):
+        for manifest in ({'tasks': []}, {'tasks': [], 'dataset': 'SWE-bench/SWE-bench_Verified'}):
+            with self.subTest(manifest=manifest):
+                result, repos = self.report(manifest, {'PEPI_EVAL_PRESET': 'multilingual10-v1'})
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(repos, [str(self.home / 'swe-bench-tasks')])
+
+    def test_other_dataset_needs_an_explicit_task_repo(self):
+        manifest = {'tasks': [], 'dataset': 'SWE-bench/SWE-bench_Multilingual'}  # custom IDs, no preset
+        result, repos = self.report(manifest)
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(repos, [])
+        self.assertIn('records dataset SWE-bench/SWE-bench_Multilingual but no task repo', result.stderr)
+        self.assertIn('set PEPI_EVAL_TASK_REPO', result.stderr)
+        result, repos = self.report(manifest, {'PEPI_EVAL_TASK_REPO': '/explicit/tasks'})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(repos, ['/explicit/tasks'])
 
 
 class StripTestEditsScriptTests(ScriptHarness):

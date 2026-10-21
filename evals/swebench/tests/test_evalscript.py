@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 from evals.swebench.evalscript import checkout_paths, rewrite_checkouts, rewrite_eval_script
+from evals.swebench.reporting import restore_selection
 
 SHA = "5d9cf79baf07fc4aed7ad1b06990532a65378155"
 BEFORE = f"git checkout {SHA} tests/migrations/test_loader.py tests/migrations/new/0001_initial.py"
@@ -93,6 +94,64 @@ class RewriteCheckoutsTests(unittest.TestCase):
                            capture_output=True, check=True)
             self.assertEqual((repo / "tests/test_loader.py").read_text(), "original\n")
             self.assertFalse((repo / "tests/new").exists())
+
+
+# Checkout lines of the 10 Multilingual (Niffler) eval scripts; tokio's resets its test file with `rm -f` instead.
+MULTILINGUAL_CHECKOUTS = {
+    "axios__axios-4731": ["test/unit/adapters/http.js"],
+    "caddyserver__caddy-6115": ["modules/caddyhttp/reverseproxy/selectionpolicies_test.go"],
+    "facebook__docusaurus-10130": ["packages/docusaurus/src/server/__tests__/brokenLinks.test.ts"],
+    "fmtlib__fmt-1683": ["test/printf-test.cc"],
+    "gin-gonic__gin-1805": ["routes_test.go"],
+    "jqlang__jq-2235": ["tests/shtest"],
+    "nushell__nushell-12901": ["tests/shell/environment/env.rs"],
+    "redis__redis-10068": ["tests/unit/type/stream.tcl"],
+    "rubocop__rubocop-13362": ["spec/rubocop/cop/style/redundant_freeze_spec.rb",
+                               "spec/rubocop/cop/style/redundant_interpolation_unfreeze_spec.rb"],
+}
+TOKIO_SCRIPT = ("#!/bin/bash\nset -uxo pipefail\ncd /testbed\nrm -f tokio/tests/net_types_unwind.rs\n"
+                "git apply -v - <<'EOF_1'\nnew file mode 100644\nEOF_1\n: '>>>>> Start Test Output'\n"
+                "(cargo test --package tokio --test net_types_unwind) | cat\n: '>>>>> End Test Output'\n"
+                "rm -f tokio/tests/net_types_unwind.rs\n")
+
+
+def multilingual_script(paths):
+    line = f"git checkout {SHA} " + " ".join(paths)
+    return SCRIPT.replace(BEFORE, line)
+
+
+class MultilingualCheckoutTests(unittest.TestCase):
+    def test_each_multilingual_checkout_line_is_rewritten_per_path(self):
+        for instance_id, paths in MULTILINGUAL_CHECKOUTS.items():
+            with self.subTest(instance_id=instance_id):
+                script = multilingual_script(paths)
+                self.assertEqual(checkout_paths(script), set(paths))
+                rewritten, count = rewrite_checkouts(script)
+                self.assertEqual(count, 2)
+                self.assertEqual(rewritten, script.replace(f"git checkout {SHA} " + " ".join(paths),
+                                                           "; ".join(per_path(path) for path in paths)))
+                self.assertEqual(rewrite_checkouts(rewritten), (rewritten, 0))
+
+    def test_script_without_checkout_line_is_never_selected_for_restore(self):
+        self.assertEqual(rewrite_checkouts(TOKIO_SCRIPT), (TOKIO_SCRIPT, 0))
+        self.assertEqual(checkout_paths(TOKIO_SCRIPT), set())
+        source = "diff --git a/tokio/src/net/udp.rs b/tokio/src/net/udp.rs\n--- a/tokio/src/net/udp.rs\n" \
+                 "+++ b/tokio/src/net/udp.rs\n@@ -1 +1 @@\n-a\n+b\n"
+        test_edit = source.replace("tokio/src/net/udp.rs", "tokio/tests/net_types_unwind.rs")
+        rubocop = "spec/rubocop/cop/style/redundant_freeze_spec.rb"
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            scripts = {"tokio-rs__tokio-4384": TOKIO_SCRIPT,
+                       "rubocop__rubocop-13362": multilingual_script(MULTILINGUAL_CHECKOUTS["rubocop__rubocop-13362"])}
+            for instance_id, script in scripts.items():
+                (repo / "tasks" / instance_id).mkdir(parents=True)
+                (repo / "tasks" / instance_id / "eval.sh").write_text(script)
+            manifest = {"tasks": [{"instance_id": instance_id} for instance_id in scripts]}
+            submitted = {"tokio-rs__tokio-4384": {"model_patch": source + test_edit},
+                         "rubocop__rubocop-13362": {"model_patch": source.replace("tokio/src/net/udp.rs", rubocop)}}
+            self.assertEqual(restore_selection(submitted, manifest, repo),
+                             {"selected": ["rubocop__rubocop-13362"], "unrewritable": [],
+                              "not_listed": ["tokio-rs__tokio-4384"]})
 
 
 if __name__ == "__main__":

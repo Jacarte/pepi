@@ -10,14 +10,29 @@ from __future__ import annotations
 import re
 from pathlib import PurePosixPath
 
-# `tests`/`__tests__` mark tests at any depth. `test`/`testing` only at the top level (`test/`, pytest's
-# `testing/`): nested ones are often library code, e.g. django/test/testcases.py, sympy/testing/runtests.py.
-TEST_DIRECTORIES = frozenset({"tests", "__tests__"})
-TOP_LEVEL_TEST_DIRECTORIES = frozenset({"test", "testing"})
-TEST_BASENAME = re.compile(r"test_.*\.py|.*_tests?\.py|conftest\.py|.*\.test\.(?:js|ts)")
+# `tests`, `__tests__` (Jest) and `testdata` (Go fixtures; ignored by `go build`) mark tests at any depth.
+# `test`/`testing`/`spec`/`specs` only at the top level (`test/`, pytest's `testing/`, RSpec's `spec/`), as
+# Maven/Gradle's `src/test/` or as a JS monorepo's `packages/<name>/test/`: other nested ones are often library
+# code, e.g. django/test/testcases.py, sympy/testing/runtests.py, druid's .../query/spec/*.java. Nested RSpec
+# files are still caught by their `*_spec.rb` basename.
+TEST_DIRECTORIES = frozenset({"tests", "__tests__", "testdata"})
+TOP_LEVEL_TEST_DIRECTORIES = frozenset({"test", "testing", "spec", "specs"})
+# Basenames: Python test_*.py/*_test(s).py/conftest.py; Go *_test.go (a Go test_*.go is compiled into the package,
+# so it is library code); Ruby *_spec.rb, test_*.rb, *_test.rb and the RSpec spec_helper.rb/rails_helper.rb
+# support files; JS/TS *.test.* and *.spec.*; C/C++ test_*, *_test, *-test (so jq's test runner src/jq_test.c is
+# test-like, while jq's and redis's other src/*.c stay source); Rust test_*.rs/*_test.rs (Rust unit tests inside
+# source files cannot be told apart by path).
+TEST_BASENAME = re.compile(
+    r"test_.*\.(?:py|rb|rs|c|cc|cpp|cxx|js)"
+    r"|.*_tests?\.(?:py|rb|rs|c|cc|cpp|cxx)"
+    r"|.*_test\.go"
+    r"|.*_spec\.rb|spec_helper\.rb|rails_helper\.rb"
+    r"|.*-test\.(?:c|cc|cpp|cxx)"
+    r"|.*\.(?:test|spec)\.(?:js|jsx|ts|tsx|mjs|cjs)"
+    r"|conftest\.py")
 TEST_FILES_LISTED = 10
 # Bumped when the heuristic or the stripping changes, so strict results from an older policy are refused.
-STRIP_POLICY_VERSION = 2
+STRIP_POLICY_VERSION = 3
 STRIP_POLICY = "remove every per-file diff block whose old or new path is test-like (added files too)"
 # One pass over git's C-style escapes, so an escaped backslash followed by digits stays literal.
 _QUOTED_ESCAPE = re.compile(rb'\\([0-7]{3}|[\\"tnrabfv])')
@@ -26,12 +41,15 @@ _ESCAPES = {b"\\": b"\\", b'"': b'"', b"t": b"\t", b"n": b"\n", b"r": b"\r",
 
 
 def is_test_path(path: str) -> bool:
-    """Test-like: a tests/__tests__ directory component at any depth, a top-level test/testing
-    directory, or a test-file basename (test_*.py, *_test.py, *_tests.py, conftest.py, *.test.js, *.test.ts)."""
+    """Test-like: a tests/__tests__/testdata directory component at any depth, a top-level test/testing/spec/specs
+    directory, `src/test/`, `packages/<name>/test/`, or a test-file basename (see TEST_BASENAME)."""
     parts = PurePosixPath(path).parts
     directories = parts[:-1]
     return bool(parts) and (any(part in TEST_DIRECTORIES for part in directories)
                             or (bool(directories) and directories[0] in TOP_LEVEL_TEST_DIRECTORIES)
+                            or any(part == "test" and parent == "src"
+                                   for parent, part in zip(directories, directories[1:]))
+                            or (len(directories) >= 3 and directories[0] == "packages" and directories[2] == "test")
                             or bool(TEST_BASENAME.fullmatch(parts[-1])))
 
 

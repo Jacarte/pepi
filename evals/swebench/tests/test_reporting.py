@@ -69,6 +69,22 @@ class ReportingTests(unittest.TestCase):
         self.assertTrue((run / "summary.csv").is_file())
         self.assertTrue((run / "summary.md").is_file())
 
+    def test_history_pruning_outcome_is_listed_and_unpruned_tasks_are_noted(self):
+        run, _ = self.fixture()
+        result = summarize_run(run)
+        self.assertEqual([row["history_pruning"] for row in result["instances"]], [None, None])  # older attempts
+        self.assertEqual(result["tasks_history_not_pruned"], 0)
+        self.assertNotIn("git history", (run / "summary.md").read_text())
+        for instance_id, status in (("owner__repo-1", "pruned"), ("owner__repo-2", "refs_only")):
+            path = run / "attempts" / instance_id / "attempt.json"
+            write_json(path, {**read_json(path), "history_pruning": {"status": status}})
+        result = summarize_run(run)
+        self.assertEqual([row["history_pruning"] for row in result["instances"]], ["pruned", "refs_only"])
+        self.assertEqual(result["tasks_history_not_pruned"], 1)
+        self.assertIn("Note: 1 task(s) ran with git history after the task base not fully removed",
+                      (run / "summary.md").read_text())
+        self.assertIn("history_pruning", (run / "summary.csv").read_text().splitlines()[0])
+
     def test_missing_telemetry_is_unknown_not_free(self):
         run, _ = self.fixture()
         (run / "attempts/owner__repo-2/telemetry.json").unlink()
@@ -131,6 +147,53 @@ class ReportingTests(unittest.TestCase):
                          {task['instance_id'] for task in manifest['tasks']})
         self.assertEqual(Path(execute.call_args.args[0][1]).name, 'grade_driver.py')
         self.assertFalse(args["rewrite_reports"])
+
+    def pin_task_inputs(self, run, manifest):
+        """A preset run (Multilingual10) records per-task grading-input fingerprints at prepare."""
+        from evals.swebench.reporting import task_input_fingerprints
+        ids = [task["instance_id"] for task in manifest["tasks"]]
+        manifest = dict(manifest, task_input_fingerprints=task_input_fingerprints(run / "task-source", ids))
+        write_json(run / "manifest.json", manifest)
+        return manifest
+
+    def test_grade_accepts_the_pinned_task_inputs_and_refuses_changed_ones_before_grading(self):
+        run, manifest = self.fixture()
+        self.pin_task_inputs(run, manifest)
+        with patch("evals.swebench.reporting.subprocess.run", return_value=SimpleNamespace(returncode=0)) as execute:
+            self.assertEqual(grade_run(run, run / "task-source", 1, 60), 0)
+        self.assertEqual(execute.call_count, 1)
+        official = read_json(run / "grading.json")
+        grading_dirs = sorted((run / "grading").iterdir())
+        (run / "task-source/tasks/owner__repo-2/test.patch").write_text("SECRET-ISH CHANGED GRADER CONTENT")
+        for options in ({}, {"strip_test_edits": True}, {"restore_test_files": True}):
+            with self.subTest(options=options), \
+                    patch("evals.swebench.reporting.subprocess.run") as execute, \
+                    self.assertRaisesRegex(ValueError, r"prepared with for: owner__repo-2;") as raised:
+                grade_run(run, run / "task-source", 1, 60, **options)
+            execute.assert_not_called()
+            self.assertNotIn("CHANGED", str(raised.exception))
+        self.assertEqual(read_json(run / "grading.json"), official)
+        self.assertEqual(sorted((run / "grading").iterdir()), grading_dirs)
+        self.assertFalse((run / STRICT_DIRECTORY).exists())
+        self.assertFalse((run / RESTORED_DIRECTORY).exists())
+
+    def test_grade_refuses_a_task_changed_while_it_is_copied(self):
+        run, manifest = self.fixture()
+        self.pin_task_inputs(run, manifest)
+        from evals.swebench import reporting
+        freeze = reporting.freeze_task_repo
+
+        def racing(task_repo, frozen, tasks):
+            result = freeze(task_repo, frozen, tasks)
+            (frozen / "tasks/owner__repo-1/test.patch").write_text("swapped during the copy")
+            return result
+
+        with patch.object(reporting, "freeze_task_repo", side_effect=racing), \
+                patch("evals.swebench.reporting.subprocess.run") as execute, \
+                self.assertRaisesRegex(ValueError, "frozen task copy.*owner__repo-1"):
+            grade_run(run, run / "task-source", 1, 60)
+        execute.assert_not_called()
+        self.assertEqual([path.name for path in (run / "grading").iterdir()], ["test"])  # the copy is removed
 
     def test_pairing_refuses_mismatched_tasks_or_budgets(self):
         run, _ = self.fixture()
@@ -634,7 +697,7 @@ class ReportingTests(unittest.TestCase):
             "latency_all_seconds", "latency_resolved_seconds", "turns_observed",
             "available_accounting_tasks", "observed_estimated_cost_usd", "estimated_total_cost_usd",
             "estimated_cost_per_resolved", "cost_caveat", "instances",
-            "tasks_modifying_existing_tests", "resolved_with_test_edits",
+            "tasks_modifying_existing_tests", "resolved_with_test_edits", "tasks_history_not_pruned",
         }
         self.assertEqual(set(result.keys()), required_keys)
         # Per-instance keys that must always be present
@@ -644,7 +707,7 @@ class ReportingTests(unittest.TestCase):
             "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens",
             "estimated_cost_usd", "accounting_status",
             "patch_touches_tests", "test_files_touched", "test_files_touched_count",
-            "test_files_modified_existing", "test_files_added", "test_edit_kind",
+            "test_files_modified_existing", "test_files_added", "test_edit_kind", "history_pruning",
         }
         for instance in result["instances"]:
             self.assertEqual(set(instance.keys()), required_instance_keys)

@@ -26,8 +26,31 @@ class TestPathHeuristicTests(unittest.TestCase):
         for path in ("django/test/testcases.py", "django/test/runner.py", "lib/matplotlib/testing/decorators.py",
                      "sympy/testing/runtests.py", "sphinx/testing/fixtures.py", "xarray/testing/assertions.py",
                      "pkg/testing/util.py", "django/db/migrations/loader.py", "tests", "test", "testing",
-                     "src/testsuite.py", "src/latest.py", "docs/testing.rst", "contest.py", "src/test.py",
-                     "ui/x.spec.ts", ""):
+                     "src/testsuite.py", "src/latest.py", "docs/testing.rst", "contest.py", "src/test.py", ""):
+            self.assertFalse(is_test_path(path), path)
+
+    def test_non_python_test_paths(self):
+        # The test files the 10 Multilingual (Niffler) eval scripts reset, plus common per-language conventions.
+        for path in ("test/unit/adapters/http.js", "modules/caddyhttp/reverseproxy/selectionpolicies_test.go",
+                     "packages/docusaurus/src/server/__tests__/brokenLinks.test.ts", "test/printf-test.cc",
+                     "routes_test.go", "tests/shtest", "tests/shell/environment/env.rs", "tests/unit/type/stream.tcl",
+                     "spec/rubocop/cop/style/redundant_freeze_spec.rb", "tokio/tests/net_types_unwind.rs",
+                     "lib/rubocop/cop/foo_spec.rb", "spec/support/helpers.rb", "specs/a.rb", "spec_helper.rb",
+                     "rails_helper.rb", "test_parser.rb", "lib/parser_test.rb", "ui/x.spec.ts", "ui/x.spec.jsx",
+                     "ui/x.test.tsx", "ui/x.test.mjs", "ui/x.test.cjs", "src/foo_test.c", "src/foo-test.cpp",
+                     "src/test_foo.cc", "src/test_foo.rs", "src/foo_test.rs", "lib/test_util.js",
+                     "src/test/java/org/x/FooTest.java", "core/src/test/kotlin/X.kt",
+                     "packages/babel-parser/test/fixtures/a/input.js", "internal/command/testdata/x/main.tf",
+                     "crates/nu-command/tests/commands/env.rs",
+                     "src/jq_test.c"):  # jq's built-in test runner: test-like by the `*_test.c` rule, on purpose
+            self.assertTrue(is_test_path(path), path)
+        # Library code: nested spec/test dirs, Go test_*.go (compiled into the package), look-alike names.
+        for path in ("lib/testing_utils.go", "attestation.py", "contest.js", "src/test_helpers.go",
+                     "processing/src/main/java/org/apache/druid/query/spec/MultipleIntervalSegmentSpec.java",
+                     "lib/openapi/spec/schema.rb", "src/main/java/org/x/Foo.java", "packages/test/index.js",
+                     "packages/core/src/test.js", "src/latest.test", "x.spec.json", "lib/spec.rb",
+                     "src/attest_test.go.txt", "crates/nu-command/src/env.rs",
+                     "src/jv.c", "src/main.c", "src/execute.c", "src/t_stream.c", "src/server.c"):  # jq, redis source
             self.assertFalse(is_test_path(path), path)
 
 

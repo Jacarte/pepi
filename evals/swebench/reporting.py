@@ -25,7 +25,8 @@ from .testpaths import STRIP_POLICY, STRIP_POLICY_VERSION, existing_paths, patch
 COMPARABLE_PROTOCOL_KEYS = ("timeout_seconds", "cpus", "memory", "concurrency", "host", "network",
                             "network_policy", "pids_limit", "timeout_scope", "timeout_patch_policy")
 # Runs omit forwarded_env_names/mcp_servers when nothing is forwarded/copied, so absent equals [].
-CONFIGURATION_DEFAULTS = {"forwarded_env_names": [], "mcp_servers": [], "skills": []}
+HISTORY_NOT_PRUNED = ("refs_only", "failed")
+CONFIGURATION_DEFAULTS = {"forwarded_env_names": [], "mcp_servers": [], "skills": [], "network_requirements": []}
 CONFIGURATION_STRING_LIMIT = 200
 MISSING = object()
 # Strict regrade (`grade --strip-test-edits`): separate tree and record, never the official grading's.
@@ -165,6 +166,18 @@ def refuse_changed_task_inputs(run: Path, task_repo: Path, instance_ids: list) -
                              + ", ".join(changed) + "; use the task repo revision of the official grading")
 
 
+def refuse_changed_pinned_inputs(manifest: dict, task_repo: Path, label: str) -> None:
+    """Preset runs (Multilingual10) pin per-task grading inputs at prepare: grade only exactly those inputs."""
+    pinned = manifest.get("task_input_fingerprints")
+    if pinned is None:
+        return
+    ids = [task["instance_id"] for task in manifest["tasks"]]
+    changed = mismatched_task_inputs(task_input_fingerprints(task_repo, ids), pinned)
+    if changed:
+        raise ValueError(f"The {label}'s grading inputs differ from the ones this run was prepared with for: "
+                         + ", ".join(changed) + "; pass the task repo this run was prepared from")
+
+
 def grade_variant(run: Path, manifest: dict, variant: str, record: dict, patches: dict, task_repo: Path,
                   workers: int, timeout: int, adjust=None) -> int:
     """Grade `patches` ({instance_id: patch}, manifest order) under a fresh <run>-<variant>-<uuid> ID.
@@ -219,6 +232,7 @@ def grade_strict(run: Path, task_repo: Path, workers: int, timeout: int) -> int:
     """
     manifest = read_manifest(run)
     submitted = predictions(run, manifest)
+    refuse_changed_pinned_inputs(manifest, task_repo, "task repo")
     selected = modifying_existing_tests(submitted, manifest)
     stripped = {instance_id: strip_test_files(submitted[instance_id]["model_patch"]) for instance_id in selected}
     graded = [instance_id for instance_id in selected if stripped[instance_id][0]]
@@ -256,6 +270,7 @@ def grade_restored(run: Path, task_repo: Path, workers: int, timeout: int) -> in
     """
     manifest = read_manifest(run)
     submitted = predictions(run, manifest)
+    refuse_changed_pinned_inputs(manifest, task_repo, "task repo")
     selection = restore_selection(submitted, manifest, task_repo)
     # The selection reads these tasks' eval.sh, and untouched tasks keep their official outcome.
     refuse_changed_task_inputs(run, task_repo, [instance_id for ids in selection.values() for instance_id in ids])
@@ -279,10 +294,16 @@ def grade_run(run: Path, task_repo: Path, workers: int, timeout: int, strip_test
         return grade_restored(run, task_repo, workers, timeout)
     manifest = read_manifest(run)
     predictions(run, manifest)
+    refuse_changed_pinned_inputs(manifest, task_repo, "task repo")
     grade_id = f"{manifest['run_id']}-{uuid.uuid4().hex[:12]}"
     work = run / "grading" / grade_id
     frozen = work / "task-repo"
     grading_hash = freeze_task_repo(task_repo, frozen, manifest["tasks"])
+    try:
+        refuse_changed_pinned_inputs(manifest, frozen, "frozen task copy")  # changed while copying
+    except ValueError:
+        shutil.rmtree(work)
+        raise
     arguments = {
         "dataset_name": manifest["dataset"], "split": manifest["split"],
         "instance_ids": [task["instance_id"] for task in manifest["tasks"]],
@@ -410,6 +431,8 @@ def summarize_run(run: Path) -> dict:
             "cache_write_tokens": total.get("cacheWrite"), "estimated_cost_usd": total.get("cost"),
             "accounting_status": telemetry.get("accounting_status", "unavailable"),
             **patch_test_edits(patch),
+            # runner.HISTORY_PRUNE_SCRIPT outcome (pruned/refs_only/failed/skipped); None for older attempts.
+            "history_pruning": (attempt.get("history_pruning") or {}).get("status"),
         })
         for variant, result in variants.items():
             rows[-1][f"resolved_{variant}"], rows[-1][f"grading_status_{variant}"] = \
@@ -441,6 +464,8 @@ def summarize_run(run: Path) -> dict:
         "tasks_modifying_existing_tests": sum(row["test_edit_kind"] == "modified_existing" for row in rows),
         "resolved_with_test_edits": sum(row["resolved"] is True and row["test_edit_kind"] == "modified_existing"
                                         for row in rows),
+        # The agent ran with later git history (possibly the reference fix) still reachable or present.
+        "tasks_history_not_pruned": sum(row["history_pruning"] in HISTORY_NOT_PRUNED for row in rows),
         "instances": rows,
     }
     if strict is not None:
@@ -493,12 +518,17 @@ def summarize_run(run: Path) -> dict:
                      else "regrade with `reporting grade --strip-test-edits` for a strict score")
         test_edit_note = (f"Note: {summary['resolved_with_test_edits']} of {solved} resolved tasks modified "
                           f"existing test files; {follow_up}.\n\n")
+    history_note = ""
+    if summary["tasks_history_not_pruned"]:
+        history_note = (f"Note: {summary['tasks_history_not_pruned']} task(s) ran with git history after the task "
+                        "base not fully removed (`history_pruning` in summary.csv; see attempts/<id>/attempt.json).\n\n")
     (run / "summary.md").write_text(
         f"# {manifest['run_id']}\n\n"
         f"{suite_note}"
         f"Resolved: **{solved}/{count} ({100 * solved / count:.1f}%)**{variant_note}. "
         f"Unknown grades: {summary['unknown_grades']}.\n\n"
         f"{test_edit_note}"
+        f"{history_note}"
         f"Agent latency (all observed attempts): {summary['latency_all_seconds']}.\n\n"
         f"Resolved-task latency: {summary['latency_resolved_seconds']}.\n\n"
         f"Available accounting: {available}/{count}. Estimated cost per resolved task: "

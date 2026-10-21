@@ -33,13 +33,70 @@ SKILLS_DIR = f"{AGENT_DIR}/skills"
 EXIT_OK, EXIT_USAGE, EXIT_INFRA, EXIT_INTERRUPTED = 0, 2, 3, 130
 # Any Docker network that is not an isolated, operator-managed one.
 FORBIDDEN_NETWORKS = ("host", "bridge", "default")
+# Python task images activate their conda env; other images (Multilingual: node/go/cargo/ruby/C) have
+# no conda. A failing source/activate still ends the if with its status, so `exec pi` is skipped.
 PI_COMMAND = (
-    "source /opt/miniconda3/etc/profile.d/conda.sh && conda activate testbed && "
+    "if [ -f /opt/miniconda3/etc/profile.d/conda.sh ]; then "
+    "source /opt/miniconda3/etc/profile.d/conda.sh && conda activate testbed; fi && "
     "exec pi ${PEPI_EVAL_MCP_FLAG:-} --print --mode json --session-dir /output/sessions "
     "--append-system-prompt /opt/pepi-eval/instructions.md @/input/issue.md"
 )
+# Controller commands inside the task container (everything but the Pi launch) resolve binaries through this
+# PATH, never the image's: Rust/Ruby task images put CARGO_HOME/bin and GEM_HOME/bin, which the agent UID owns
+# (Dockerfile), before /usr/bin. Root runs procps by absolute path (the Dockerfile installs it) and the auth
+# collector runs on Pi's own Node.
+CONTROLLER_ENV = ("--env", "PATH=/usr/sbin:/usr/bin:/sbin:/bin")
+PKILL, PGREP = "/usr/bin/pkill", "/usr/bin/pgrep"
+PI_NODE = "/opt/pepi-node/bin/node"
 # Root-level files whose content SWE-bench image setup commits rewrite (e.g. Sphinx pins).
 SETUP_CONTENT_PATHS = (b"setup.py", b"tox.ini")
+# Task images can keep tags, branches, remote-tracking refs and reflogs that reach commits after the task base,
+# i.e. the reference fix (SWE-bench issue #578: the Multilingual axios image had 116 tags and 515 later commits).
+# After the baseline check, only HEAD (its branch, or a detached HEAD) and its ancestors stay reachable: tags on
+# HEAD or an ancestor stay (`git describe` and setuptools_scm/versioneer versions are unchanged); every other
+# ref, the remotes, pseudo-refs, reflogs, .keep markers and commit-graph caches go, and `git gc --prune=now`
+# drops the unreachable objects. HEAD is unchanged, so exported patches are unchanged. POSIX sh, run as the
+# agent UID (it owns /testbed). Prints one marker after the refs step and one after gc.
+HISTORY_PRUNE_TIMEOUT = 120
+HISTORY_PRUNE_POLICY = ("v2: delete every ref but HEAD's branch and tags on HEAD or its ancestors, remotes, "
+                        "pseudo-refs, reflogs; gc --prune=now; agent setup fails open (recorded) on timeout or error")
+HISTORY_PRUNE_SCRIPT = r"""set -eu
+git_dir=$(git rev-parse --git-dir)
+if [ -s "$git_dir/objects/info/alternates" ]; then echo 'alternate object stores' >&2; exit 3; fi
+if [ -d "$git_dir/worktrees" ] && [ -n "$(ls -A "$git_dir/worktrees")" ]; then echo 'linked worktrees' >&2; exit 3; fi
+head=$(git rev-parse --verify HEAD)
+branch=$(git symbolic-ref -q HEAD || true)
+doomed() {
+  git for-each-ref --format='%(refname)' | while read -r ref; do
+    [ "$ref" = "$branch" ] && continue
+    case "$ref" in
+      refs/tags/*) commit=$(git rev-parse -q --verify "$ref^{commit}" 2>/dev/null) \
+        && git merge-base --is-ancestor "$commit" "$head" && continue ;;
+    esac
+    printf 'delete %s\n' "$ref"
+  done
+}
+refs=$(doomed | grep -c . || true)
+remotes=0
+for remote in $(git remote); do git remote remove "$remote"; remotes=$((remotes + 1)); done
+doomed | git update-ref --stdin
+for name in ORIG_HEAD FETCH_HEAD MERGE_HEAD CHERRY_PICK_HEAD REVERT_HEAD BISECT_HEAD AUTO_MERGE; do
+  rm -f "$git_dir/$name"
+done
+rm -rf "$git_dir/refs/original" "$git_dir/objects/info/commit-graph" "$git_dir/objects/info/commit-graphs" \
+  "$git_dir/objects/pack/multi-pack-index"
+rm -f "$git_dir"/objects/pack/*.keep
+git reflog expire --expire=now --expire-unreachable=now --all
+echo "pepi-history refs_removed=$refs remotes_removed=$remotes"
+git -c gc.auto=0 -c gc.pruneExpire=now -c gc.reflogExpire=now -c gc.reflogExpireUnreachable=now \
+  -c gc.rerereResolved=0 -c gc.rerereUnresolved=0 gc --prune=now --quiet
+test "$(git rev-parse --verify HEAD)" = "$head"
+echo pepi-history gc_done
+"""
+# After a killed gc: stale locks would break the agent's and the export's git commands.
+HISTORY_PRUNE_CLEANUP = ('git_dir=$(git rev-parse --git-dir) && rm -f "$git_dir/gc.pid" && '
+                         'find "$git_dir" -name "*.lock" -type f -exec rm -f {} +')
+HISTORY_MARKER = re.compile(rb"^pepi-history refs_removed=(\d+) remotes_removed=(\d+)$", re.M)
 # `run --pass-env NAME` policy (authoritative; evals/pepi-eval.sh mirrors it for early feedback).
 # These names steer shells, loaders, interpreters, the Docker client or this runner; LITELLM_* use
 # the frozen-provider path and PEPI_EVAL_* configure the eval itself, so neither is forwarded.
@@ -118,12 +175,12 @@ def stop_agents(docker: Docker, container: str) -> None:
     deadline = time.monotonic() + 10
     while True:
         try:
-            docker.call("exec", container, "pkill", "-KILL", "-u", UID, capture_output=True)
+            docker.call("exec", *CONTROLLER_ENV, container, PKILL, "-KILL", "-u", UID, capture_output=True)
         except subprocess.CalledProcessError as error:
             if error.returncode != 1:
                 raise
         try:
-            docker.call("exec", container, "pgrep", "-u", UID, capture_output=True)
+            docker.call("exec", *CONTROLLER_ENV, container, PGREP, "-u", UID, capture_output=True)
         except subprocess.CalledProcessError as error:
             if error.returncode == 1:
                 return
@@ -135,10 +192,10 @@ def stop_agents(docker: Docker, container: str) -> None:
 
 def export_patch(docker: Docker, container: str, baseline: str) -> bytes:
     # Run as the unprivileged agent UID, including any repository Git filters.
-    docker.call("exec", "--user", UID, "--workdir", "/testbed", container,
+    docker.call("exec", "--user", UID, "--workdir", "/testbed", *CONTROLLER_ENV, container,
                 "git", "-c", "core.fsmonitor=false", "add", "-A", capture_output=True)
     # The agent owns /testbed and $HOME, so pin the output format against its git config.
-    patch = docker.call("exec", "--user", UID, "--workdir", "/testbed", container,
+    patch = docker.call("exec", "--user", UID, "--workdir", "/testbed", *CONTROLLER_ENV, container,
                         "git", "-c", "core.fsmonitor=false", "diff", "--cached", "--binary", "--no-color", "--no-ext-diff",
                         "--no-textconv", "--src-prefix=a/", "--dst-prefix=b/", baseline, "--",
                         capture_output=True)
@@ -151,7 +208,7 @@ def checkout_baseline(docker: Docker, container: str, base_commit: str) -> str:
     Exception: root-level SETUP_CONTENT_PATHS may also change content (regular file on
     both sides). The baseline stays HEAD, so exported patches exclude the setup commit.
     """
-    command = ("exec", "--user", UID, "--workdir", "/testbed", container,
+    command = ("exec", "--user", UID, "--workdir", "/testbed", *CONTROLLER_ENV, container,
                "git", "-c", "core.fsmonitor=false", "-c", "core.fileMode=true")
     baseline = docker.text(*command, "rev-parse", "HEAD")
     # Raw, full object IDs and NUL paths avoid text/binary, quoting and rename heuristics.
@@ -180,6 +237,40 @@ def checkout_baseline(docker: Docker, container: str, base_commit: str) -> str:
     if dirty:
         raise ValueError("Task checkout is dirty (index, worktree or untracked entries)")
     return baseline
+
+
+def prune_history(docker: Docker, container: str, timeout: float) -> dict:
+    """Run HISTORY_PRUNE_SCRIPT; never raises for a prune failure (the attempt goes on, recorded).
+
+    status: pruned (refs and objects), refs_only (refs removed, gc timed out or failed: later commits are
+    unreferenced but their objects may remain), failed (nothing known to be removed), skipped (timeout 0).
+    """
+    if timeout <= 0:
+        return {"status": "skipped", "refs_removed": None, "remotes_removed": None, "seconds": 0.0}
+    started = time.monotonic()
+    output, error = b"", None
+    try:
+        output = docker.call("exec", "--user", UID, "--workdir", "/testbed", *CONTROLLER_ENV, container, "sh", "-c",
+                             HISTORY_PRUNE_SCRIPT, capture_output=True, timeout=timeout).stdout or b""
+    except subprocess.TimeoutExpired as expired:
+        output, error = expired.stdout or b"", f"timed out after {timeout:g}s"
+        # The exec client is gone but gc may still run in the container: stop it before the agent starts.
+        stop_agents(docker, container)
+        try:
+            docker.call("exec", "--user", UID, "--workdir", "/testbed", *CONTROLLER_ENV, container, "sh", "-c",
+                        HISTORY_PRUNE_CLEANUP, capture_output=True)
+        except subprocess.CalledProcessError:
+            error += "; stale git lock cleanup failed"
+    except subprocess.CalledProcessError as failed:
+        output, error = failed.stdout or b"", f"exit code {failed.returncode}"
+    marker = HISTORY_MARKER.search(output)
+    done = error is None and marker is not None and b"pepi-history gc_done" in output
+    if error is None and not done:
+        error = "unexpected output"
+    return {"status": "pruned" if done else "refs_only" if marker else "failed",
+            "refs_removed": int(marker.group(1)) if marker else None,
+            "remotes_removed": int(marker.group(2)) if marker else None,
+            "seconds": time.monotonic() - started, **({"error": error} if error else {})}
 
 
 class Secrets:
@@ -360,7 +451,8 @@ class Secrets:
             "} catch { process.exit(2); }"
         )
         try:
-            result = docker.call("exec", "--user", UID, container, "node", "-e", script, capture_output=True)
+            result = docker.call("exec", "--user", UID, *CONTROLLER_ENV, container, PI_NODE, "-e", script,
+                                 capture_output=True)
             data = json.loads(result.stdout)
             if not isinstance(data["auth"], dict) or not isinstance(data["history"], list) or not data["history"]:
                 raise ValueError()
@@ -415,12 +507,12 @@ class Secrets:
         # Values travel over stdin only: never argv, env, `docker cp` (unsupported on tmpfs) or logs.
         if self.oauth:
             content = json.dumps(json.loads(self.files["auth.json"])).encode() + b"\n"
-            docker.call("exec", "-i", "--user", UID, container, "sh", "-c",
+            docker.call("exec", "-i", "--user", UID, *CONTROLLER_ENV, container, "sh", "-c",
                         f"umask 077; cat > {SECRET_DIR}/auth-journal.jsonl", input=content, capture_output=True)
         for name, content in self.files.items():
-            docker.call("exec", "-i", "--user", UID, container, "sh", "-c",
+            docker.call("exec", "-i", "--user", UID, *CONTROLLER_ENV, container, "sh", "-c",
                         f"umask 077; cat > {SECRET_DIR}/{name}", input=content, capture_output=True)
-            docker.call("exec", "--user", UID, container, "ln", "-sf",
+            docker.call("exec", "--user", UID, *CONTROLLER_ENV, container, "ln", "-sf",
                         f"{SECRET_DIR}/{name}", f"{AGENT_DIR}/{name}", capture_output=True)
 
 
@@ -437,7 +529,7 @@ def decode_patch(raw: bytes, record: dict) -> str:
 def run_one(docker: Docker, task: dict, build: dict, output: Path, timeout: float,
             network: str, cpus: str, memory: str, secrets: Secrets | None = None,
             run_id: str = "", disable_mcp: bool = False, provider_plan: dict | None = None,
-            skills: list[Skill] | None = None) -> dict:
+            skills: list[Skill] | None = None, history_prune_timeout: float = HISTORY_PRUNE_TIMEOUT) -> dict:
     secrets = secrets or Secrets()
     container = f"pepi-eval-{uuid.uuid4().hex}"
     record = {"schema_version": 1, "instance_id": task["instance_id"], "attempt_id": 1,
@@ -470,11 +562,15 @@ def run_one(docker: Docker, task: dict, build: dict, output: Path, timeout: floa
         secrets.inject(docker, container)
         if skills:
             # As root (the image's user): root-owned files the agent UID can read but not change.
-            docker.call("exec", "-i", container, "tar", "-x", "-f", "-", "-C", SKILLS_DIR,
+            docker.call("exec", "-i", *CONTROLLER_ENV, container, "tar", "-x", "-f", "-", "-C", SKILLS_DIR,
                         input=skills_archive(skills), capture_output=True)
         docker.call("cp", str(issue), f"{container}:/input/issue.md", capture_output=True)
         baseline = checkout_baseline(docker, container, task["base_commit"])
         record["baseline_commit"] = baseline
+        record["history_pruning"] = prune_history(docker, container, history_prune_timeout)
+        if record["history_pruning"]["status"] not in ("pruned", "skipped"):
+            # Fail open: the attempt runs, and summary/narrate list the task as history_not_pruned.
+            record["errors"].append("history_not_pruned: " + record["history_pruning"]["error"])
         record["timing_seconds"]["setup"] = time.monotonic() - setup
         # `--env NAME` without a value: Docker reads it from this process's environment.
         env = [value for name in (*secrets.environment, *secrets.forwarded) for value in ("--env", name)]
@@ -603,7 +699,7 @@ def frozen_mcp_policy(run: Path) -> dict:
 
 def run_tasks(run: Path, timeout: float, network: str, cpus: str, memory: str,
               secrets_dir: Path | None = None, pass_env: list[str] | tuple[str, ...] = (),
-              skills_dir: Path | None = None) -> int:
+              skills_dir: Path | None = None, history_prune_timeout: float = HISTORY_PRUNE_TIMEOUT) -> int:
     """Return EXIT_OK when every attempt ran (even if the agent failed or timed out),
     EXIT_INFRA when any attempt hit a setup/runner error, EXIT_INTERRUPTED on Ctrl-C/SIGTERM."""
     manifest = read_manifest(run)
@@ -640,6 +736,8 @@ def run_tasks(run: Path, timeout: float, network: str, cpus: str, memory: str,
         "cpus": float(cpus), "memory": memory, "concurrency": 1, "host": platform.platform(),
         "pids_limit": 512, "timeout_scope": "Pi invocation; setup and export are outside this deadline",
         "timeout_patch_policy": "submit partial diff after stopping all agent processes",
+        "history_pruning": {"policy": HISTORY_PRUNE_POLICY, "timeout_seconds": history_prune_timeout}
+        if history_prune_timeout > 0 else {"policy": "disabled"},
         # Names and presence only: never values or hashes of secrets.
         "secrets": {name: {"present": name in secrets.files} for name in SECRET_FILES},
         "config_label": manifest.get("config", {}).get("label"),
@@ -650,6 +748,9 @@ def run_tasks(run: Path, timeout: float, network: str, cpus: str, memory: str,
         **({"mcp_servers": mcp_servers} if mcp_servers else {}),
         # Skill names, content digests and file counts; omitted without consented skills, as above.
         **({"skills": [skill.record() for skill in skills]} if skills else {}),
+        # A preset's informational outbound host names (names only); omitted when it lists none.
+        **({"network_requirements": manifest["network_requirements"]}
+           if manifest.get("network_requirements") else {}),
     })
     infra_failed = False
     interrupted = False
@@ -663,7 +764,8 @@ def run_tasks(run: Path, timeout: float, network: str, cpus: str, memory: str,
                 try:
                     row = run_one(Docker(), task, builds[task["instance_id"]],
                                   run / "attempts" / task["instance_id"], timeout, network, cpus,
-                                  memory, secrets, manifest["run_id"], disable_mcp, plan, skills)
+                                  memory, secrets, manifest["run_id"], disable_mcp, plan, skills,
+                                  history_prune_timeout)
                 except Exception as error:  # keep every selected ID in predictions.jsonl
                     row = {"instance_id": task["instance_id"], "agent_status": "runner_error", "patch": "",
                            "errors": [secrets.redact_text(f"{type(error).__name__}: {error}")]}

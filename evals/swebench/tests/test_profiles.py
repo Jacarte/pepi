@@ -11,9 +11,10 @@ from unittest.mock import patch
 from evals.swebench.common import fingerprint, read_json, read_manifest, write_json
 from evals.swebench.prepare import prepare_run
 from evals.swebench.profile import isolated_settings, safe_models
-from evals.swebench.runner import (PI_COMMAND, Secrets, build_images, frozen_provider_plan,
+from evals.swebench.runner import (PI_COMMAND, PI_NODE, Secrets, build_images, frozen_provider_plan,
                                    run_one, run_tasks)
-from evals.swebench.tests.test_runner import TASK, VERSIONS, FakeDocker, prepare_fixture
+from evals.swebench.tests.test_runner import (TASK, VERSIONS, FakeDocker, assert_controller_execs_trust_no_task_path,
+                                              prepare_fixture)
 
 REPO = Path(__file__).resolve().parents[3]
 PINS = {k: v for k, v in VERSIONS.items() if k != "pi-provider-litellm"}
@@ -348,7 +349,7 @@ class AuthTests(unittest.TestCase):
                 secrets.validate({"required_providers": ["openai-codex"]}, "1.1.0")
                 class Docker(FakeDocker):
                     def call(self, *args, **kwargs):
-                        if "node" in args and "-e" in args:
+                        if PI_NODE in args and "-e" in args:
                             self.commands.append(args)
                             if failure == "journal":
                                 raise subprocess.CalledProcessError(2, args)
@@ -370,6 +371,10 @@ class AuthTests(unittest.TestCase):
                 else:
                     self.assertEqual(json.loads(secrets.files["auth.json"]), oauth(2))
                     self.assertEqual(json.loads(original_auth), oauth(0))
+                # The collector, the secret writes and links run on Pi's Node under the controller PATH.
+                assert_controller_execs_trust_no_task_path(self, docker.commands)
+                self.assertTrue(any(PI_NODE in command for command in docker.commands))
+                self.assertFalse(any("node" in command for command in docker.commands))
                 self.assertEqual(docker.commands[-1][0], "rm")
                 for path in output.rglob("*"):
                     if path.is_file():

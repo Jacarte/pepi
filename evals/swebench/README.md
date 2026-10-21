@@ -344,6 +344,9 @@ is a provisioning boundary, not a sandbox for untrusted npm packages or argument
 review them, and enforce runtime egress externally. No runtime dependency download
 is needed. Server files are root-owned; task data and the agent profile are writable.
 Node >=22.19.0 is required by Pi 1.1.0; server/platform compatibility needs a smoke test.
+At build time a provisioned binary whose shebang is `#!/usr/bin/env node` is pinned to Pi's Node
+(`#!/opt/pepi-node/bin/node`), so a task image's own Node (20 in the Multilingual JS images) never runs
+it; other shebangs (`env -S`, shell wrappers) are left as published.
 
 **Remote servers:** supply a native `url` entry (type `http` or `streamable-http`)
 in that same runtime file, with literal headers if needed. No npm manifest is needed.
@@ -378,10 +381,22 @@ tests alone was not.
 
 `summarize` therefore always flags, from the graded patch (`predictions.jsonl`, the same text as
 `attempts/<id>/patch.diff` when that is UTF-8), which test-like files each patch touches
-(`evals/swebench/testpaths.py`: a `tests`/`__tests__` directory at any depth, a top-level
-`test/` or `testing/` directory, or `test_*.py`, `*_test.py`, `*_tests.py`, `conftest.py`,
-`*.test.js`/`.ts`). Nested `test`/`testing` packages are library code (`django/test/testcases.py`,
-`sympy/testing/runtests.py`, `lib/matplotlib/testing/decorators.py`) and are not test-like. Per task:
+(`evals/swebench/testpaths.py`: a `tests`/`__tests__`/`testdata` directory at any depth; a top-level
+`test/`, `testing/`, `spec/` or `specs/` directory; Maven/Gradle `src/test/`; a JS monorepo's
+`packages/<name>/test/`; or a test-file basename: Python `test_*.py`, `*_test.py`, `*_tests.py`,
+`conftest.py`; Go `*_test.go`; Ruby `*_spec.rb`, `test_*.rb`, `*_test.rb`, `spec_helper.rb`,
+`rails_helper.rb`; JS/TS `*.test.*`/`*.spec.*` (`js`, `jsx`, `ts`, `tsx`, `mjs`, `cjs`); C/C++
+`test_*`, `*_test`, `*-test` (`c`, `cc`, `cpp`, `cxx`), so jq's built-in test runner `src/jq_test.c` is
+test-like by design while the rest of jq's and redis's `src/*.c` is source; Rust `test_*.rs`/`*_test.rs`). Nested
+`test`/`testing`/`spec` packages are library code (`django/test/testcases.py`,
+`sympy/testing/runtests.py`, `lib/matplotlib/testing/decorators.py`, druid's
+`.../query/spec/*.java`) and are not test-like; nested RSpec files still match `*_spec.rb`. A Go
+`test_*.go` is compiled into its package, so it is not test-like either. Rust unit tests inside
+source files cannot be told apart by path. Checked against the data: the extension changes the class
+of no path in the 2,519 local task patches (one of their 4,297 gold-patch paths is test-like, pytest's
+`doc/en/example/nonpython/conftest.py`, as before); none of the 521 Multilingual gold-patch paths is
+test-like and 471 of the 495 Multilingual `test_patch` paths are (the rest are fixtures such as ruff's
+`resources/test/` and caddy's `caddytest/`). Per task:
 `test_edit_kind` (`none`, `added_only`, `modified_existing`, or `unknown` for a non-git diff),
 `test_files_touched` (up to 10 paths) and counts. Totals: `tasks_modifying_existing_tests` and
 `resolved_with_test_edits`; `summary.md` notes them. Adding a test to an existing file also counts
@@ -445,6 +460,162 @@ grading's inputs with the same repair applied. `reporting test-checkout RUN` pri
 `<regraded> <unrewritable>`: how many tasks the restored regrade would regrade and how many it could
 not repair; `pepi-eval.sh` asks (default No) whenever either is above 0.
 
+## Multilingual (Niffler 10)
+
+`multilingual10-v1` is the 10-task SWE-bench Multilingual subset from the Niffler pilot
+(`axios`, `caddy`, `docusaurus`, `fmt`, `gin`, `jq`, `nushell`, `redis`, `rubocop`, `tokio`):
+**a custom subset, not an official score**. `~/swe-bench-tasks` holds no Multilingual data, so
+import the rows into a separate task repo first (downloads from HuggingFace; the swebench venv
+has `datasets`):
+
+```sh
+~/.venvs/swebench/bin/python -m evals.swebench.multilingual import \
+  --dataset SWE-bench/SWE-bench_Multilingual --revision 846e647b9f33c0b51b739d005d13d85493c9af09 \
+  --ids evals/swebench/presets/multilingual10-v1.ids --out ~/swe-bench-tasks-multilingual
+```
+
+The importer writes the `swebench.task.repo` layout (`sweb.yaml`, `tasks/<id>/task.yaml`,
+`tests.json`, `problem_statement.md`, `hints.md` when non-empty, `gold.patch`, `test.patch`,
+`eval.sh` byte for byte from the row's `eval_script`, and a `Dockerfile` that is only
+`FROM --platform=linux/amd64 <published image>`), plus `import-manifest.json` with the dataset
+revision, per-file SHA-256s and each row's canonical hash. It never overwrites a path and writes
+through a temporary sibling directory. `--rows-json FILE` imports local rows without a download.
+There is no `environment_setup_commit` in these rows and the harness does not need one.
+
+The prebuilt task images are not pulled automatically (about 18 GB for the 10):
+
+```sh
+~/.venvs/swebench/bin/python -m evals.swebench.multilingual images --task-repo ~/swe-bench-tasks-multilingual \
+  | xargs -n1 docker pull --platform linux/amd64
+~/.venvs/swebench/bin/python -m evals.swebench.multilingual validate-gold \
+  --task-repo ~/swe-bench-tasks-multilingual --run-id ml-gold-1 --workers 2 --timeout 1800
+```
+
+`validate-gold` grades the gold patches through `grade_driver.py` over a frozen copy of the task
+repo, exactly like `reporting grade` grades predictions, writes `validation/<run-id>/` and exits 0
+only when every task resolves. With a task repo the harness force-rebuilds each image from its
+`Dockerfile` (it removes the image tag first), so grading re-resolves the published `:latest`
+image from Docker Hub: registry access is needed at grade time, and a re-published image would
+change the environment (tags are not digest-pinned).
+
+Grading (`grade`, `--strip-test-edits`, `--restore-test-files`) refuses a task repo whose inputs differ from
+the per-task fingerprints the run was prepared with, naming the tasks, before any copy is kept or the grader
+starts. `evals/pepi-eval.sh report` takes its default task repo from the run's manifest (the preset's import
+location for a Multilingual10 run, `~/swe-bench-tasks` for Verified), not from `PEPI_EVAL_PRESET`; for any other
+dataset it stops and asks for `PEPI_EVAL_TASK_REPO`.
+
+Then run the preset (it sets the default IDs, `TASK_REPO=~/swe-bench-tasks-multilingual`,
+dataset and a 600-second Pi timeout, a starting point for cargo/go/C++ builds):
+
+```sh
+PEPI_EVAL_PRESET=multilingual10-v1 PEPI_EVAL_TASK_REPO=~/swe-bench-tasks-multilingual evals/pepi-eval.sh all
+```
+
+The preset pins its task source by per-task input fingerprints (`sweb.yaml` plus
+`tasks/<id>`, the same value grading's stale-input checks use) of an import of the pinned
+revision; `prepare` refuses any other inputs for this exact ordered selection, like Verified20's
+task-source revision. The tests and builds of these tasks fetch from package registries
+(a gold run with `--network none` failed only `tokio`, on `index.crates.io`; agents building
+inside the image need more). The preset lists informational `network_requirements` host names
+(crates.io, GitHub, npm/yarn, Go proxy/sum, RubyGems); the script prints them before the paid-run
+confirmation, and `manifest.json`/`execution.json` record the names. **Your `PEPI_EVAL_NETWORK`
+must allow them; the runner does not verify egress policy.** With registry and GitHub access the
+agent could also fetch the upstream repository and its later history; that leak is not closed.
+
+### Agent image on non-Python task images
+
+The 10 images are Ubuntu 22.04 (axios, caddy, docusaurus, fmt, gin, jq, redis) or Debian 12 (nushell,
+rubocop, tokio) with git, bash and tar, no conda, and run as root with an empty entrypoint. The agent
+layer (`evals/swebench/Dockerfile`) and the Pi command handle them as follows:
+
+- **No conda**: the Pi command activates `/opt/miniconda3`'s `testbed` env only when it exists
+  (Python images behave as before; a failing activation still stops before Pi starts).
+- **Pi's Node is isolated**: the Node image's `/usr/local` is copied to `/opt/pepi-node` and searched
+  **after** the task image's `PATH`, so the agent's `node`, `npm`, `npx` and `yarn` are the task's own
+  (Node 20 in the axios/docusaurus images, as at grading) and images without Node fall back to Pi's.
+  Pi itself always starts on its own Node through the `/opt/pepi-eval/bin/pi` wrapper (Pi needs
+  Node >= 22); pi-subagents children reuse that Node (`process.execPath`). Earlier builds put Pi's Node
+  first in `/usr/local/bin`, shadowing the task's Node and leaving dangling `yarn`/`yarnpkg` links
+  (the Node image's yarn lives in `/opt/yarn-*`, which was never copied); those links are now removed.
+  `/opt/pi/node_modules/.bin` (Pi's dependency tools) is no longer on `PATH`.
+- **Toolchain caches**: the agent runs as UID 10101 with `HOME=/home/pepi-eval`, while image setup ran
+  as root. `CARGO_HOME` (`/usr/local/cargo`) and `GEM_HOME` (`/usr/local/bundle`) are chowned to the
+  agent UID at build time when the image sets them, so cargo and bundler can lock, update and extend
+  the caches setup filled; `RUSTUP_HOME`, `PATH` and the variables themselves are unchanged, so
+  toolchain discovery is the image's. The chown copies those directories into the agent layer (disk).
+  Go sets no `GOPATH`; root's module cache (`/root/go`) is not readable by the agent, so Go uses
+  `$HOME/go` and `$HOME/.cache/go-build` and downloads modules through `proxy.golang.org`. npm/yarn
+  caches go to `$HOME`. C/C++ builds write inside `/testbed`, which the agent owns.
+- **Controller commands trust no task `PATH`**: the Rust and Ruby images list `CARGO_HOME/bin` and
+  `GEM_HOME/bin` before `/usr/bin`, and the agent UID owns those. Every runner `docker exec` except the Pi
+  launch passes `PATH=/usr/sbin:/usr/bin:/sbin:/bin` (`runner.CONTROLLER_ENV`); root runs procps by path
+  (`/usr/bin/pkill`, `/usr/bin/pgrep`; the layer installs procps) and the OAuth collector runs on
+  `/opt/pepi-node/bin/node`, as it did when Pi's Node was first on `PATH`. The cache handover refuses a
+  `CARGO_HOME`/`GEM_HOME` that holds one of those `PATH` directories or Pi's own (`/opt/pi`, `/opt/pepi-*`).
+- **OAuth audit preload**: `NODE_OPTIONS=--require=/opt/pepi-eval/auth-audit.cjs` (OAuth runs only) loads into
+  every Node process, including the task's Node 20 on axios/docusaurus. That is its purpose (any process that
+  could rewrite `auth.json` is journaled); it only uses `fs`, `path` and `module` (Node >= 12).
+- **Fail clearly**: the agent layer needs `apt-get` (Debian/Ubuntu) and stops with a message otherwise;
+  `useradd --uid 10101` fails on an image that already uses that UID. The runner overrides any image
+  entrypoint/`CMD` (`irb` in the rubocop image) with `sleep infinity`.
+
+### Git history after the task base
+
+Task images can keep tags, branches, remote-tracking refs and reflogs that reach commits after the
+task base, i.e. the reference fix ([SWE-bench #578](https://github.com/swe-bench/SWE-bench/issues/578):
+the Multilingual axios image had 116 tags and 515 later commits; Verified images keep the cloned
+upstream refs too). After the baseline check and before Pi starts, every attempt runs
+`runner.HISTORY_PRUNE_SCRIPT` as the agent UID: it removes the remotes, every ref except the checked-out
+branch (none for a detached HEAD) and the tags whose commit is HEAD or an ancestor of it, pseudo-refs
+(`FETCH_HEAD`, `ORIG_HEAD`, ...), reflogs, `.keep` markers and commit-graph files, then `git gc
+--prune=now`. HEAD and its ancestors stay, so `git log`, `git blame` and `git describe` (setuptools_scm and
+versioneer versions, e.g. matplotlib's `__version__`) work as before and exported patches (diffed against
+HEAD) are unchanged. Ancestry decides, not tag names or dates: a tag on a later commit goes; the message of an
+annotated tag kept on an ancestor may postdate that commit.
+It refuses repositories with alternate object stores or linked worktrees.
+
+`run --history-prune-timeout SECONDS` (`PEPI_EVAL_HISTORY_PRUNE_TIMEOUT`, default 120; `0` disables)
+bounds it; setup time includes it. A prune failure never aborts the attempt: `attempt.json` records
+`history_pruning` (`status` `pruned`, `refs_only` when refs went but gc timed out or failed, so later
+objects may remain readable by hash or via `git fsck --lost-found`, `failed`, or `skipped`; plus
+`refs_removed`, `remotes_removed`, `seconds`) and adds a `history_not_pruned: ...` error. On a timeout
+the runner kills the agent UID's processes (the still-running gc) and removes stale `*.lock` files
+before Pi starts. `summary.json`/`summary.csv` carry `history_pruning` per task and
+`tasks_history_not_pruned`; `summary.md` notes them and narrate names those tasks as an integrity
+caveat. `execution.json` records `history_pruning` (policy and timeout), so `compare` shows runs from
+before this change as a configuration difference.
+
+### Restored checkout on Multilingual scripts
+
+All 10 eval scripts use the rewritable `git checkout <base> <test files>` form (rubocop lists two
+paths), except tokio's, which resets its new test file with `rm -f`: a script without a checkout line
+never lists an edited file, so `--restore-test-files` never selects it (`not_listed`, official outcome
+kept). Across all 300 Multilingual scripts, 259 are rewritable, 21 have no checkout line and 20 are
+unrewritable (restored outcome unknown).
+
+### To verify with a real run
+
+Not verifiable without Docker; check one task per language before a full run:
+
+1. Build: the agent layer builds on an Ubuntu 22.04 and a Debian 12 image; `pi --version` works via the
+   wrapper and `node --version` in the agent's shell is the task's (`v20` on axios/docusaurus).
+2. JS: `yarn test` (docusaurus) and `npx mocha` (axios) run in the agent's shell as UID 10101.
+3. Rust: `cargo test` (tokio, nushell) as the agent UID, with `CARGO_HOME` agent-owned; tokio needs
+   `index.crates.io`.
+4. Go: `go test` (caddy, gin) downloads modules through `proxy.golang.org` into `$HOME/go`.
+5. Ruby: `bundle exec rspec` (rubocop) with the chowned `GEM_HOME`.
+6. C/C++: `ctest` (fmt), `make check` (jq), `./runtest` (redis) inside `/testbed`.
+7. History: `history_pruning.status` is `pruned` within 120 s on the largest repos (nushell, redis,
+   and Verified's django) under amd64 emulation; `git tag`, `git branch -a` and `git log --all` show
+   nothing after the base.
+8. pi-subagents children and any MCP server start (provisioned `#!/usr/bin/env node` servers pinned to
+   `/opt/pepi-node/bin/node`).
+9. Controller `PATH`: `docker exec --env PATH=...` governs command lookup (expected from runc), `/usr/bin/pkill`
+   and `/usr/bin/pgrep` exist after the procps install on Ubuntu 22.04 / Debian 12, and `git`, `sh`, `ln` and
+   `tar` resolve under `/usr/sbin:/usr/bin:/sbin:/bin` in the Python and Multilingual images.
+10. History pruning keeps ancestor tags: `git describe --tags` and, on a matplotlib task,
+    `python -c "import matplotlib; print(matplotlib.__version__)"` match an unpruned container.
+
 ## Tests
 
 ```sh
@@ -462,10 +633,12 @@ setup before treating a score as a benchmark result. It must settle, at least:
 - OAuth endpoint access/rotation on the pinned inspected Pi 1.1.0 auth-write contract,
   and that Docker accepts `uid=` on `--tmpfs`;
 - installed package loading matches the frozen settings restored after `pi install`,
-  and that `COPY --from=agent /usr/local/` keeps the task image working;
+  and that Pi's Node under `/opt/pepi-node` (after the task's `PATH`) keeps the task image working
+  (see [To verify with a real run](#to-verify-with-a-real-run));
 - that `pi` accepts `--append-system-prompt <file>` and `@/input/issue.md`, that
-  `load_task_repo(path, ids)` has the assumed signature, and that `/testbed/.git` holds no
-  refs or reflog entries after the baseline commit.
+  `load_task_repo(path, ids)` has the assumed signature, and that after
+  [history pruning](#git-history-after-the-task-base) `/testbed/.git` holds no ref, reflog entry or
+  object after the task base (`history_pruning.status` is `pruned`).
 
 Python 3.10+ is checked at start-up. Run tests with `PYTHONDONTWRITEBYTECODE=1`.
 

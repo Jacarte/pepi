@@ -118,9 +118,12 @@ def make_profile(root: Path, build: Path, versions: dict, config_dir: Path | Non
 def prepare_run(root: Path, run: Path, tasks: list[dict], ids: list[str], versions: dict,
                 node_image: str, dataset: str = DATASET, task_revision: str | None = None,
                 config_dir: Path | None = None, config_label: str | None = None,
-                drop_mcp: bool = False, profile_name: str | None = None) -> dict:
+                drop_mcp: bool = False, profile_name: str | None = None,
+                task_inputs: dict | None = None) -> dict:
     rows = sanitize_tasks(tasks, ids, dataset)
-    selection = selection_record(ids, rows, dataset, task_revision)
+    selection = selection_record(ids, rows, dataset, task_revision, task_inputs)
+    # Informational host names a preset's builds fetch from (names only); absent for Verified20.
+    network_requirements = (selection.get("preset") or {}).get("network_requirements") or []
     for value in versions.values():
         if value is not None:
             version(value)
@@ -144,6 +147,9 @@ def prepare_run(root: Path, run: Path, tasks: list[dict], ids: list[str], versio
             "pepi_revision": git_revision(HERE), "pepi_dirty": git_dirty(HERE),
             "task_repo_revision": task_revision, "selection": selection, "profile_sha256": digest,
             "versions": versions, "node_image": node_image, "tasks": rows,
+            # Optional keys are omitted when unused, so Verified20 manifests keep their shape.
+            **({"task_input_fingerprints": task_inputs} if task_inputs is not None else {}),
+            **({"network_requirements": network_requirements} if network_requirements else {}),
             "profile_policy": "isolated; keeps model/role config, AGENTS.md and workflows; "
                               + ("native MCP disabled; " if drop_mcp else "native MCP enabled; ")
                               + "drops gateway tools, personal skills, memory and router packages",

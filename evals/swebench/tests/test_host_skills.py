@@ -25,7 +25,7 @@ from evals.swebench.host_skills import (FORBIDDEN_REASON, HOST_SKILLS_SHA256_ENV
                                         stage_skills)
 from evals.swebench.prepare import prepare_run
 from evals.swebench.reporting import COMPARABLE_PROTOCOL_KEYS, configuration_differences
-from evals.swebench.runner import SKILLS_DIR, run_tasks
+from evals.swebench.runner import CONTROLLER_ENV, SKILLS_DIR, run_tasks
 from evals.swebench.tests import test_host_mcp
 from evals.swebench.tests.test_ci import ENV, RecordingDocker, write_settings
 from evals.swebench.tests.test_cli_script import ScriptHarness
@@ -361,7 +361,8 @@ class RunnerTests(unittest.TestCase):
         extract = next(command for command in docker.commands if "tar" in command)
         self.assertEqual(extract[:2], ("exec", "-i"))
         self.assertNotIn("--user", extract)  # root extracts: the agent UID cannot write
-        self.assertEqual(extract[3:], ("tar", "-x", "-f", "-", "-C", SKILLS_DIR))
+        self.assertEqual(extract[2:4], CONTROLLER_ENV)
+        self.assertEqual(extract[5:], ("tar", "-x", "-f", "-", "-C", SKILLS_DIR))
         self.assertIn(skills_archive(skills), [kwargs.get("input") for kwargs in docker.kwargs])
         self.assertFalse(any(BODY in arg for command in docker.commands for arg in command))
         execution = read_json(self.run / "execution.json")

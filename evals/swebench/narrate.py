@@ -50,11 +50,17 @@ Rules:
   that run (for example a forwarded environment variable name or whether auth.json was present). The values
   are names, labels and presence flags only, never secret values. You may mention them as the likely context
   of the differences, but do not claim they caused any win, regression or change.
+- A run's network_requirements lists host names its task preset's builds may fetch from (informational;
+  the operator-managed network policy is not verified). If non-empty, mention them once as context and do
+  not attribute any outcome to network access.
 - A run's infrastructure_failures lists tasks whose agent_status (agent_error, timeout, setup_error,
   runner_error, interrupted, not_started, unfinished_children) means the agent did not get a fair attempt.
   Call these infrastructure/agent failures, never model failures, and list them separately from tasks that
   completed but were unresolved. For a timeout, say the agent hit the time limit (a partial patch may exist)
   instead of calling it a model failure.
+- A run's history_not_pruned lists tasks whose agent ran before git history after the task base (which can
+  hold the reference fix) was fully removed from the task image's repository. If non-empty, name those tasks
+  once as an integrity caveat; do not claim the agent looked at that history.
 - A comparison's tasks_with_infrastructure_failure_in_either_run says which side(s) failed to run each task.
   When only one side failed, say the comparison for that task is not meaningful (even if it counts as a win
   or regression).
@@ -471,6 +477,11 @@ def skills_differences(baseline: dict, candidate: dict) -> dict:
                                       if sides[0][name] != sides[1][name])}
 
 
+def history_not_pruned(summary: dict) -> list:
+    return sorted(row["instance_id"] for row in summary["instances"]
+                  if row.get("history_pruning") in ("refs_only", "failed"))
+
+
 def infrastructure_failures(summary: dict) -> list:
     return sorted(row["instance_id"] for row in summary["instances"]
                   if row["agent_status"] in INFRASTRUCTURE_FAILURE_STATUSES)
@@ -508,6 +519,13 @@ def test_edit_facts(summary: dict) -> dict:
             "tasks": sorted(row["instance_id"] for row in modified)[:TEST_EDIT_TASKS_LISTED]}
 
 
+def network_requirement_facts(summary: dict) -> list:
+    """A preset's informational outbound host names from execution.json (names only)."""
+    protocol = summary.get("protocol") if isinstance(summary.get("protocol"), dict) else {}
+    names = protocol.get("network_requirements")
+    return [safe_name(name) for name in names][:20] if isinstance(names, list) else []
+
+
 def run_facts(run: Path, summary: dict, usage: dict) -> dict:
     latency, resolved_latency, turns = (summary[key] for key in
                                         ("latency_all_seconds", "latency_resolved_seconds", "turns_observed"))
@@ -523,10 +541,12 @@ def run_facts(run: Path, summary: dict, usage: dict) -> dict:
         "observed_estimated_cost_usd": summary["observed_estimated_cost_usd"],
         "available_accounting_tasks": summary["available_accounting_tasks"],
         "infrastructure_failures": infrastructure_failures(summary),
+        "history_not_pruned": history_not_pruned(summary),
         "tasks": [task_facts(run, row) for row in summary["instances"]],
         "tool_usage": tool_usage_facts(usage), "subagent_usage": subagent_usage_facts(usage),
         "mcp": mcp_facts(summary, usage), "skills": skills_facts(summary, usage),
         "test_edits": test_edit_facts(summary),
+        "network_requirements": network_requirement_facts(summary),
     }
 
 
@@ -621,7 +641,7 @@ def scrub_values(value):
 
 
 # configuration_differences keys whose values are lists of names; each item is passed through safe_name.
-CONFIGURATION_NAME_LISTS = ("mcp_servers", "forwarded_env_names")
+CONFIGURATION_NAME_LISTS = ("mcp_servers", "forwarded_env_names", "network_requirements")
 
 
 def safe_name_lists(differences: dict) -> dict:

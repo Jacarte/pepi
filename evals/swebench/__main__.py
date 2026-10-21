@@ -14,10 +14,20 @@ from pathlib import Path
 if sys.version_info < (3, 10):
     raise SystemExit("pepi-eval: Python 3.10+ is required")
 
-from .common import DATASET, git_revision, positive  # noqa: E402
+from .common import DATASET, git_revision, non_negative, positive  # noqa: E402
 from .prepare import prepare_run, selected_ids  # noqa: E402
-from .preset import DEFAULT_IDS, definition  # noqa: E402
-from .runner import EXIT_INFRA, EXIT_USAGE, build_images, run_tasks  # noqa: E402
+from .preset import (DEFAULT_IDS, DEFAULT_PRESET, MULTILINGUAL_IDS, PRESET_NAMES, definition,  # noqa: E402
+                     multilingual_definition, preset_dataset, preset_ids, requires_task_inputs,
+                     task_input_fingerprints)
+from .runner import EXIT_INFRA, EXIT_USAGE, HISTORY_PRUNE_TIMEOUT, build_images, run_tasks  # noqa: E402
+
+
+class ExplicitIds(argparse.Action):
+    """Records that --ids was given, so --preset only replaces the default IDs file."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        setattr(namespace, self.dest, values)
+        namespace.ids_explicit = True
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -37,10 +47,13 @@ def build_parser() -> argparse.ArgumentParser:
     prepare.add_argument("--drop-mcp", action="store_true",
                          help="disable native MCP explicitly (enabled by default with Pi >= 1.1.0)")
     prepare.add_argument("--task-repo", type=Path, required=True)
-    prepare.add_argument("--ids", type=Path, default=DEFAULT_IDS,
-                         help="ordered IDs file (default: frozen custom Verified20 v1)")
+    prepare.add_argument("--preset", choices=PRESET_NAMES, default=DEFAULT_PRESET,
+                         help="frozen preset supplying the default --ids and --dataset (default: %(default)s)")
+    prepare.add_argument("--ids", type=Path, default=DEFAULT_IDS, action=ExplicitIds,
+                         help="ordered IDs file (default: the preset's IDs; frozen custom Verified20 v1)")
+    prepare.set_defaults(ids_explicit=False)
     prepare.add_argument("--out", type=Path, required=True)
-    prepare.add_argument("--dataset", default=DATASET)
+    prepare.add_argument("--dataset", help=f"dataset name (default: the preset's; {DATASET})")
     prepare.add_argument("--pi-version", required=True)
     prepare.add_argument("--litellm-version", help="exact pin required only for LiteLLM models")
     prepare.add_argument("--subagents-version", required=True)
@@ -65,6 +78,9 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--skills-dir", type=Path,
                      help="chmod-700 directory of skill directories (each with SKILL.md); mounted read-only "
                           "at /opt/pepi-agent/skills for Pi to discover")
+    run.add_argument("--history-prune-timeout", type=non_negative, default=HISTORY_PRUNE_TIMEOUT,
+                     help="seconds for removing git refs/objects after the task base before the agent starts "
+                          f"(0 disables; default: {HISTORY_PRUNE_TIMEOUT:g})")
     return parser
 
 
@@ -78,25 +94,32 @@ def main(argv=None) -> int:
     signal.signal(signal.SIGTERM, _raise_interrupt)
     try:
         if args.command == "prepare":
+            default = args.preset == DEFAULT_PRESET
+            ids_path = args.ids if args.ids_explicit or default else preset_ids(args.preset)
+            dataset = args.dataset or (DATASET if default else preset_dataset(args.preset))
             # A changed shipped default must fail, not become an ordinary custom selection.
-            if args.ids.resolve() == DEFAULT_IDS.resolve():
+            if ids_path.resolve() == DEFAULT_IDS.resolve():
                 definition()
+            elif ids_path.resolve() == MULTILINGUAL_IDS.resolve():
+                multilingual_definition()
             # Import only here: tests/reporting do not require the grading package.
             from swebench.task.repo import load_task_repo
-            ids = selected_ids(args.ids)
+            ids = selected_ids(ids_path)
+            task_inputs = task_input_fingerprints(args.task_repo, ids) if requires_task_inputs(ids) else None
             prepare_run(args.pepi_root.resolve(), args.out.resolve(),
                         load_task_repo(args.task_repo, ids), ids,
                         {"pi": args.pi_version, "pi-provider-litellm": args.litellm_version,
-                         "pi-subagents": args.subagents_version}, args.node_image, args.dataset,
+                         "pi-subagents": args.subagents_version}, args.node_image, dataset,
                         git_revision(args.task_repo),
                         args.config_dir.absolute() if args.config_dir else None,
-                        args.config_label, args.drop_mcp, args.profile)
+                        args.config_label, args.drop_mcp, args.profile, task_inputs)
         elif args.command == "build":
             build_images(args.run.resolve(), args.platform)
         elif args.command == "run":
             return run_tasks(args.run.resolve(), args.timeout_seconds, args.network, str(args.cpus),
                              args.memory, args.secrets_dir.absolute() if args.secrets_dir else None,
-                             args.pass_env, args.skills_dir.absolute() if args.skills_dir else None)
+                             args.pass_env, args.skills_dir.absolute() if args.skills_dir else None,
+                             history_prune_timeout=args.history_prune_timeout)
     except (ValueError, OSError, ImportError, KeyError) as error:
         print(f"pepi-eval: {error}", file=sys.stderr)
         return EXIT_USAGE

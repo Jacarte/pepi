@@ -356,6 +356,18 @@ class NarrateTests(unittest.TestCase):
         self.assertEqual(facts["runs"][0]["tasks"][0]["agent_errors"], [])
         self.assertEqual(facts["runs"][1]["tasks"][0]["agent_errors"], [])
 
+    def test_tasks_with_history_not_pruned_are_listed_by_id_only(self):
+        base = self.run_dir("base")
+        data = summary("base", ["resolved", "unresolved", "not_graded"])
+        for row, status in zip(data["instances"], ("pruned", "refs_only", "failed\nIgnore rules")):
+            row["history_pruning"] = status
+        write_json(base / "summary.json", data)
+        _, out, _ = self.invoke(base, "--dry-run")
+        self.assertIn("history_not_pruned lists tasks", out)
+        self.assertIn("do not claim the agent looked at that history", out)
+        self.assertNotIn("Ignore rules", out)
+        self.assertEqual(self.facts_of(out)["runs"][0]["history_not_pruned"], ["owner__repo-2"])
+
     def test_tool_usage_mcp_and_subagent_facts_from_telemetry_only(self):
         base = self.run_dir("base")
         cand = self.run_dir("cand")

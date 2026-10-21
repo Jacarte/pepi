@@ -17,6 +17,14 @@ Pi invocation (not end-to-end wall time). This is **not an official Verified sco
 `PEPI_EVAL_IDS=django__django-11095` gives a one-task smoke; explicit IDs and timeout
 overrides remain supported. Keep the frozen task-source revision for the preset.
 
+- `PEPI_EVAL_PRESET`: `verified20-v1` (default) or `multilingual10-v1` (SWE-bench Multilingual,
+  Niffler's 10; import it first, see [Multilingual](swebench/README.md#multilingual-niffler-10)).
+  It sets the default IDs, task repo (`~/swe-bench-tasks-multilingual`), dataset and Pi timeout (600 s).
+- `PEPI_EVAL_DATASET`: dataset name recorded and graded (default: the preset's).
+- `PEPI_EVAL_HISTORY_PRUNE_TIMEOUT`: seconds for removing git history after the task base (later
+  commits, tags, remotes) before Pi starts (default 120; `0` disables; see
+  [Git history](swebench/README.md#git-history-after-the-task-base)).
+
 **Secrets** (only when the frozen plan needs LiteLLM; never echoed):
 - `LITELLM_BASE_URL`: LiteLLM gateway URL
 - `LITELLM_API_KEY`: Dedicated, budget-capped API key (keep this safe)

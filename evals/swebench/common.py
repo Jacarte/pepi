@@ -41,6 +41,13 @@ def positive(value: str) -> float:
     return result
 
 
+def non_negative(value: str) -> float:
+    result = float(value)
+    if not math.isfinite(result) or result < 0:
+        raise ValueError("Expected a finite number >= 0")
+    return result
+
+
 def read_json(path: Path):
     return json.loads(path.read_text(encoding="utf-8"))
 

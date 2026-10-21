@@ -12,7 +12,7 @@ from evals.swebench import __main__ as cli
 from evals.swebench import runner
 from evals.swebench.common import read_json, read_manifest, write_json
 from evals.swebench.prepare import prepare_run
-from evals.swebench.runner import (PI_COMMAND, SECRET_DIR, Secrets, build_images, run_one, run_tasks,
+from evals.swebench.runner import (PGREP, PI_COMMAND, PKILL, SECRET_DIR, Secrets, build_images, run_one, run_tasks,
                                    stop_agents)
 from evals.swebench.tests.test_runner import TASK, VERSIONS, FakeDocker, prepare_fixture
 
@@ -292,22 +292,22 @@ class RunnerFixTests(unittest.TestCase):
         class Docker:
             def __init__(self): self.commands, self.alive = [], 2
             def call(self, *args, **kwargs):
-                self.commands.append(args[2])
-                if args[2] == "pgrep":
+                self.commands.append(args[4])
+                if args[4] == PGREP:
                     if self.alive:
                         self.alive -= 1
                         return SimpleNamespace()
                     raise subprocess.CalledProcessError(1, args)
-                if args[2] == "pkill":
+                if args[4] == PKILL:
                     raise subprocess.CalledProcessError(1, args)
         docker = Docker()
         stop_agents(docker, "c")
-        self.assertEqual(docker.commands.count("pkill"), 3)
+        self.assertEqual(docker.commands.count(PKILL), 3)
 
     def test_stop_agents_gives_up_and_surfaces_other_errors(self):
         class Survivors:
             def call(self, *args, **kwargs):
-                if args[2] == "pkill":
+                if args[4] == PKILL:
                     raise subprocess.CalledProcessError(1, args)
                 return SimpleNamespace()
         with patch("evals.swebench.runner.time.monotonic", side_effect=[0, 0, 11]), \
