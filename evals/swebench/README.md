@@ -188,6 +188,15 @@ without a provider plan remain usable; reprepare to adopt the new profile policy
 
 ## CI: injected configuration and secrets
 
+The repository's GitHub Actions workflow (`.github/workflows/pepi-evals.yml`, label `run-evals`)
+follows this flow with `python -m evals.swebench.ci` and `evals/ci/*.sh`; see
+[CI (GitHub Actions)](../README.md#ci-github-actions) for its setup (secrets in the `pepi-evals`
+environment with required reviewers, eval jobs on a self-hosted runner by default), cache, public
+artifacts and security model.
+`PEPI_EVAL_*` names belong to the workflow and are refused in its `EVAL_ENV` secret, and the
+destructive runner scripts (`evals/ci/free-disk.sh`, `prune-images.sh`) refuse to run outside
+GitHub Actions.
+
 Benchmark different configurations by injecting files after cloning (for example
 from GitHub secrets). Order matters: the frozen profile is hashed at `prepare`.
 

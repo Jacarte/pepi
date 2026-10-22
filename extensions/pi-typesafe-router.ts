@@ -2,12 +2,15 @@ import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { Type } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
 
 // Relative to this extension, NOT the worker's cwd/worktree.
 const MODELS_FILE = resolve(__dirname, "..", "models-router.json");
 const LOG_FILE = resolve(__dirname, "..", "logs", "router.log");
 const ENDPOINT = "https://api.typesafe.ai/v1/systemone";
 const TIMEOUT_MS = 2_000;
+// Below this, hard tasks go to CHEAP (sonnet) instead of FRONTIER (opus).
+const FRONTIER_MIN = 0.85;
 const LANES = ["LOCAL", "CHEAP", "FRONTIER"] as const;
 type Lane = (typeof LANES)[number];
 type Target = { provider: string; id: string };
@@ -112,6 +115,22 @@ export default function(pi: ExtensionAPI) {
       })),
     }, { additionalProperties: false }),
 
+    renderResult(result, { isPartial }, theme) {
+      if (isPartial) return new Text(theme.fg("warning", "Jev routing..."), 0, 0);
+      const d = result.details as {
+        action: string; lane: string; model: string; changed: boolean;
+        scores: { hard: number; trivial: number };
+      } | undefined;
+      if (!d) return new Text(theme.fg("error", "Jev router: no decision"), 0, 0);
+      const pct = (n: number) => `${Math.round(n * 100)}%`;
+      return new Text(
+        theme.fg("success", `Jev: ${d.lane} → ${d.model}`) +
+          theme.fg("dim", ` (${d.action}${d.changed ? ", switched" : ""}; ` +
+            `hard ${pct(d.scores.hard)}, trivial ${pct(d.scores.trivial)})`),
+        0, 0,
+      );
+    },
+
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       const task = params.task.trim();
       if (!task) throw new Error("Jev router: task must not be blank.");
@@ -146,8 +165,7 @@ export default function(pi: ExtensionAPI) {
         hard: probability(answers, "hard"),
         trivial: probability(answers, "trivial"),
       };
-      // Preserve the original effective thresholds and priority order.
-      const lane: Lane = scores.hard >= 0.5 ? "FRONTIER"
+            const lane: Lane = scores.hard >= FRONTIER_MIN ? "FRONTIER"
         : scores.trivial >= 0.5 ? "LOCAL" : "CHEAP";
       const target = models[lane];
       const model = ctx.modelRegistry.find(target.provider, target.id);
@@ -205,7 +223,11 @@ export default function(pi: ExtensionAPI) {
         },
       };
       return {
-        content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
+        content: [{
+          type: "text" as const,
+          text: `Jev decision: ${lane} → ${fullId(target)} (hard ${Math.round(scores.hard * 100)}%, trivial ${Math.round(scores.trivial * 100)}%${changed ? ", switched" : ""})\n\n` +
+            JSON.stringify(result, null, 2),
+        }],
         details: result,
       };
     },
