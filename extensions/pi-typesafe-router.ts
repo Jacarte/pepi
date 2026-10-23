@@ -10,7 +10,7 @@ const LOG_FILE = resolve(__dirname, "..", "logs", "router.log");
 const ENDPOINT = "https://api.typesafe.ai/v1/systemone";
 const TIMEOUT_MS = 2_000;
 // Below this, hard tasks go to CHEAP (sonnet) instead of FRONTIER (opus).
-const FRONTIER_MIN = 0.85;
+const FRONTIER_MIN = 0.7;
 const LANES = ["LOCAL", "CHEAP", "FRONTIER"] as const;
 type Lane = (typeof LANES)[number];
 type Target = { provider: string; id: string };
@@ -125,8 +125,8 @@ export default function(pi: ExtensionAPI) {
       const pct = (n: number) => `${Math.round(n * 100)}%`;
       return new Text(
         theme.fg("success", `Jev: ${d.lane} → ${d.model}`) +
-          theme.fg("dim", ` (${d.action}${d.changed ? ", switched" : ""}; ` +
-            `hard ${pct(d.scores.hard)}, trivial ${pct(d.scores.trivial)})`),
+        theme.fg("dim", ` (${d.action}${d.changed ? ", switched" : ""}; ` +
+          `hard ${pct(d.scores.hard)}, trivial ${pct(d.scores.trivial)})`),
         0, 0,
       );
     },
@@ -165,7 +165,7 @@ export default function(pi: ExtensionAPI) {
         hard: probability(answers, "hard"),
         trivial: probability(answers, "trivial"),
       };
-            const lane: Lane = scores.hard >= FRONTIER_MIN ? "FRONTIER"
+      const lane: Lane = scores.hard >= FRONTIER_MIN ? "FRONTIER"
         : scores.trivial >= 0.5 ? "LOCAL" : "CHEAP";
       const target = models[lane];
       const model = ctx.modelRegistry.find(target.provider, target.id);
