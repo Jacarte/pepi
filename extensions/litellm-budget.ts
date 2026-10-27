@@ -13,6 +13,8 @@
  * Config resolution order (no hardcoded gateway; nothing org-specific here):
  *   API key : LITELLM_API_KEY -> LLM_GATEWAY_API_KEY -> TRUSTLY_LLM_GATEWAY_API_KEY
  *             -> auth.json (litellm.key)
+ *   Budget  : key max_budget -> team-membership budget (/team/info) when the key has none
+ *             LITELLM_MAX_BUDGET overrides the cap (USD) when the gateway exposes none
  *   Base URL: LITELLM_BASE_URL -> LLM_GATEWAY_URL -> auth.json (litellm.env.LITELLM_BASE_URL)
  *
  * If no base URL resolves, the extension stays silent rather than guessing a host.
@@ -34,6 +36,8 @@ type BudgetInfo = {
 	budgetDuration: string | null;
 	budgetResetAt: string | null;
 	keyAlias: string | null;
+	/** Where the budget numbers came from. */
+	source: "key" | "team-membership";
 };
 
 // ---------------------------------------------------------------------------
@@ -87,27 +91,82 @@ function resolveConfig(): { apiKey: string; baseUrl: string } {
 // Fetch
 // ---------------------------------------------------------------------------
 
-async function fetchBudgetInfo(baseUrl: string, apiKey: string): Promise<BudgetInfo> {
-	// Strip a trailing /v1 so both gateway styles work.
-	const url = `${baseUrl.replace(/\/+$/, "").replace(/\/v1$/, "")}/key/info`;
+async function getJson(url: string, apiKey: string): Promise<Record<string, unknown>> {
 	const resp = await fetch(url, {
 		headers: { accept: "application/json", "x-litellm-api-key": apiKey },
 		signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
 	});
 	if (!resp.ok) throw new Error(`HTTP ${resp.status} ${resp.statusText}`);
+	return (await resp.json()) as Record<string, unknown>;
+}
 
-	const json = (await resp.json()) as Record<string, unknown>;
+const num = (v: unknown): number | null => (typeof v === "number" ? v : null);
+const str = (v: unknown): string | null => (typeof v === "string" ? v : null);
+
+/** Optional manual cap (USD) for when the gateway does not expose the real one. */
+function overrideBudget(): number | null {
+	const n = Number(cleanEnv(process.env.LITELLM_MAX_BUDGET));
+	return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+/**
+ * Per-user budget from the team membership (resets each cycle). Returns null
+ * if the user is not a member or the call fails: the key view still works.
+ */
+async function fetchMembershipBudget(
+	root: string,
+	apiKey: string,
+	teamId: string,
+	userId: string,
+): Promise<Pick<BudgetInfo, "spend" | "maxBudget" | "budgetDuration" | "budgetResetAt"> | null> {
+	try {
+		const json = await getJson(`${root}/team/info?team_id=${encodeURIComponent(teamId)}`, apiKey);
+		const members = (json.team_memberships ?? []) as Array<Record<string, unknown>>;
+		const m = members.find((x) => x.user_id === userId);
+		if (!m) return null;
+		const table = (m.litellm_budget_table ?? {}) as Record<string, unknown>;
+		return {
+			spend: num(m.spend) ?? 0,
+			maxBudget: num(table.max_budget),
+			budgetDuration: str(table.budget_duration),
+			budgetResetAt: str(table.budget_reset_at),
+		};
+	} catch {
+		return null;
+	}
+}
+
+async function fetchBudgetInfo(baseUrl: string, apiKey: string): Promise<BudgetInfo> {
+	// Strip a trailing /v1 so both gateway styles work.
+	const root = baseUrl.replace(/\/+$/, "").replace(/\/v1$/, "");
+	const json = await getJson(`${root}/key/info`, apiKey);
 	const info = (json.info ?? json) as Record<string, unknown>;
-	const num = (v: unknown): number | null => (typeof v === "number" ? v : null);
-	const str = (v: unknown): string | null => (typeof v === "string" ? v : null);
 
-	return {
+	const result: BudgetInfo = {
 		spend: num(info.spend) ?? 0,
 		maxBudget: num(info.max_budget),
 		budgetDuration: str(info.budget_duration),
 		budgetResetAt: str(info.budget_reset_at),
 		keyAlias: str(info.key_alias),
+		source: "key",
 	};
+
+	const override = overrideBudget();
+	const keyHasCap = result.maxBudget !== null && result.maxBudget > 0;
+	const teamId = str(info.team_id);
+	const userId = str(info.user_id);
+
+	// Key has no cap: the key's `spend` is lifetime and never resets, so use the
+	// per-user team-membership budget (cycle spend + cap) when one exists.
+	if (!keyHasCap && teamId && userId) {
+		const m = await fetchMembershipBudget(root, apiKey, teamId, userId);
+		if (m && (override !== null || (m.maxBudget !== null && m.maxBudget > 0))) {
+			Object.assign(result, m, { source: "team-membership" as const });
+		}
+	}
+	if (!keyHasCap && override !== null) result.maxBudget = override;
+
+	return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -283,6 +342,7 @@ export default function (pi: ExtensionAPI) {
 
 			lines.push(`Gateway:   ${baseUrl}`);
 			if (d.keyAlias) lines.push(`Key:       ${d.keyAlias}`);
+			lines.push(`Source:    ${d.source === "team-membership" ? "team membership budget" : "key budget"}`);
 			lines.push(`Spent:     ${formatMoney(d.spend)}${hasMax ? ` / ${formatMoney(d.maxBudget!)}` : ""}`);
 
 			if (hasMax) {

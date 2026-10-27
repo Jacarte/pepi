@@ -2,6 +2,9 @@
 # Select a profile and overlay its immediate files onto this script's directory.
 # A profile may contain settings.json, mcp.json and models-router.json; only
 # files actually present are copied. Unrelated root files are left untouched.
+#
+# Usage: profile.sh          interactive menu
+#        profile.sh NAME     non-interactive (CI): apply profiles/NAME, no terminal use
 
 fail() {
     printf 'Error: %s\n' "$1" >&2
@@ -39,6 +42,22 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 trap 'exit 129' HUP
 trap 'exit 131' QUIT
+
+selected=''
+if [[ $# -gt 1 ]]; then
+    fail 'Usage: profile.sh [NAME]'
+elif [[ $# -eq 1 ]]; then
+    # Non-interactive mode: never touch the terminal; the name must be one of the
+    # discovered profile directories (no paths, no hidden names).
+    name=$1
+    [[ -n "$name" && "$name" != .* && "$name" != */* ]] || fail "Invalid profile name: '$name'."
+    for entry in "${profiles[@]}"; do
+        [[ "${entry##*/}" == "$name" ]] && selected=$entry
+    done
+    [[ -n "$selected" ]] || fail "Unknown profile: '$name'."
+fi
+
+if [[ -z "$selected" ]]; then
 if [[ -t 0 ]]; then
     terminal_state=$(stty -g) || fail 'Could not read terminal state.'
     stty -icanon -echo min 1 time 0 || fail 'Could not set terminal mode.'
@@ -120,6 +139,7 @@ while :; do
     esac
 done
 restore_terminal || fail 'Could not restore terminal state.'
+fi
 
 files=()
 for entry in "$selected"/*; do

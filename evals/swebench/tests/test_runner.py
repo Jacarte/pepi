@@ -8,13 +8,14 @@ from unittest.mock import patch
 
 from evals.swebench.common import DATASET, identifier, positive, read_manifest, version
 from evals.swebench.prepare import prepare_run, sanitize_tasks, selected_ids
-from evals.swebench.runner import PI_COMMAND, export_patch, run_one, run_tasks
+from evals.swebench.runner import (CONTROLLER_ENV, HISTORY_PRUNE_SCRIPT, PGREP, PI_COMMAND, PI_NODE, PKILL, export_patch,
+                                   run_one, run_tasks)
 
 TASK = {"instance_id": "owner__repo-1", "repo": "owner/repo", "base_commit": "a" * 40,
         "image": "swebench/example@sha256:" + "b" * 64, "problem_statement": "Fix a bug.\n",
         "datasets": [DATASET], "split": "test", "patch": "SECRET GOLD",
         "test_patch": "SECRET TEST", "FAIL_TO_PASS": ["hidden_test"]}
-VERSIONS = {"pi": "0.87.1", "pi-provider-litellm": "3.0.1", "pi-subagents": "0.68.0"}
+VERSIONS = {"pi": "1.1.0", "pi-provider-litellm": "3.0.1", "pi-subagents": "0.68.0"}
 
 
 def prepare_fixture(root):
@@ -40,7 +41,7 @@ class FakeDocker:
 
     def call(self, *args, **kwargs):
         self.commands.append(args)
-        if "bash" in args and PI_COMMAND in args:
+        if "bash" in args and any(a.startswith(PI_COMMAND) for a in args):
             if self.failure == "timeout":
                 raise subprocess.TimeoutExpired(args, 1)
             if self.failure == "agent":
@@ -49,8 +50,13 @@ class FakeDocker:
                 raise KeyboardInterrupt()
         if args[0] == "create" and self.failure == "setup":
             raise subprocess.CalledProcessError(125, args)
-        if "pgrep" in args:
+        if PGREP in args:
             raise subprocess.CalledProcessError(1, args)
+        if self.failure == "dirty" and "status" in args:
+            return SimpleNamespace(stdout=b"?? dirty.py\0", returncode=0)
+        if HISTORY_PRUNE_SCRIPT in args:
+            return SimpleNamespace(stdout=b"pepi-history refs_removed=0 remotes_removed=0\npepi-history gc_done\n",
+                                   returncode=0)
         output = b"diff --git a/a b/a\nnew file mode 100644\n" if "--cached" in args else b""
         return SimpleNamespace(stdout=output, returncode=0)
 
@@ -58,8 +64,6 @@ class FakeDocker:
         self.commands.append(args)
         if "rev-parse" in args:
             return "c" * 40
-        if self.failure == "dirty" and "status" in args:
-            return "?? dirty.py"
         return ""
 
 
@@ -91,7 +95,7 @@ class PreparationTests(unittest.TestCase):
             run = prepare_fixture(Path(directory))
             manifest = read_manifest(run)
             profile = json.loads((run / "build/profile/settings.json").read_text())
-            self.assertEqual(profile["subagents"]["agentOverrides"]["worker"]["model"], "model-b")
+            self.assertEqual(profile["subagents"]["agentOverrides"]["worker"]["model"], "litellm/model-b")
             self.assertNotIn("skills", profile["subagents"]["agentOverrides"]["reviewer"])
             self.assertFalse((run / "build/profile/auth.json").exists())
             self.assertNotIn("SECRET", json.dumps(manifest))
@@ -115,6 +119,20 @@ class PreparationTests(unittest.TestCase):
         self.assertEqual(identifier("sympy__sympy-20590"), "sympy__sympy-20590")
 
 
+def assert_controller_execs_trust_no_task_path(case, commands):
+    """Every `docker exec` but the Pi launch pins CONTROLLER_ENV; root ones also name the binary by path."""
+    execs = [command for command in commands if command[0] == "exec"]
+    case.assertTrue(execs)
+    for command in execs:
+        container = next(index for index, arg in enumerate(command) if arg.startswith("pepi-eval-"))
+        if any(arg.startswith(PI_COMMAND) for arg in command):
+            case.assertNotIn(CONTROLLER_ENV[1], command, "the agent keeps the task image's PATH")
+            continue
+        case.assertEqual(command[container - 2:container], CONTROLLER_ENV, command)
+        if "--user" not in command[:container]:
+            case.assertTrue(command[container + 1].startswith("/"), command)
+
+
 class RunnerTests(unittest.TestCase):
     def run_fake(self, failure=None):
         temporary = tempfile.TemporaryDirectory()
@@ -128,7 +146,7 @@ class RunnerTests(unittest.TestCase):
         docker, row, output = self.run_fake()
         self.assertEqual(row["agent_status"], "completed")
         self.assertTrue(row["patch"].endswith("\n"))
-        kill = next(i for i, command in enumerate(docker.commands) if "pkill" in command)
+        kill = next(i for i, command in enumerate(docker.commands) if PKILL in command)
         stage = next(i for i, command in enumerate(docker.commands) if "add" in command)
         self.assertLess(kill, stage)
         self.assertIn("-A", docker.commands[stage])
@@ -140,6 +158,9 @@ class RunnerTests(unittest.TestCase):
         launch = next(command for command in docker.commands if PI_COMMAND in command)
         self.assertIn("LITELLM_API_KEY", launch)
         self.assertNotIn("-v", docker.commands[0])
+        assert_controller_execs_trust_no_task_path(self, docker.commands)
+        root = [command for command in docker.commands if command[0] == "exec" and "--user" not in command]
+        self.assertEqual({command[4] for command in root}, {PKILL, PGREP})
 
     def test_timeout_keeps_partial_patch_and_cleans_up(self):
         docker, row, _ = self.run_fake("timeout")

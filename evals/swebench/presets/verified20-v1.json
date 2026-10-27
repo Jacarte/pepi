@@ -1,0 +1,25 @@
+{
+  "id": "custom-verified20-v1",
+  "label": "Custom SWE-bench Verified 20-task subset; not an official Verified score",
+  "dataset": "SWE-bench/SWE-bench_Verified",
+  "split": "test",
+  "seed": 42,
+  "universe_count": 500,
+  "repository_count": 5,
+  "tasks_per_repository": 4,
+  "repository_order": "descending eligible count (>=4), then lexicographic repo",
+  "task_order": "ascending SHA256 hex of UTF-8 42\\n{repo}\\n{instance_id} (no trailing newline), then instance_id; repo-major/rank-major",
+  "ids_sha256": "11fa9243c458222ee0c2dadd3fde52092862bcd927a0895c6551af2de186a3b6",
+  "metadata_sha256": "70fecf8e58da1e637e7641517da0907e08d3d8d4dab62e9ff3621fa392792882",
+  "task_repo_revision": "3d07b464b7b311a0cbfb5ed5b2d8a3b96f84a33d",
+  "swebench_revision": "02e7a74ffd0b707aab73d203fe87bdc7c76afc8e",
+  "agent_baseline_revision": "edbcb635f0c0a497c37e2e433b51e41355d4aeac",
+  "selected_repositories": [
+    "django/django",
+    "sympy/sympy",
+    "sphinx-doc/sphinx",
+    "matplotlib/matplotlib",
+    "scikit-learn/scikit-learn"
+  ],
+  "membership_caveat": "Local canonical metadata scan: 2519 records, 500 unique Verified/test IDs; remote equality not independently verified. Selection consulted only instance_id/repo/datasets/split, never patches, tests or outcomes."
+}
