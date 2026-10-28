@@ -457,12 +457,15 @@ def cache_key(harness_root: Path, config_dir: Path, profile: str, preset: str, p
 # ---------------------------------------------------------------------------- secrets
 
 
-# Written into --dir by secrets-setup: proves which files setup created, so cleanup never deletes
-# anything else (e.g. when pointed at ~/.pi/agent or a project directory by mistake).
+# Sibling suffix: keep cleanup metadata outside the runner's strict auth.json/mcp.json directory.
 SECRETS_MARKER = ".pepi-ci-secrets.json"
 # The workflow sets the harness' PEPI_EVAL_* settings; in EVAL_ENV they would override them (.env wins
 # over the shell in pepi-eval.sh) and make the run differ from its cache key.
 RESERVED_ENV_PREFIX = "PEPI_EVAL_"
+
+
+def secrets_marker_path(directory: Path) -> Path:
+    return directory.parent / (directory.name + SECRETS_MARKER)
 
 
 def secrets_setup(directory: Path, launch_dir: Path, mask_file: Path) -> dict:
@@ -476,7 +479,9 @@ def secrets_setup(directory: Path, launch_dir: Path, mask_file: Path) -> dict:
     if not launch_dir.is_dir() or launch_dir.is_symlink():
         raise UsageError("--launch-dir must be an existing directory")
     env_file = launch_dir / ".env"
-    for path, flag in ((env_file, "--launch-dir already holds a .env"), (mask_file, "--mask-file already exists")):
+    marker_file = secrets_marker_path(directory)
+    for path, flag in ((env_file, "--launch-dir already holds a .env"), (mask_file, "--mask-file already exists"),
+                       (marker_file, "secrets-setup marker already exists")):
         if path.exists() or path.is_symlink():
             raise UsageError(f"Refusing to overwrite: {flag} ({path})")
     env_bytes = (env_text if env_text.endswith("\n") else env_text + "\n").encode()
@@ -488,8 +493,11 @@ def secrets_setup(directory: Path, launch_dir: Path, mask_file: Path) -> dict:
     lines = [f"::add-mask::{line.replace('%', '%25').replace(chr(13), '%0D')}"
              for value in masks for line in value.split("\n") if line.strip()]
     # The marker comes first, so cleanup can remove a partial setup.
-    marker = {"version": 1, "env_file": str(env_file.resolve()), "env_sha256": sha256_hex(env_bytes)}
-    write_private(directory / SECRETS_MARKER, (json.dumps(marker, indent=2) + "\n").encode())
+    info = directory.stat()
+    marker = {"version": 2, "secrets_dir": str(directory.resolve()),
+              "secrets_dev": info.st_dev, "secrets_ino": info.st_ino,
+              "env_file": str(env_file.resolve()), "env_sha256": sha256_hex(env_bytes)}
+    write_private(marker_file, (json.dumps(marker, indent=2) + "\n").encode())
     write_private(mask_file, ("\n".join(lines) + "\n").encode() if lines else b"")
     write_private(directory / "auth.json", auth_bytes)
     write_private(env_file, env_bytes)
@@ -498,14 +506,23 @@ def secrets_setup(directory: Path, launch_dir: Path, mask_file: Path) -> dict:
 
 
 def read_marker(directory: Path) -> dict | None:
-    path = directory / SECRETS_MARKER
+    path = secrets_marker_path(directory)
     if directory.is_symlink() or not directory.is_dir() or path.is_symlink() or not path.is_file():
         return None
     try:
+        info, marker_info = directory.stat(), path.stat()
+        if (info.st_uid != os.geteuid() or marker_info.st_uid != info.st_uid
+                or stat.S_IMODE(marker_info.st_mode) & 0o077):
+            return None
         marker = json.loads(path.read_text(encoding="utf-8"))
+        # A sibling can outlive its directory; never use it to clean a replacement at the same path.
+        if (isinstance(marker, dict) and marker.get("version") == 2
+                and marker.get("secrets_dir") == str(directory.resolve())
+                and marker.get("secrets_dev") == info.st_dev and marker.get("secrets_ino") == info.st_ino):
+            return marker
     except (OSError, ValueError, UnicodeDecodeError):
-        return None
-    return marker if isinstance(marker, dict) and marker.get("version") == 1 else None
+        pass
+    return None
 
 
 def secrets_cleanup(directory: Path | None, launch_dir: Path | None, mask_file: Path | None) -> dict:
@@ -529,9 +546,9 @@ def secrets_cleanup(directory: Path | None, launch_dir: Path | None, mask_file: 
             removed.append(str(env_file))
         elif not written:
             kept.append(f"{env_file} (not the file secrets-setup wrote)")
-    for name in ("auth.json", SECRETS_MARKER):
-        if wipe(directory / name):
-            removed.append(str(directory / name))
+    for path in (directory / "auth.json", secrets_marker_path(directory)):
+        if wipe(path):
+            removed.append(str(path))
     try:
         directory.rmdir()
         removed.append(str(directory))

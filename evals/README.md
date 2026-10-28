@@ -320,11 +320,12 @@ on it is clean.
 - The PR's own code runs with the secrets (that is what is being evaluated), so approve only after
   reading its diff.
 - The raw secrets reach only the `secrets-setup` steps; derived values (auth.json string leaves,
-  `.env` values) are masked. `secrets-setup` writes `auth.json` into a **new** directory with a
-  marker file and refuses to replace an existing `.env` or mask file; `secrets-cleanup` (in an
-  `always()` step) removes only what that marker records, so pointing it at a real agent
-  directory or project removes nothing. `run-evals.sh` also unsets `PI_AUTH`/`EVAL_ENV` before
-  starting `pepi-eval.sh`.
+  `.env` values) are masked. `secrets-setup` writes `auth.json` into a **new** directory and a
+  private sibling marker (`<directory>.pepi-ci-secrets.json`), keeping metadata out of the runner's
+  strict secrets allowlist. It refuses to replace an existing marker, `.env` or mask file.
+  `secrets-cleanup` (in an `always()` step) requires that marker to match the directory's path,
+  device and inode, so pointing it at a real agent directory or a replacement removes nothing.
+  `run-evals.sh` also unsets `PI_AUTH`/`EVAL_ENV` before starting `pepi-eval.sh`.
 - These guards prevent accidents, not a malicious collaborator whose run you approve.
 - Network: a plain Docker bridge named `pepi-eval`, i.e. **unrestricted** egress (accepted risk):
   the agent can reach GitHub and could send the gateway key anywhere. The comment says so.

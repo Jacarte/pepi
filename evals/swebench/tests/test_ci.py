@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from evals.swebench import __main__ as cli
-from evals.swebench import runner
+from evals.swebench import ci, runner
 from evals.swebench.common import read_json, read_manifest, write_json
 from evals.swebench.prepare import prepare_run
 from evals.swebench.runner import (PGREP, PI_COMMAND, PKILL, SECRET_DIR, Secrets, build_images, run_one, run_tasks,
@@ -202,9 +202,31 @@ class SecretTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             loaded = Secrets.load(self.secrets_dir(Path(directory), name="mcp.json"))
             self.assertIn("mcp.json", loaded.files)
-        with tempfile.TemporaryDirectory() as directory:
-            with self.assertRaisesRegex(ValueError, "Unexpected"):
-                Secrets.load(self.secrets_dir(Path(directory), name="notes.txt"))
+        for name in ("notes.txt", ".notes", ci.SECRETS_MARKER, ci.SECRETS_MARKER + ".bak"):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                with self.assertRaisesRegex(ValueError, "Unexpected"):
+                    Secrets.load(self.secrets_dir(Path(directory), name=name))
+
+    def test_known_secret_entries_reject_symlinks_and_nonregular_files(self):
+        for name in (*runner.SECRET_FILES, ci.SECRETS_MARKER):
+            for kind in ("symlink", "dangling-symlink", "directory", "fifo"):
+                with self.subTest(name=name, kind=kind), tempfile.TemporaryDirectory() as directory:
+                    base = Path(directory)
+                    secrets_dir = base / "secrets"
+                    secrets_dir.mkdir(mode=0o700)
+                    path = secrets_dir / name
+                    if kind in ("symlink", "dangling-symlink"):
+                        target = base / "target"
+                        if kind == "symlink":
+                            target.write_text("{}")
+                            target.chmod(0o600)
+                        path.symlink_to(target)
+                    elif kind == "directory":
+                        path.mkdir(mode=0o700)
+                    else:
+                        os.mkfifo(path, mode=0o600)
+                    with self.assertRaisesRegex(ValueError, "Unexpected"):
+                        Secrets.load(secrets_dir)
 
     def test_redaction_fails_closed_on_symlinks_and_unreadable_files(self):
         with tempfile.TemporaryDirectory() as directory:

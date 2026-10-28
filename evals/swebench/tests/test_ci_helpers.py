@@ -16,7 +16,10 @@ from unittest.mock import patch
 
 from evals.swebench import ci
 from evals.swebench.common import write_json
+from evals.swebench.runner import run_tasks
+from evals.swebench.tests.test_ci import RecordingDocker
 from evals.swebench.tests.test_narrate import summary
+from evals.swebench.tests.test_runner import TASK, prepare_fixture
 
 REPO = Path(__file__).resolve().parents[3]
 CI_SCRIPTS = sorted((REPO / "evals/ci").glob("*.sh"))
@@ -329,6 +332,35 @@ class SecretsTests(Temp):
         self.assertEqual(json.loads(out)["env_names"],
                          ["LITELLM_BASE_URL", "LITELLM_API_KEY", "TYPESAFE_API_KEY", "PERCENT", "FLAG"])
 
+    def test_setup_directory_runs_without_forwarding_cleanup_marker(self):
+        auth = json.dumps({"litellm": {"type": "api_key", "key": AUTH_TOKEN}})
+        code, _, err = self.setup({"PI_AUTH": auth, "EVAL_ENV": EVAL_ENV})
+        self.assertEqual(code, 0, err)
+        secrets_dir = self.root / "secrets"
+        self.assertEqual({path.name for path in secrets_dir.iterdir()}, {"auth.json"})
+        marker = self.root / ("secrets" + ci.SECRETS_MARKER)
+        self.assertEqual(stat.S_IMODE(marker.stat().st_mode), 0o600)
+        original_marker = marker.read_bytes()
+        run = prepare_fixture(self.root)
+        write_json(run / "builds.json", {TASK["instance_id"]: {"image_id": "sha256:frozen"}})
+        docker = RecordingDocker()
+        with patch.dict(os.environ, {"LITELLM_BASE_URL": "https://gateway.invalid"}, clear=True), \
+                patch("evals.swebench.runner.Docker", return_value=docker):
+            self.assertEqual(run_tasks(run, 1, "eval", "2", "4g", secrets_dir), 0)
+        inputs = [kwargs["input"] for kwargs in docker.kwargs if "input" in kwargs]
+        self.assertEqual(inputs, [auth.encode()])
+        self.assertFalse(any(ci.SECRETS_MARKER in part for command in docker.commands for part in command))
+        execution = json.loads((run / "execution.json").read_text())
+        self.assertEqual(execution["secrets"], {"auth.json": {"present": True}, "mcp.json": {"present": False}})
+        self.assertEqual(marker.read_bytes(), original_marker)
+        code, out, err = invoke("secrets-cleanup", "--dir", secrets_dir, "--launch-dir", self.root / "launch",
+                                "--mask-file", self.root / "masks.txt")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)["kept"], [])
+        self.assertFalse(secrets_dir.exists())
+        self.assertFalse(marker.exists())
+        self.assertFalse((self.root / "launch/.env").exists())
+
     def test_missing_or_malformed_secrets_name_the_variable_only(self):
         code, _, err = self.setup({"PI_AUTH": "", "EVAL_ENV": EVAL_ENV})
         self.assertEqual(code, 2)
@@ -384,6 +416,103 @@ class SecretsTests(Temp):
         self.assertEqual((self.root / "masks.txt").read_text(), "MINE")
         self.assertFalse((self.root / "secrets").exists())
 
+    def test_setup_refuses_preexisting_sibling_marker(self):
+        for kind in ("file", "symlink", "dangling-symlink", "directory"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory(dir=self.root) as temporary:
+                base = Path(temporary)
+                launch = base / "launch"
+                launch.mkdir()
+                marker = base / ("secrets" + ci.SECRETS_MARKER)
+                target = base / "target"
+                target.write_text("keep")
+                if kind == "file":
+                    marker.write_text("keep")
+                elif kind == "directory":
+                    marker.mkdir()
+                else:
+                    marker.symlink_to(target if kind == "symlink" else base / "missing")
+                code, _, err = invoke("secrets-setup", "--dir", base / "secrets", "--launch-dir", launch,
+                                      "--mask-file", base / "masks", env=self.ENV)
+                self.assertEqual(code, 2)
+                self.assertIn("marker already exists", err)
+                self.assertTrue(marker.exists() or marker.is_symlink())
+                self.assertEqual(target.read_text(), "keep")
+                if kind == "file":
+                    self.assertEqual(marker.read_text(), "keep")
+                self.assertFalse((base / "secrets").exists())
+                self.assertFalse((launch / ".env").exists())
+                self.assertFalse((base / "masks").exists())
+
+    def test_cleanup_rejects_invalid_or_unbound_sibling_markers(self):
+        self.assertEqual(self.setup()[0], 0)
+        marker_file = self.root / ("secrets" + ci.SECRETS_MARKER)
+        marker = json.loads(marker_file.read_text())
+        variants = ([], {**marker, "version": 1}, {**marker, "secrets_dir": str(self.root / "other")},
+                    {**marker, "secrets_dev": marker["secrets_dev"] + 1},
+                    {**marker, "secrets_ino": marker["secrets_ino"] + 1})
+        for payload in ("not json", *(json.dumps(value) for value in variants)):
+            with self.subTest(payload=payload):
+                marker_file.write_text(payload)
+                code, out, _ = invoke("secrets-cleanup", "--dir", self.root / "secrets",
+                                      "--launch-dir", self.root / "launch")
+                self.assertEqual(code, 0)
+                self.assertEqual(json.loads(out)["removed"], [])
+                self.assertTrue((self.root / "secrets/auth.json").exists())
+                self.assertEqual((self.root / "launch/.env").read_text(), EVAL_ENV)
+                self.assertEqual(marker_file.read_text(), payload)
+
+    def test_cleanup_refuses_symlinked_or_public_sibling_marker(self):
+        self.assertEqual(self.setup()[0], 0)
+        marker = self.root / ("secrets" + ci.SECRETS_MARKER)
+        target = self.root / "saved-marker"
+        original = marker.read_bytes()
+        marker.rename(target)
+        marker.symlink_to(target)
+        for kind in ("symlink", "public"):
+            with self.subTest(kind=kind):
+                if kind == "public":
+                    marker.unlink()
+                    target.rename(marker)
+                    marker.chmod(0o644)
+                code, out, _ = invoke("secrets-cleanup", "--dir", self.root / "secrets",
+                                      "--launch-dir", self.root / "launch")
+                self.assertEqual(code, 0)
+                self.assertEqual(json.loads(out)["removed"], [])
+                self.assertTrue((self.root / "secrets/auth.json").exists())
+                self.assertTrue((self.root / "launch/.env").exists())
+                self.assertEqual(marker.read_bytes(), original)
+
+    def test_cleanup_keeps_replacement_at_the_same_directory_path(self):
+        self.assertEqual(self.setup()[0], 0)
+        secrets = self.root / "secrets"
+        secrets.rename(self.root / "original-secrets")
+        secrets.mkdir(mode=0o700)
+        self.write("secrets/auth.json", "not ours")
+        code, out, _ = invoke("secrets-cleanup", "--dir", secrets, "--launch-dir", self.root / "launch")
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out)["removed"], [])
+        self.assertEqual((secrets / "auth.json").read_text(), "not ours")
+        self.assertTrue((self.root / "original-secrets/auth.json").exists())
+        self.assertTrue((self.root / "launch/.env").exists())
+        self.assertTrue((self.root / ("secrets" + ci.SECRETS_MARKER)).exists())
+
+    def test_cleanup_handles_partial_setup_with_a_sibling_marker(self):
+        original_write = ci.write_private
+        def fail_auth(path, data):
+            if path.name == "auth.json":
+                raise OSError("synthetic write failure")
+            original_write(path, data)
+        with patch.object(ci, "write_private", side_effect=fail_auth):
+            self.assertEqual(self.setup()[0], 2)
+        self.assertTrue((self.root / ("secrets" + ci.SECRETS_MARKER)).is_file())
+        code, out, _ = invoke("secrets-cleanup", "--dir", self.root / "secrets",
+                              "--launch-dir", self.root / "launch", "--mask-file", self.root / "masks.txt")
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out)["kept"], [])
+        self.assertFalse((self.root / "secrets").exists())
+        self.assertFalse((self.root / ("secrets" + ci.SECRETS_MARKER)).exists())
+        self.assertFalse((self.root / "masks.txt").exists())
+
     def test_eval_env_must_not_set_harness_settings(self):
         code, out, err = self.setup({"PI_AUTH": PI_AUTH,
                                      "EVAL_ENV": EVAL_ENV + "PEPI_EVAL_PRESET=other-preset-value\nPEPI_EVAL_IDS=x\n"})
@@ -417,7 +546,7 @@ class SecretsTests(Temp):
                               "--mask-file", self.root / "masks.txt")
         self.assertEqual(code, 0)
         self.assertFalse((self.root / "secrets/auth.json").exists())
-        self.assertFalse((self.root / "secrets" / ci.SECRETS_MARKER).exists())
+        self.assertFalse((self.root / ("secrets" + ci.SECRETS_MARKER)).exists())
         self.assertEqual((self.root / "secrets/extra.txt").read_text(), "not ours")
         self.assertEqual(json.loads((self.root / "auth-hardlink.json").read_text()), json.loads(PI_AUTH))
         self.assertEqual((self.root / "launch/.env").read_text(), "REPLACED=1\n")
