@@ -487,7 +487,7 @@ class ScriptPresetTests(ScriptHarness):
         result = self.run_script(["--dry-run", "-y", "prepare"], stdin="", env_extra={
             "PEPI_EVAL_PRESET": "verified21", "PEPI_EVAL_RUN_NAME": "x-1"})
         self.assertEqual(result.returncode, 2)
-        self.assertIn("PEPI_EVAL_PRESET must be verified20-v1 or multilingual10-v1", result.stderr)
+        self.assertIn("PEPI_EVAL_PRESET must be verified20-v1, multilingual10-v1 or wasmtime-safe-v1", result.stderr)
 
 
 class IdsParsingTests(unittest.TestCase):

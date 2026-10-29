@@ -1,0 +1,53 @@
+{
+  "id": "custom-wasmtime-safe-v1",
+  "label": "Custom Wasmtime safe-v1 subset (seven-task source); not an official score",
+  "dataset": "pepi/upstream-safe-v1",
+  "split": "test",
+  "repo": "bytecodealliance/wasmtime",
+  "task_source": "separate-evaluator-repository",
+  "task_repository_variable": "WASMTIME_TASKS_REPOSITORY",
+  "task_revision_variable": "WASMTIME_TASKS_REVISION",
+  "ids_sha256": "a121fa5c2561173a54b9ecfe63f8e18bbbcb7a5cac99f80dc1769253c90b8b59",
+  "timeout_seconds": 1800,
+  "concurrency": 1,
+  "network_requirements": [],
+  "network_note": "CI requires the pre-existing operator-managed pepi-eval network on a self-hosted pepi-evals runner. Allow only approved provider endpoints; deny GitHub from agent containers. Network name alone does not enforce egress.",
+  "membership_caveat": "Ordered locally validated safe-seven task IDs. Evaluator files live in a separate task repository pinned to a 40-hex commit. Public task data is fetchable from GitHub; the operator must deny GitHub egress from agent containers to keep evaluator materials inaccessible.",
+  "tasks": {
+    "bytecodealliance__wasmtime-15027-safe-v1-l8rcyy": {
+      "base_commit": "ec63b69f3da9783db784eef6ba67635385926a2a",
+      "image": "swebench/sweb.eval.x86_64.bytecodealliance_1776_wasmtime-15027-safe-v1-l8rcyy:latest",
+      "dockerfile_sha256": "5298389e64ace905b02096212dee167fa6807b73d64d052b02fe41e6afe09289"
+    },
+    "bytecodealliance__wasmtime-15028-safe-v1-l8rcyy": {
+      "base_commit": "ec63b69f3da9783db784eef6ba67635385926a2a",
+      "image": "swebench/sweb.eval.x86_64.bytecodealliance_1776_wasmtime-15028-safe-v1-l8rcyy:latest",
+      "dockerfile_sha256": "5298389e64ace905b02096212dee167fa6807b73d64d052b02fe41e6afe09289"
+    },
+    "bytecodealliance__wasmtime-15033-safe-v1-l8rcyy": {
+      "base_commit": "4e9504d5ab5b000c12bc5e0228d0d7619cacf8e1",
+      "image": "swebench/sweb.eval.x86_64.bytecodealliance_1776_wasmtime-15033-safe-v1-l8rcyy:latest",
+      "dockerfile_sha256": "8bba573646c2e3e75cb82b07d5d9c917804adae79e1138dc8ad25115770f50f4"
+    },
+    "bytecodealliance__wasmtime-15043-safe-v1-l8rcyy": {
+      "base_commit": "3ba4f689237056f73be1979ce273f4f8f8eb3aa2",
+      "image": "swebench/sweb.eval.x86_64.bytecodealliance_1776_wasmtime-15043-safe-v1-l8rcyy:latest",
+      "dockerfile_sha256": "9b236d910b1861204266f8bd9d5ebe744b5e02cfb8cc5024e3cbf4b5d5fff227"
+    },
+    "bytecodealliance__wasmtime-14979-safe-v1-l8rcyy": {
+      "base_commit": "157428df4d989b7b9c7dbfcb8b387b6730fbc046",
+      "image": "swebench/sweb.eval.x86_64.bytecodealliance_1776_wasmtime-14979-safe-v1-l8rcyy:latest",
+      "dockerfile_sha256": "15d153eac96a3caddda8a5eb5d9db04ceb1b45f4ce09b2c6806c91283d1642ac"
+    },
+    "bytecodealliance__wasmtime-14961-safe-v1-l8rcyy": {
+      "base_commit": "65e9dcc3e3399ba5bf76e9d76d8aa6a8ad4f20df",
+      "image": "swebench/sweb.eval.x86_64.bytecodealliance_1776_wasmtime-14961-safe-v1-l8rcyy:latest",
+      "dockerfile_sha256": "94a3eb879fe3d2cd931159101deb313ef2d96ac776baa976dec6b11511fba890"
+    },
+    "bytecodealliance__wasmtime-14902-safe-v1-l8rcyy": {
+      "base_commit": "f031a62ff4cd5e1478b51a79f8c10040b393cabe",
+      "image": "swebench/sweb.eval.x86_64.bytecodealliance_1776_wasmtime-14902-safe-v1-l8rcyy:latest",
+      "dockerfile_sha256": "9643bfc5142e00ad3945d6b0beabe59dc6a034b2e0076253916ed1dca06c6e23"
+    }
+  }
+}

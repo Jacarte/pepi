@@ -1,9 +1,11 @@
-"""GitHub Actions helpers for label-triggered pepi evals (stdlib only; no network, Docker or gh).
+"""GitHub Actions helpers for label-triggered pepi evals (stdlib only).
+Only build-wasmtime-images uses Docker/network; the other helpers are offline (except narrate).
 
 Usage: python -m evals.swebench.ci <command> --help
 
   assemble-config  apply `profile.sh NAME` in a scratch copy and emit a clean PEPI_EVAL_CONFIG_DIR
   cache-key        baseline cache key: pepi-evals-v1-<profile>-<preset>-<hash>-<ISO year-week>
+  build-wasmtime-images  build pinned base images with recipe-only contexts and private host receipts
   secrets-setup    write auth.json (from PI_AUTH) into a NEW dir and .env (from EVAL_ENV); masks go to a file
   secrets-cleanup  remove only what secrets-setup wrote (its marker file proves it; always exit 0)
   slim-run         copy the cache, handoff or artifact subset of a run directory
@@ -33,6 +35,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 from .common import read_json
@@ -321,18 +324,27 @@ def copy_tree_entry(root: Path, relative: str, destination_root: Path, label: st
 
 
 # Secrets that must not exist while profile.sh (code from a checkout) runs.
-SECRET_ENV_NAMES = ("PI_AUTH", "EVAL_ENV")
+SECRET_ENV_NAMES = ("PI_AUTH", "EVAL_ENV", "WASMTIME_TASKS_TOKEN")
 
 
-def assemble_config(repo: Path, profile: str, out: Path, fallback_root: Path | None = None) -> dict:
+def assemble_config(repo: Path, profile: str, out: Path, fallback_root: Path | None = None,
+                    agents_override: Path | None = None) -> dict:
     """Clean config dir for `prepare --config-dir`: the repo's config after `profile.sh PROFILE`.
 
     profile.sh is the checkout's own code, so it runs with a minimal environment (PATH, a scratch HOME,
-    LC_ALL=C) and assemble-config refuses to run at all while PI_AUTH/EVAL_ENV are in the environment."""
+    LC_ALL=C) and refuses to run while provider or checkout secrets are in the environment."""
     present = [name for name in SECRET_ENV_NAMES if name in os.environ]
     if present:
         raise UsageError("assemble-config must run before secrets exist; unset " + ", ".join(present))
     checked_name(profile, "profile name")
+    override_bytes = None
+    if agents_override is not None:
+        from .profile import safe_path
+        override = agents_override.absolute()
+        safe_path(override.parent, override.name)
+        if not override.is_file():
+            raise UsageError("--agents-override must be an existing regular, non-symlink file")
+        override_bytes = override.read_bytes()
     repo = repo.resolve()
     if not (repo / "profile.sh").is_file() or (repo / "profile.sh").is_symlink():
         raise UsageError("profile.sh not found (or a symlink) in --repo")
@@ -361,6 +373,10 @@ def assemble_config(repo: Path, profile: str, out: Path, fallback_root: Path | N
                              f"{result.stderr.strip()[-300:]}")
         out.mkdir(parents=True, exist_ok=True)
         copied = [relative for relative in SOURCE_FILES if copy_tree_entry(work, relative, out, "assembled config")]
+    if override_bytes is not None:
+        (out / "AGENTS.md").write_bytes(override_bytes)
+        if "AGENTS.md" not in copied:
+            copied.append("AGENTS.md")
     reject_unsafe_tree(out, "assembled config")
     record = {"profile": profile, "files": copied, "sha256": config_hash(out)}
     if fallback_root is not None:
@@ -375,13 +391,103 @@ def config_hash(directory: Path) -> str:
     return hash_files(directory, lambda rel, is_dir: True)
 
 
+# ---------------------------------------------------------------------------- Wasmtime base images
+
+
+def build_wasmtime_images(task_repo: Path, revision: str, out: Path) -> dict:
+    """Build only frozen public recipes, never send the evaluator directory to Docker."""
+    from .preset import wasmtime_definition
+    from .profile import safe_path
+    if any(name in os.environ for name in SECRET_ENV_NAMES):
+        raise UsageError("build-wasmtime-images must run before secrets exist")
+    if not re.fullmatch(r"[0-9a-f]{40}", revision):
+        raise UsageError("--revision must be the pinned 40-hex WASMTIME_TASKS_REVISION")
+    task_repo = task_repo.absolute()
+    if not safe_path(task_repo, "sweb.yaml").is_file():
+        raise UsageError("evaluator checkout has no regular sweb.yaml")
+    try:
+        head = subprocess.run(["git", "-C", str(task_repo), "rev-parse", "HEAD"],
+                              capture_output=True, text=True, check=True).stdout.strip()
+        dirty = subprocess.run(["git", "-C", str(task_repo), "status", "--porcelain"],
+                               capture_output=True, text=True, check=True).stdout
+    except subprocess.CalledProcessError:
+        raise UsageError("cannot verify the pinned evaluator Git checkout") from None
+    if head != revision or dirty:
+        raise UsageError("evaluator checkout must be clean and match WASMTIME_TASKS_REVISION")
+    frozen = wasmtime_definition()
+    recipes = []
+    for instance_id, expected in frozen["tasks"].items():
+        directory = task_repo / "tasks" / instance_id
+        for name in ("task.yaml", "Dockerfile", ".dockerignore"):
+            if not safe_path(directory, name).is_file():
+                raise UsageError(f"Wasmtime {instance_id}: missing regular {name}")
+        # The prepared task bundle's task.yaml is JSON (a YAML subset).
+        metadata = read_json(directory / "task.yaml")
+        if not isinstance(metadata, dict):
+            raise UsageError(f"Wasmtime {instance_id}: task.yaml must be a JSON object")
+        if any(metadata.get(key) != expected[key] for key in ("base_commit", "image")) or (
+                metadata.get("instance_id") != instance_id or metadata.get("repo") != frozen["repo"]
+                or metadata.get("datasets") != [frozen["dataset"]] or metadata.get("split") != "test"):
+            raise UsageError(f"Wasmtime {instance_id}: task metadata differs from the validated preset")
+        dockerfile = (directory / "Dockerfile").read_bytes()
+        ignore = (directory / ".dockerignore").read_bytes()
+        if ignore != b"*\n!Dockerfile\n!.dockerignore\n":
+            raise UsageError(f"Wasmtime {instance_id}: .dockerignore must exclude everything except Dockerfile/.dockerignore")
+        if re.search(rb"(?im)^\s*(?:ONBUILD\s+)?(?:COPY|ADD)\b", dockerfile):
+            raise UsageError(f"Wasmtime {instance_id}: COPY/ADD is forbidden in the base-image recipe")
+        if sha256_hex(dockerfile) != expected["dockerfile_sha256"]:
+            raise UsageError(f"Wasmtime {instance_id}: Dockerfile differs from the validated recipe")
+        recipes.append((instance_id, expected, dockerfile, ignore))
+    # Raw build output stays in a private host directory, never stdout or public artifacts.
+    new_private_dir(out)
+    receipt = {"task_repo_revision": revision, "preset": frozen["id"], "dataset": frozen["dataset"], "images": {}}
+    started = time.monotonic()
+    with tempfile.TemporaryDirectory(prefix="pepi-wasmtime-build-") as temporary:
+        scratch = Path(temporary)
+        env = {"PATH": os.environ.get("PATH") or os.defpath, "HOME": temporary, "LC_ALL": "C"}
+        for instance_id, expected, dockerfile, ignore in recipes:
+            context = scratch / instance_id
+            context.mkdir()
+            (context / "Dockerfile").write_bytes(dockerfile)
+            (context / ".dockerignore").write_bytes(ignore)
+            iid_file = scratch / "image-id"
+            iid_file.unlink(missing_ok=True)
+            task_started = time.monotonic()
+            log_path = out / f"{instance_id}.log"
+            write_private(log_path, b"")
+            try:
+                with log_path.open("ab") as log:
+                    subprocess.run(["docker", "build", "--platform", "linux/amd64", "--iidfile", str(iid_file),
+                                    "--tag", expected["image"], str(context)], env=env, stdout=log,
+                                   stderr=subprocess.STDOUT, check=True)
+                    image_id = iid_file.read_text().strip()
+                    if not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
+                        raise UsageError("Docker did not return an immutable Wasmtime image ID")
+                    build_seconds = time.monotonic() - task_started
+                    # No provider, mounts, evaluator files or network in the checkout verification container.
+                    verify = ('cd /testbed && head=$(git rev-parse HEAD) && test "$head" = "$1" '
+                              '&& state=$(git status --porcelain --untracked-files=all) && test -z "$state" '
+                              '&& git submodule status --recursive > /tmp/submodule-status '
+                              '&& ! grep -q "^[+U-]" /tmp/submodule-status')
+                    subprocess.run(["docker", "run", "--rm", "--network", "none", "--platform", "linux/amd64",
+                                    "--entrypoint", "/bin/sh", image_id, "-c", verify, "--", expected["base_commit"]],
+                                   env=env, stdout=log, stderr=subprocess.STDOUT, check=True)
+            except subprocess.CalledProcessError:
+                raise UsageError(f"Wasmtime {instance_id}: base-image build/checkout verification failed; see private host log") from None
+            receipt["images"][instance_id] = {**expected, "image_id": image_id, "build_seconds": build_seconds,
+                                               "verification_seconds": time.monotonic() - task_started - build_seconds}
+    receipt["elapsed_seconds"] = time.monotonic() - started
+    write_private(out / "receipt.json", (json.dumps(receipt, indent=2) + "\n").encode())
+    return {"images_built": len(recipes), "private_receipt": str(out / "receipt.json")}
+
+
 # ---------------------------------------------------------------------------- cache-key
 
 HARNESS_DIRS = ("evals/swebench", "evals/ci")
 HARNESS_FILES = ("evals/pepi-eval.sh", "evals/__init__.py", "profile.sh")
 EXCLUDED_DIRS = frozenset({"tests", "runs", "__pycache__"})
 # instructions.md is copied into every agent image, so it is harness, not documentation.
-HARNESS_MARKDOWN = frozenset({"instructions.md"})
+HARNESS_MARKDOWN = frozenset({"instructions.md", "AGENTS.md"})
 
 
 def harness_include(relative: str, is_dir: bool) -> bool:
@@ -473,6 +579,8 @@ def secrets_setup(directory: Path, launch_dir: Path, mask_file: Path) -> dict:
     env_text = required_env("EVAL_ENV")
     auth = pi_auth(auth_text)
     pairs = parse_dotenv(env_text)
+    if any(key == "WASMTIME_TASKS_TOKEN" for key, _ in pairs):
+        raise UsageError("EVAL_ENV must not contain WASMTIME_TASKS_TOKEN; it belongs only in the evaluator checkout")
     reserved = sorted({key for key, _ in pairs if key.startswith(RESERVED_ENV_PREFIX)})
     if reserved:
         raise UsageError("EVAL_ENV must not set PEPI_EVAL_* (the workflow owns them): " + ", ".join(reserved))
@@ -612,8 +720,23 @@ def slim_run(run: Path, out: Path, kind: str) -> dict:
         raise UsageError("--out must be outside the run directory")
     if out.exists() and (out.is_symlink() or not out.is_dir() or any(out.iterdir())):
         raise UsageError("--out must be a new or empty directory")
+    # Evaluator logs can echo hidden test patches. Never publish or cache them for Wasmtime.
+    from .preset import WASMTIME_DATASET
+    private_evaluator = read_json(run / "summary.json").get("dataset") == WASMTIME_DATASET
+    include = slim_include(kind)
+    if private_evaluator:
+        public_top = {"summary.json", "summary.csv", "summary.md", "predictions.jsonl"}
+        def include(relative, is_dir):
+            parts = relative.split("/")
+            if is_dir:
+                return parts[0] == "attempts" and (len(parts) == 1 or len(parts) == 2
+                                                        and bool(INSTANCE_PATTERN.fullmatch(parts[1])))
+            if len(parts) == 1:
+                return parts[0] in public_top or kind == "cache" and parts[0] in PRIVATE_TOP
+            return (len(parts) == 3 and parts[0] == "attempts"
+                    and (parts[2] in CACHE_ATTEMPT or kind == "artifact" and parts[2] == "patch.diff"))
     copied, skipped, size = [], [], 0
-    for relative, path in walk_files(root, slim_include(kind)):
+    for relative, path in walk_files(root, include):
         if path.is_symlink() or not path.is_file() or root not in path.resolve().parents:
             skipped.append(relative)
             continue
@@ -833,7 +956,8 @@ def comment_head(baseline: dict | None, candidate: dict | None, result: dict | N
         reasons = reasons[:MAX_REASONS] + [f"{len(reasons) - MAX_REASONS} more"]
     lines += [f"- Verdict: {'ok' if verdict_result['ok'] else 'infrastructure problem'}"
               + "".join(f"; {reason}" for reason in reasons),
-              "- Network: unrestricted (plain docker bridge)",
+              ("- Network: preprovisioned self-hosted `pepi-eval`; operator must enforce egress allowlist (deny GitHub)"
+               if preset == "wasmtime-safe-v1" else "- Network: unrestricted (plain docker bridge)"),
               f"- Run and artifacts: {run_url}",
               ""]
     return "\n".join(lines)
@@ -988,8 +1112,15 @@ def parser() -> argparse.ArgumentParser:
     command.add_argument("--out", type=Path, required=True)
     command.add_argument("--fallback-root", type=Path,
                          help="harness checkout (--pepi-root): config files it would supply instead are an error")
+    command.add_argument("--agents-override", type=Path,
+                         help="regular non-symlink file replacing AGENTS.md after profile assembly; included in hash")
     command.add_argument("--allow-harness-fallback", action="store_true",
                          help="only warn when --fallback-root would supply missing config files")
+
+    command = commands.add_parser("build-wasmtime-images", help="build pinned evaluator base images without oracle inputs")
+    command.add_argument("--task-repo", type=Path, required=True)
+    command.add_argument("--revision", required=True)
+    command.add_argument("--out", type=Path, required=True, help="new private host directory for logs and receipt")
 
     command = commands.add_parser("cache-key", help="baseline cache key")
     command.add_argument("--harness-root", type=Path, default=HARNESS_ROOT)
@@ -1082,7 +1213,7 @@ def main(argv: list | None = None) -> int:
         return EXIT_OK if exit_.code in (0, None) else EXIT_USAGE
     try:
         if args.command == "assemble-config":
-            record = assemble_config(args.repo, args.profile, args.out, args.fallback_root)
+            record = assemble_config(args.repo, args.profile, args.out, args.fallback_root, args.agents_override)
             fallback = record.get("harness_fallback_files")
             if fallback:
                 # For the baseline this means main's run would silently use the PR's copy of these files.
@@ -1092,6 +1223,8 @@ def main(argv: list | None = None) -> int:
             emit(record)
             if fallback and not args.allow_harness_fallback:
                 return EXIT_FAILED
+        elif args.command == "build-wasmtime-images":
+            emit(build_wasmtime_images(args.task_repo, args.revision, args.out))
         elif args.command == "cache-key":
             settings = {}
             for item in args.setting:

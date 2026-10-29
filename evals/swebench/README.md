@@ -86,6 +86,33 @@ Logs and sessions may contain sensitive source or prompts. Keep runs out of Git.
 Grading, summaries and an optional AI-written narrative of summarized runs
 (`python -m evals.swebench.narrate`) are described in [REPORTING.md](REPORTING.md).
 
+## Evaluation metrics
+
+`reporting grade` writes official per-task test outcomes; `reporting summarize` writes
+`summary.json`, `summary.csv` and `summary.md`; `reporting compare` pairs two summaries.
+There is **no composite score**. The official resolution count is the primary result;
+agent process status, test outcomes, latency and estimated usage are reported separately.
+
+| Metric / fields | Output | Meaning |
+|---|---|---|
+| `selected`, `resolved`, `resolved_fraction`, `unknown_grades` | `summary.json` / `summary.md` | Selected tasks, official resolved tasks, resolved/selected fraction, and tasks whose grades are missing/invalid. Unknown is not treated as failure. |
+| `grading_status`, `agent_status` | Per-task `summary.csv` / `summary.json` | Grader outcome (`resolved`, `unresolved`, `empty_patch`, `grading_error`, `not_graded`) is separate from runner outcome (`completed`, `timeout`, `agent_error`, `setup_error`, `runner_error`, `interrupted`, `not_started`, or `unfinished_children`). |
+| `FAIL_TO_PASS`, `PASS_TO_PASS`, `FAIL_TO_FAIL`, `PASS_TO_FAIL` success/failure lists | Per-task `grading/.../report.json` | Official SWE-bench test IDs that passed or failed in each category. These details are not collapsed into the resolution metric. |
+| `agent_wall_seconds`, `setup_seconds` | Per-task `summary.csv` | Agent wall time covers Pi startup through tool use, child shutdown and patch export; setup is separate. Image build and official grading are not agent time. |
+| `latency_all_seconds`, `latency_resolved_seconds` (`observations`, `missing`, `median`, `p95`) | `summary.json` | Distribution of agent wall time across all tasks or only resolved tasks; p95 is nearest-rank. |
+| `turns`, `turns_observed` (`observations`, `missing`, `median`, `p95`) | Per-task `summary.csv` / `summary.json` | Session turns per task and their run-level distribution. |
+| `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens` | Per-task `summary.csv` and `telemetry.json` | Session-accounted token categories; detailed parent/child usage is in telemetry. |
+| `estimated_cost_usd`, `observed_estimated_cost_usd`, `estimated_total_cost_usd`, `estimated_cost_per_resolved` | Per-task `summary.csv` / `summary.json` | Pi price estimate, not gateway billing; includes failed attempts. Total/per-resolved are `null` if accounting is incomplete or no task resolved. |
+| `accounting_status`, `available_accounting_tasks` | `telemetry.json` / `summary.json` | Per-task usage completeness (`available`, `partial`, `unavailable`) and count with complete accounting. Unresolved child work or incomplete telemetry can make accounting partial. |
+| `test_edit_kind`, `test_files_touched`, `tasks_modifying_existing_tests`, `resolved_with_test_edits` | Per-task `summary.csv` / `summary.json` | Whether the patch changed test-like files and how often such tasks resolved; useful for spotting test-edit dependence. |
+| `history_pruning`, `tasks_history_not_pruned` | Per-task `summary.csv` / `summary.json` | Whether post-base Git history was pruned before the agent ran; failed/partial pruning is an integrity caveat, not a correctness score. |
+| `resolved_strict`, `unknown_grades_strict`, `resolved_restored`, `unknown_grades_restored` | `summary.json` (optional) | Separate regrades after removing agent test edits (`strict`) or repairing evaluator checkout files (`restored`); never replace the official score. |
+| `resolved_delta`, `wins`, `regressions`, `inconclusive` | `compare` JSON | Paired resolution change and task IDs that improved, regressed or could not be compared. |
+| `both_resolved_latency_pairs`, `both_resolved_latency_delta_median_seconds`, `estimated_cost_delta_usd`, `configuration_differences` | `compare` JSON | Median time delta only for tasks resolved in both runs, estimated cost delta when complete, and differences in non-pairing configuration. Positive time/cost deltas mean slower/more expensive candidate. |
+| `grader_exit_code`, `grading_seconds`, `total_instances`, `completed_instances`, `infra_failure_instances`, `ambiguous_failure_instances`, `empty_patch_instances`, `error_instances` | `grading.json` / `results.json` | Evaluator execution health/counts; these do not by themselves indicate model success. |
+| `build_seconds`, image ID, platform; CPU, memory, deadline, network, concurrency | `builds.json` / `execution.json` | Build provenance and measurement protocol, not quality scores; keep them consistent across paired runs. |
+| Tool calls/errors, retries, compactions, child/model usage, per-tool timing, skill reads | Per-task `telemetry.json` | Diagnostic telemetry with coverage limits; external calls/provider retries may be unobserved. See [TELEMETRY.md](TELEMETRY.md). |
+
 ## Named profiles and provider authentication
 
 Select `prepare --profile bedrock` (LiteLLM) or `prepare --profile codex`
@@ -227,6 +254,113 @@ from GitHub secrets). Order matters: the frozen profile is hashed at `prepare`.
    binary git hunks, encoded values or partially overlapping values. The agent can
    read its key, so use a dedicated, revocable key, and upload only `predictions.jsonl`
    and `attempts/<id>/` directories that contain `attempt.json` (written after redaction).
+
+### Wasmtime safe-seven in GitHub Actions
+
+`wasmtime-safe-v1` selects the seven ordered public IDs in
+[`presets/wasmtime-safe-v1.ids`](presets/wasmtime-safe-v1.ids), dataset
+`pepi/upstream-safe-v1`. This is a custom benchmark, **not an official SWE-bench score**.
+Its public JSON contains only dataset/selection metadata, base commits, image tags and
+validated recipe hashes. **Never commit the evaluator task bundle, `gold.patch`,
+`test.patch`, `tests.json` or `eval.sh` to this public repository.**
+
+**`EVAL_PRESET` alone is not enough**, even for a public evaluator repository:
+`WASMTIME_TASKS_REPOSITORY` and `WASMTIME_TASKS_REVISION` are also required, alongside
+normal Pepi CI provider/runner setup. Only `WASMTIME_TASKS_TOKEN` is optional for public repos.
+
+Operator setup (required before real CI can run):
+
+1. Use a **separate GitHub evaluator repository**, never this main repository. It may be
+   public or private; private is preferable for keeping evaluator materials confidential.
+   Upload the contents of the prepared `/tmp/pepi-upstream-smoke.l8rcYy/wasmtime-safe-seven/`
+   task repository there, preserving `sweb.yaml`, `tasks/<id>/`, the exact Dockerfiles and
+   `.dockerignore` files. Record the full 40-hex commit SHA. Do not put the bundle in this
+   main repo, an Actions artifact, or a public image registry. CI validates the locator
+   and pin, not repository visibility. **Public task data, including gold patches and
+   hidden tests, is fetchable from GitHub without the task token.** To keep those materials
+   inaccessible to task agents, the operator must deny GitHub egress from agent containers
+   (see step 4); omitting a token or keeping files out of the image is not enough.
+2. Set these **repository variables** (not environment-level overrides):
+   - `EVAL_PRESET=wasmtime-safe-v1`
+   - `WASMTIME_TASKS_REPOSITORY=owner/task-repo` (public or private; distinct from this repo)
+   - `WASMTIME_TASKS_REVISION=<40-hex commit>` (no branch, tag or abbreviated SHA)
+   - `PROFILE=<existing profiles/ directory>` and the normal `EVAL_*` version/resource pins.
+   - Leave `EVAL_IDS` empty for all seven; a smoke subset must use exact IDs from the list.
+   - Leave `EVAL_RUNS_ON` empty or use `["self-hosted","pepi-evals"]`. Hosted runners
+     are refused for this preset; both eval jobs are pinned to these self-hosted labels.
+3. For a **public** evaluator repository, leave `WASMTIME_TASKS_TOKEN` unset: checkout
+   falls back to `${{ github.token }}`. For a **private** evaluator repository, set
+   `WASMTIME_TASKS_TOKEN` in the reviewer-protected **`pepi-evals` GitHub environment**
+   to a fine-grained token with **Contents: read-only**, scoped only to that task repo.
+   The main repository's automatic job token cannot read a separate private repo; without
+   the dedicated token, checkout fails before evaluation. Keep normal evaluation-only
+   `PI_AUTH` and `EVAL_ENV` secrets in that environment in either case. Both checkout
+   token choices are passed only to `actions/checkout` with `persist-credentials: false`;
+   never put them in env/argv, `EVAL_ENV`, auth.json, agent config, containers or artifacts.
+4. Provision the Linux/amd64 self-hosted runner with Docker, adequate disk/RAM and a
+   **pre-existing operator-managed `pepi-eval` network**. CI will not create a generic
+   bridge for Wasmtime. Enforce an egress allowlist outside the harness: allow only the
+   approved provider endpoints and genuinely required build registries; **deny GitHub
+   from agent containers**, including API/raw/codeload endpoints and alternate routes.
+   A network named `pepi-eval` alone is not enforcement. Test the policy before approval.
+   Host-side base-image builds need GitHub, apt, Rust and crate registry access; keep
+   that build access separate from the agent network. The prepared recipe prefetches crates.
+   Never mount host workspaces, the evaluator task repo, Docker socket or evaluator files
+   into agent containers. Use trusted, isolated runners and serialize workflows sharing
+   a Docker daemon/workspace; baseline/candidate jobs must not share writable workspaces.
+5. Review the entire PR (including workflow/profile/harness code) before approving its
+   environment jobs. Add the existing `run-evals` label to a same-repository PR, or use
+   the existing push-to-main baseline path. No new dispatch trigger is required.
+
+Lookup remains GitHub-hosted and **secret-free**: it resolves/validates public variables
+and hashes the pin without checking out hidden tasks. Only approved baseline/candidate
+jobs check out the evaluator repository, at lookup's exact revision. `PEPI_CI_TASK_REPO`
+points at that evaluator checkout, outside the agent config/build input. The wrapper
+refuses a dirty checkout or mismatched revision. Cache keys include the repository locator,
+revision, preset, dataset, ordered ID selection, workflow and effective config; manifests
+record the revision, dataset and preset, and grading checks frozen task-input hashes.
+
+Before provider secrets are staged, CI builds **all seven** base images from the evaluator
+checkout on `linux/amd64` (no dependency on prior local images). The recipes must match
+public hashes and permit no COPY/ADD. `.dockerignore` must contain exactly `*`,
+`!Dockerfile`, `!.dockerignore`, one per line. Docker receives a temporary context with
+**only those two files**, never hidden evaluator materials. A network-disabled verification
+container checks each immutable resulting image's `/testbed` base commit, clean working
+copy and submodules. Build logs, image IDs and build/verification timings stay in private
+host receipts under `$RUNNER_TEMP/pepi-wasmtime-images.*/build/` (700 directory, 600 files).
+No image cache is pruned by this base-image step. Existing end-of-job agent-image cleanup
+is unchanged. Provision enough time/disk for cold Rust builds; the existing 350-minute
+job limit covers setup, seven sequential attempts and grading, not just model time.
+
+Both configs use the harness-owned
+[`presets/wasmtime-safe-v1/AGENTS.md`](presets/wasmtime-safe-v1/AGENTS.md): direct single-agent
+implementation, no routing/delegation/subagents, make a patch and run focused tests.
+`ci assemble-config --agents-override FILE` refuses missing, symlinked or special files
+(including symlinked parents), replaces only the assembled AGENTS.md, and hashes its bytes.
+The global AGENTS.md is untouched. MCP is disabled; concurrency stays **1**; the default
+Pi invocation timeout is **1800 seconds** (`EVAL_TIMEOUT_SECONDS` may override it).
+Verified20 and Multilingual10 retain their existing instructions, MCP/network behavior
+and timeouts.
+
+Wasmtime's slim cache/handoff/artifact sets exclude evaluator/build logs, raw test output,
+eval scripts and pre-existing narratives. Public outputs retain summary-level metrics,
+attempt metadata/telemetry and agent-produced patches; they contain no hidden test/gold
+files. The report's optional narrative is generated only from those slim summaries.
+The evaluator checkout is removed even on failure; private build receipts and full run
+folders (including frozen grading inputs) remain on the host. Restrict host access and
+apply an operator retention/cleanup policy; never upload those folders wholesale.
+
+Missing repository/revision variables, inaccessible task repositories, invalid pinned
+inputs or absent preconfigured networks fail before evaluation. **Real CI execution requires
+the uploaded bundle, required variables, provider secrets and runner network; a dedicated
+task access secret is required only for private repos.** Offline checks need no credentials,
+Docker, provider calls or GitHub access:
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 python -m unittest \
+  evals.swebench.tests.test_wasmtime_ci evals.swebench.tests.test_ci_workflow \
+  evals.swebench.tests.test_ci_helpers evals.swebench.tests.test_preset
+```
 
 ### .env forwarding
 

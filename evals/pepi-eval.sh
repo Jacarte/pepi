@@ -894,13 +894,16 @@ ask_yes() {
     [[ "$reply" =~ ^[Yy]$ ]]
 }
 
-# Task preset: verified20-v1 (default) or multilingual10-v1. It supplies the default IDs, task repo
+# Task preset: verified20-v1 (default), multilingual10-v1 or wasmtime-safe-v1. Supplies IDs, task repo
 # and Pi timeout; an explicit PEPI_EVAL_IDS/TASK_REPO/TIMEOUT_SECONDS/DATASET still wins.
 preset_name() { printf '%s\n' "${PEPI_EVAL_PRESET:-verified20-v1}"; }
 check_preset() {
     case "$(preset_name)" in
         verified20-v1|multilingual10-v1) ;;
-        *) die "PEPI_EVAL_PRESET must be verified20-v1 or multilingual10-v1" 2 ;;
+        wasmtime-safe-v1)
+            [[ -n "${PEPI_EVAL_TASK_REPO:-}" ]] ||
+                die "wasmtime-safe-v1 requires PEPI_EVAL_TASK_REPO: a pinned evaluator checkout" 2 ;;
+        *) die "PEPI_EVAL_PRESET must be verified20-v1, multilingual10-v1 or wasmtime-safe-v1" 2 ;;
     esac
 }
 default_ids_file() { printf '%s\n' "$eval_dir/presets/$(preset_name).ids"; }
@@ -1554,7 +1557,8 @@ Optional PEPI_EVAL_* env vars:
   SWEBENCH_REPO         SWE-bench source (default ~/SWE-bench)
   PRESET                Task preset: verified20-v1 (default) or multilingual10-v1 (imported
                         with python -m evals.swebench.multilingual import); sets the default
-                        IDS, TASK_REPO (~/swe-bench-tasks-multilingual) and TIMEOUT_SECONDS (600)
+                        IDS, TASK_REPO (~/swe-bench-tasks-multilingual) and TIMEOUT_SECONDS (600).
+                        wasmtime-safe-v1 requires an explicit pinned evaluator TASK_REPO (timeout 1800).
   DATASET               Dataset name recorded and graded (default: the preset's)
   TASK_REPO             Task definitions (default ~/swe-bench-tasks)
   IDS                   Task IDs: comma-sep or file (default custom Verified20 v1)

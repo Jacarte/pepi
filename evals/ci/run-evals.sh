@@ -34,7 +34,7 @@ for variable in $(compgen -e); do
 done
 # The raw secrets stay out of the harness (and of the agent's container launcher): the eval reads
 # auth.json from PEPI_CI_SECRETS_DIR and the .env from PEPI_CI_LAUNCH_DIR.
-unset -v PI_AUTH EVAL_ENV
+unset -v PI_AUTH EVAL_ENV WASMTIME_TASKS_TOKEN
 
 export PEPI_EVAL_RUN_NAME="$run_name"
 export PEPI_EVAL_CONFIG_DIR="$config_dir"
@@ -61,8 +61,23 @@ export PEPI_EVAL_USE_HOST_SKILLS=0 PEPI_EVAL_STRIP_TEST_EDITS=1 PEPI_EVAL_RESTOR
 # PEPI_EVAL_PROFILE stays unset: the profile is already applied inside CONFIG_DIR, and a named
 # profile from the PR checkout would otherwise fill gaps in the baseline's (main's) config.
 
-# Operator-managed network; on hosted runners a plain bridge (unrestricted egress, accepted risk).
-if command -v docker >/dev/null 2>&1; then
+# Wasmtime's hidden evaluator must never be reachable from an unrestricted agent network.
+if [[ "$PEPI_EVAL_PRESET" == wasmtime-safe-v1 ]]; then
+    [[ "${RUNNER_ENVIRONMENT:-}" == self-hosted ]] || die "wasmtime-safe-v1 requires a self-hosted pepi-evals runner"
+    [[ "$PEPI_EVAL_NETWORK" == pepi-eval ]] || die "wasmtime-safe-v1 requires the preconfigured pepi-eval network"
+    [[ -n "${PEPI_CI_TASK_REPO:-}" && "${PEPI_CI_TASK_REVISION:-}" =~ ^[0-9a-f]{40}$ ]] ||
+        die "wasmtime-safe-v1 requires PEPI_CI_TASK_REPO and pinned PEPI_CI_TASK_REVISION"
+    actual=$(git -C "$PEPI_CI_TASK_REPO" rev-parse HEAD) || die "cannot read the evaluator checkout revision"
+    [[ "$actual" == "$PEPI_CI_TASK_REVISION" ]] || die "evaluator checkout does not match WASMTIME_TASKS_REVISION"
+    dirty=$(git -C "$PEPI_CI_TASK_REPO" status --porcelain) || die "cannot check evaluator checkout status"
+    [[ -z "$dirty" ]] || die "evaluator checkout must be clean"
+    export PEPI_EVAL_DROP_MCP=1
+    export PEPI_EVAL_TIMEOUT_SECONDS="${PEPI_CI_TIMEOUT_SECONDS:-1800}"
+    command -v docker >/dev/null 2>&1 || die "Docker is required for wasmtime-safe-v1"
+    docker network inspect pepi-eval >/dev/null 2>&1 ||
+        die "wasmtime-safe-v1 requires a pre-existing operator-managed pepi-eval network with egress allowlist (deny GitHub); no network was created"
+# Existing presets permit a plain bridge on hosted runners (unrestricted egress, accepted risk).
+elif command -v docker >/dev/null 2>&1; then
     docker network inspect "$PEPI_EVAL_NETWORK" >/dev/null 2>&1 ||
         docker network create "$PEPI_EVAL_NETWORK" >/dev/null 2>&1 ||
         docker network inspect "$PEPI_EVAL_NETWORK" >/dev/null 2>&1 ||

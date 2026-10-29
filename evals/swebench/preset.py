@@ -1,8 +1,8 @@
-"""Frozen custom task presets (not official scores): metadata-only Verified20 v1 and the
-imported-task Multilingual10 v1 (Niffler pilot)."""
+"""Frozen custom task presets (not official scores): Verified20, Multilingual10 and Wasmtime safe-seven."""
 from __future__ import annotations
 
 import hashlib
+import re
 from collections import Counter
 from pathlib import Path
 
@@ -19,7 +19,12 @@ MULTILINGUAL_DEFINITION = PRESETS / "multilingual10-v1.json"
 MULTILINGUAL_IDS_SHA256 = "d40e0a3d723e96d5bab7f6844ca70930fa9c2ace79095642c6e30a3a92b143ac"
 MULTILINGUAL_DEFINITION_SHA256 = "a9339399f67a28eb704ef6e0686af1a8ab35796279bc0285f072cd13212eead8"
 DEFAULT_PRESET = "verified20-v1"
-PRESET_NAMES = (DEFAULT_PRESET, "multilingual10-v1")
+WASMTIME_IDS = PRESETS / "wasmtime-safe-v1.ids"
+WASMTIME_DEFINITION = PRESETS / "wasmtime-safe-v1.json"
+WASMTIME_IDS_SHA256 = "a121fa5c2561173a54b9ecfe63f8e18bbbcb7a5cac99f80dc1769253c90b8b59"
+WASMTIME_DEFINITION_SHA256 = "441e67a2efe6fd3fffca1a34f947ee65a10821b21d63f6cdf5f29de117ab2cba"
+WASMTIME_DATASET = "pepi/upstream-safe-v1"
+PRESET_NAMES = (DEFAULT_PRESET, "multilingual10-v1", "wasmtime-safe-v1")
 
 
 def tasklist_hash(ids: list[str]) -> str:
@@ -74,14 +79,30 @@ def multilingual_definition() -> dict:
     return frozen
 
 
+def wasmtime_definition() -> dict:
+    if sha256_file(WASMTIME_DEFINITION) != WASMTIME_DEFINITION_SHA256:
+        raise ValueError("Frozen Wasmtime definition hash mismatch")
+    frozen = read_json(WASMTIME_DEFINITION)
+    if sha256_file(WASMTIME_IDS) != WASMTIME_IDS_SHA256 or frozen["ids_sha256"] != WASMTIME_IDS_SHA256:
+        raise ValueError("Frozen Wasmtime IDs hash mismatch")
+    if list(frozen["tasks"]) != WASMTIME_IDS.read_text().splitlines():
+        raise ValueError("Frozen Wasmtime task metadata does not match its IDs")
+    return frozen
+
+
 def preset_ids(name: str) -> Path:
     if name not in PRESET_NAMES:
         raise ValueError(f"Unknown preset: {name!r}; choose one of {', '.join(PRESET_NAMES)}")
+    if name == "wasmtime-safe-v1":
+        wasmtime_definition()
+        return WASMTIME_IDS
     return DEFAULT_IDS if name == DEFAULT_PRESET else MULTILINGUAL_IDS
 
 
 def preset_definition(name: str) -> dict:
     preset_ids(name)
+    if name == "wasmtime-safe-v1":
+        return wasmtime_definition()
     return definition() if name == DEFAULT_PRESET else multilingual_definition()
 
 
@@ -91,7 +112,8 @@ def preset_dataset(name: str) -> str:
 
 def requires_task_inputs(ids: list[str]) -> bool:
     """Selections whose preset pins imported task inputs (computed only for them)."""
-    return tasklist_hash(ids) == MULTILINGUAL_IDS_SHA256
+    return (tasklist_hash(ids) == MULTILINGUAL_IDS_SHA256
+            or bool(ids) and set(ids) <= set(WASMTIME_IDS.read_text().splitlines()))
 
 
 def task_input_fingerprints(task_repo: Path, ids: list[str]) -> dict:
@@ -105,7 +127,18 @@ def task_input_fingerprints(task_repo: Path, ids: list[str]) -> dict:
 def selection_record(ids: list[str], tasks: list[dict], dataset: str,
                      task_revision: str | None, task_inputs: dict | None = None) -> dict:
     record = {"tasklist_sha256": tasklist_hash(ids), "task_repo_revision": task_revision}
-    if tasklist_hash(ids) == MULTILINGUAL_IDS_SHA256:
+    if dataset == WASMTIME_DATASET or set(ids) & set(WASMTIME_IDS.read_text().splitlines()):
+        frozen = wasmtime_definition()
+        allowed = WASMTIME_IDS.read_text().splitlines()
+        if dataset != frozen["dataset"] or not re.fullmatch(r"[0-9a-f]{40}", task_revision or ""):
+            raise ValueError("Wasmtime requires its frozen dataset and a pinned 40-hex task-source revision")
+        if not ids or len(set(ids)) != len(ids) or not set(ids) <= set(allowed):
+            raise ValueError("Wasmtime selection must contain only wasmtime-safe-v1 IDs (no duplicates)")
+        if any(task["repo"] != frozen["repo"] for task in tasks):
+            raise ValueError("Wasmtime task repository metadata mismatch")
+        record["preset"] = frozen
+        record["definition_sha256"] = sha256_file(WASMTIME_DEFINITION)
+    elif tasklist_hash(ids) == MULTILINGUAL_IDS_SHA256:
         frozen = multilingual_definition()
         if dataset != frozen["dataset"]:
             raise ValueError("Multilingual10 requires its frozen dataset")

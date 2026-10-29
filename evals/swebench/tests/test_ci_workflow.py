@@ -20,8 +20,8 @@ REPO = Path(__file__).resolve().parents[3]
 WORKFLOW = REPO / ".github/workflows/pepi-evals.yml"
 RUN_EVALS = REPO / "evals/ci/run-evals.sh"
 SELF_HOSTED_LABELS = ["self-hosted", "pepi-evals"]
-HEAVY_RUNS_ON = "${{ fromJSON(vars.EVAL_RUNS_ON || '[\"self-hosted\",\"pepi-evals\"]') }}"
-HOSTED_ALTERNATIVE = "# EVAL_RUNS_ON='[\"ubuntu-latest\"]'  (hosted: see free-disk caveats)"
+HEAVY_RUNS_ON = "${{ fromJSON(needs.lookup.outputs.task_source == 'wasmtime' && '[\"self-hosted\",\"pepi-evals\"]' || vars.EVAL_RUNS_ON || '[\"self-hosted\",\"pepi-evals\"]') }}"
+HOSTED_ALTERNATIVE = "# EVAL_RUNS_ON='[\"ubuntu-latest\"]'  (existing presets only; Wasmtime requires self-hosted)"
 ENVIRONMENT = "pepi-evals"
 SECRET_JOBS = ("baseline", "candidate", "report")
 LABEL_GUARD = "github.event.label.name == 'run-evals'"
@@ -346,7 +346,8 @@ class WorkflowStructureTests(unittest.TestCase):
             steps = self.jobs[job]["steps"]
             by_repo = {step["with"].get("repository"): step for step in steps
                        if uses(step, "actions/checkout") and step["with"].get("repository")}
-            self.assertEqual(set(by_repo), {"SWE-bench/SWE-bench", "SWE-bench/swe-bench-tasks"})
+            self.assertEqual(set(by_repo), {"SWE-bench/SWE-bench", "SWE-bench/swe-bench-tasks",
+                                            "${{ needs.lookup.outputs.task_repository }}"})
             self.assertEqual(by_repo["SWE-bench/SWE-bench"]["with"]["ref"], "${{ needs.lookup.outputs.swebench_revision }}")
             self.assertEqual(by_repo["SWE-bench/swe-bench-tasks"]["with"]["ref"], "${{ needs.lookup.outputs.task_revision }}")
 
@@ -364,7 +365,13 @@ class WorkflowStructureTests(unittest.TestCase):
                         self.assertTrue(allowed)
                 if "github.token" in value:
                     self.assertTrue(runs(step, "gh pr comment") or runs(step, "gh api -X DELETE"), step.get("name"))
-            self.assertNotIn("secrets.", json.dumps(step.get("with") or {}), step.get("name"))
+            inputs = dict(step.get("with") or {})
+            if inputs.get("path") == "ext/wasmtime-tasks":
+                self.assertIn(job, ("baseline", "candidate"))
+                self.assertTrue(uses(step, "actions/checkout"))
+                self.assertEqual(step["if"], "needs.lookup.outputs.task_source == 'wasmtime'")
+                self.assertEqual(inputs.pop("token"), "${{ secrets.WASMTIME_TASKS_TOKEN || github.token }}")
+            self.assertNotIn("secrets.", json.dumps(inputs), step.get("name"))
 
     def test_jobs_that_write_secrets_mask_them_and_always_clean_up(self):
         writers = 0
@@ -653,7 +660,8 @@ class WorkflowStructureTests(unittest.TestCase):
         self.assertEqual(" ".join(" ".join(command[1:]).split()),
                          "PYTHONDONTWRITEBYTECODE=1 python -m unittest "
                          "evals.swebench.tests.test_ci_workflow evals.swebench.tests.test_ci_helpers "
-                         "evals.swebench.tests.test_ci evals.swebench.tests.test_reporting")
+                         "evals.swebench.tests.test_ci evals.swebench.tests.test_reporting "
+                         "evals.swebench.tests.test_wasmtime_ci")
 
         steps = lookup["steps"]
         python_setup = step_index(steps, lambda step: uses(step, "actions/setup-python"))
