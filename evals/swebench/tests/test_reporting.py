@@ -120,6 +120,49 @@ class ReportingTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             summarize_run(run)
 
+    def write_prediction_model(self, run, manifest, model_name):
+        with (run / "predictions.jsonl").open("w") as stream:
+            for task in manifest["tasks"]:
+                stream.write(json.dumps({"instance_id": task["instance_id"], "model_name_or_path": model_name,
+                                         "model_patch": ""}) + "\n")
+
+    def test_predictions_accept_exact_labeled_model_name(self):
+        run, manifest = self.fixture()
+        for label in ("main", "candidate", "variant-b"):
+            with self.subTest(label=label):
+                manifest["config"] = {"label": label}
+                model_name = f"{label}-{manifest['config_id']}"
+                self.write_prediction_model(run, manifest, model_name)
+                submitted = predictions(run, manifest)
+                self.assertEqual(set(submitted), {task["instance_id"] for task in manifest["tasks"]})
+                self.assertTrue(all(row["model_name_or_path"] == model_name for row in submitted.values()))
+
+    def test_predictions_preserve_unlabeled_model_name(self):
+        run, manifest = self.fixture()
+        self.assertEqual(len(predictions(run, manifest)), len(manifest["tasks"]))  # Legacy: no config key.
+        for config in ({}, {"label": None}, {"label": ""}):
+            with self.subTest(config=config):
+                manifest["config"] = config
+                self.assertEqual(len(predictions(run, manifest)), len(manifest["tasks"]))
+
+    def test_predictions_reject_wrong_label_or_config_id(self):
+        run, manifest = self.fixture()
+        for label in (None, "main", "candidate"):
+            if label is None:
+                manifest.pop("config", None)
+            else:
+                manifest["config"] = {"label": label}
+            expected = f"{label}-{manifest['config_id']}" if label else manifest["config_id"]
+            for model_name in (manifest["config_id"], "main-pepi-test", "candidate-pepi-test",
+                               "other-pepi-test", "pepi-other", f"{label}-pepi-other",
+                               f"prefix-{expected}", f"{expected}-suffix", "", None, 123):
+                if model_name == expected:
+                    continue
+                with self.subTest(label=label, model_name=model_name):
+                    self.write_prediction_model(run, manifest, model_name)
+                    with self.assertRaisesRegex(ValueError, "wrong config ID"):
+                        predictions(run, manifest)
+
     def test_duplicate_prediction_ids_are_rejected(self):
         run, manifest = self.fixture()
         path = run / "predictions.jsonl"
@@ -587,6 +630,49 @@ class ReportingTests(unittest.TestCase):
         self.assertIn("(strict, test edits removed: 0/2; 1 unknown; test-checkout repaired: 1/2, 1 unknown).",
                       markdown)
         self.assertIn("see strict and test-checkout repaired scores.", markdown)
+
+    def test_labeled_summary_uses_official_model_name_but_bare_variant_config_id(self):
+        for label in ("main", "candidate"):
+            with self.subTest(label=label):
+                run, manifest, _ = self.restored_fixture(
+                    {"owner__repo-1": SOURCE + EXISTING_TEST, "owner__repo-2": SOURCE},
+                    {"owner__repo-1": self.LISTED, "owner__repo-2": self.LISTED})
+                manifest["config"] = {"label": label}
+                write_json(run / "manifest.json", manifest)
+                model_name = f"{label}-{manifest['config_id']}"
+                submitted = [json.loads(line) for line in (run / "predictions.jsonl").read_text().splitlines()]
+                with (run / "predictions.jsonl").open("w") as stream:
+                    for row in submitted:
+                        stream.write(json.dumps({**row, "model_name_or_path": model_name}) + "\n")
+                grading = read_json(run / "grading.json")
+                grading["predictions_sha256"] = file_hash(run / "predictions.jsonl")
+                write_json(run / "grading.json", grading)
+                reports = run / grading["reports"]
+                (reports / manifest["config_id"]).rename(reports / model_name)
+                write_json(reports / model_name / "owner__repo-2/report.json",
+                           {"owner__repo-2": {"resolved": True}})
+                write_json(reports / "results.json", {"error_ids": []})
+
+                with patch("evals.swebench.reporting.subprocess.run", return_value=SimpleNamespace(returncode=0)):
+                    self.assertEqual(grade_run(run, run / "task-source", 2, 60, strip_test_edits=True), 0)
+                    self.assertEqual(grade_run(run, run / "task-source", 2, 60, restore_test_files=True), 0)
+                for record_path in (STRICT_RECORD, RESTORED_RECORD):
+                    record = read_json(run / record_path)
+                    rows = [json.loads(line) for line in (run / record["predictions"]).read_text().splitlines()]
+                    self.assertEqual([row["model_name_or_path"] for row in rows], [manifest["config_id"]])
+                self.fake_strict_report(run, "owner__repo-1", False)
+                self.fake_restored_report(run, "owner__repo-1", True)
+
+                result = summarize_run(run)
+                self.assertEqual((result["resolved"], result["resolved_strict"], result["resolved_restored"]), (2, 1, 2))
+                self.assertEqual((result["unknown_grades"], result["unknown_grades_strict"],
+                                  result["unknown_grades_restored"]), (0, 0, 0))
+                self.assertEqual(result["resolved_fraction"], 1)
+                first, second = result["instances"]
+                self.assertEqual((first["grading_status"], first["grading_status_strict"],
+                                  first["grading_status_restored"]), ("resolved", "unresolved", "resolved"))
+                self.assertEqual((second["grading_status"], second["grading_status_strict"],
+                                  second["grading_status_restored"]), ("resolved", "resolved", "resolved"))
 
     def test_test_checkout_command_prints_regraded_and_unrewritable_counts(self):
         run, _, _ = self.restored_fixture({"owner__repo-1": SOURCE + EXISTING_TEST, "owner__repo-2": SOURCE + EXISTING_TEST},

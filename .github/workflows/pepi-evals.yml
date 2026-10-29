@@ -191,6 +191,21 @@ jobs:
         with:
           python-version: ${{ env.PEPI_CI_PYTHON_VERSION }}
 
+      # Only parser setup may fetch from the network; the smoke tests below are entirely offline.
+      - name: Ensure the workflow-test YAML parser is available
+        working-directory: harness
+        run: |
+          set -euo pipefail
+          python -c 'import yaml' 2>/dev/null || python -m pip install --disable-pip-version-check PyYAML==6.0.2
+
+      - name: Run the offline CI smoke tests
+        working-directory: harness
+        run: |
+          set -euo pipefail
+          PYTHONDONTWRITEBYTECODE=1 python -m unittest \
+            evals.swebench.tests.test_ci_workflow evals.swebench.tests.test_ci_helpers \
+            evals.swebench.tests.test_ci evals.swebench.tests.test_reporting
+
       - name: Resolve the preset
         id: preset
         working-directory: harness

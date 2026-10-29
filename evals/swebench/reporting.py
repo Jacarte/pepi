@@ -45,11 +45,13 @@ def file_hash(path: Path) -> str:
 
 
 def predictions(run: Path, manifest: dict) -> dict:
+    label = manifest.get("config", {}).get("label")
+    model_name = f"{label}-{manifest['config_id']}" if label else manifest["config_id"]
     errors, result = [], {}
     for row in records(run / "predictions.jsonl", errors):
         instance_id = row.get("instance_id")
         if not isinstance(instance_id, str) or instance_id in result \
-                or row.get("model_name_or_path") != manifest["config_id"] \
+                or row.get("model_name_or_path") != model_name \
                 or not isinstance(row.get("model_patch"), str):
             raise ValueError("Duplicate or malformed prediction, or wrong config ID")
         result[instance_id] = row
@@ -415,7 +417,7 @@ def summarize_run(run: Path) -> dict:
         attempt = read_json(directory / "attempt.json") if (directory / "attempt.json").is_file() else {}
         telemetry = read_json(directory / "telemetry.json") if (directory / "telemetry.json").is_file() else collect(directory)
         patch = submitted[instance_id]["model_patch"]
-        resolved, status = report_outcome(reports / manifest["config_id"] / instance_id / "report.json",
+        resolved, status = report_outcome(reports / submitted[instance_id]["model_name_or_path"] / instance_id / "report.json",
                                           instance_id, not patch, errors)
         total = telemetry.get("total") or {}
         agent_status = attempt.get("agent_status", "not_started")

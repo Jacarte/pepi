@@ -634,6 +634,60 @@ class WorkflowStructureTests(unittest.TestCase):
         self.assertLess(sparse[0], check[0])
         self.assertLess(check[0], min(uses_harness))
 
+    def test_offline_ci_smoke_gates_the_expensive_eval_jobs(self):
+        smoke_steps = [(job, index, step) for job, index, step in all_steps(self.workflow)
+                       if runs(step, "python -m unittest")]
+        self.assertEqual(len(smoke_steps), 1)
+        job, smoke_index, smoke = smoke_steps[0]
+        self.assertEqual(job, "lookup")
+        lookup = self.jobs[job]
+        self.assertEqual(lookup["runs-on"], "ubuntu-latest")
+        self.assertNotIn("environment", lookup)
+        self.assertNotIn("secrets.", json.dumps(lookup))
+        for scope in (lookup, smoke):
+            self.assertNotIn("continue-on-error", scope)
+        self.assertNotIn("if", smoke)
+        self.assertEqual(smoke["working-directory"], "harness")
+        command = smoke["run"].replace("\\\n", " ").splitlines()
+        self.assertEqual(command[0], "set -euo pipefail")
+        self.assertEqual(" ".join(" ".join(command[1:]).split()),
+                         "PYTHONDONTWRITEBYTECODE=1 python -m unittest "
+                         "evals.swebench.tests.test_ci_workflow evals.swebench.tests.test_ci_helpers "
+                         "evals.swebench.tests.test_ci evals.swebench.tests.test_reporting")
+
+        steps = lookup["steps"]
+        python_setup = step_index(steps, lambda step: uses(step, "actions/setup-python"))
+        self.assertEqual(len(python_setup), 1)
+        self.assertEqual(steps[python_setup[0]]["with"]["python-version"], "${{ env.PEPI_CI_PYTHON_VERSION }}")
+        parser_setup = step_index(steps, lambda step: runs(step, "pip install"))
+        self.assertEqual(len(parser_setup), 1)
+        parser = steps[parser_setup[0]]
+        self.assertEqual(parser["working-directory"], "harness")
+        self.assertIn("python -c 'import yaml' 2>/dev/null || python -m pip install", parser["run"])
+        self.assertIn("PyYAML==6.0.2", parser["run"])
+        self.assertNotIn("if", parser)
+        self.assertNotIn("continue-on-error", parser)
+        self.assertLess(python_setup[0], parser_setup[0])
+        self.assertLess(parser_setup[0], smoke_index)
+        harness_checkout = step_index(steps, lambda step: uses(step, "actions/checkout")
+                                      and step["with"].get("path") == "harness")
+        workflow_check = step_index(steps, lambda step: runs(step, "executing/.github/workflows/pepi-evals.yml"))
+        self.assertEqual(len(harness_checkout), 1)
+        self.assertEqual(len(workflow_check), 1)
+        self.assertLess(harness_checkout[0], smoke_index)
+        self.assertLess(workflow_check[0], smoke_index)
+        # Fail before profile/config work too, not just before Docker builds in dependent jobs.
+        config = step_index(steps, lambda step: runs(step, "ci assemble-config"))
+        self.assertEqual(len(config), 1)
+        self.assertLess(smoke_index, config[0])
+        for name in ("baseline", "candidate"):
+            with self.subTest(job=name):
+                heavy = self.jobs[name]
+                self.assertEqual(heavy["needs"], "lookup")
+                self.assertNotIn("always()", heavy["if"])
+                self.assertNotIn("!cancelled()", heavy["if"])
+                self.assertTrue(any(runs(step, "run-evals.sh") for step in heavy["steps"]))
+
     def test_disk_scripts_run_only_on_the_runner_kind_they_are_for(self):
         for job, _, step in all_steps(self.workflow):
             if runs(step, "free-disk.sh"):
