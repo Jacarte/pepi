@@ -124,6 +124,99 @@ def parent_stats(path: Path) -> dict:
     return result
 
 
+JEV_CRITERIA = {"task_coverage", "slice_independence", "ownership_conflicts", "integration_feasibility"}
+JEV_THRESHOLD = 0.8  # Mirrors the immutable controller/scorer policy.
+JEV_OUTCOMES = {"accepted", "rejected", "transport_error", "http_error", "invalid_response", "cancelled", "timeout"}
+
+
+def external_jev(directory: Path) -> dict:
+    """Separate HTTP accounting; receipts are not Pi model usage and never supply approval."""
+    calls, invalid = {}, 0
+    for path in sorted(directory.glob("*.jsonl")):
+        if path.is_symlink() or not path.is_file():
+            invalid += 1
+            continue
+        with path.open("rb") as stream:
+            for line in stream:
+                try:
+                    if len(line) > 4096:
+                        raise ValueError()
+                    row = json.loads(line)
+                    if not isinstance(row, dict) or set(row) - {
+                        "schema_version", "receipt_id", "session_digest", "tool_call_digest", "attempt",
+                        "plan_digest", "policy_digest", "model", "phase", "outcome", "duration_ms", "usage", "cost_usd", "scores", "passed"
+                    } or row.get("schema_version") != 1 or row.get("model") != "jev-latest":
+                        raise ValueError()
+                    identity = row.get("receipt_id")
+                    if not isinstance(identity, str) or not re.fullmatch(r"[a-f0-9-]{36}", identity):
+                        raise ValueError()
+                    if any(not isinstance(row.get(key), str) or not re.fullmatch(r"[a-f0-9]{64}", row[key])
+                           for key in ("session_digest", "tool_call_digest", "plan_digest", "policy_digest")):
+                        raise ValueError()
+                    if type(row.get("attempt")) is not int or row["attempt"] < 1 or number(row.get("duration_ms")) is None:
+                        raise ValueError()
+                    phase, outcome = row.get("phase"), row.get("outcome")
+                    if not (phase == "started" and outcome == "unfinished" or phase == "finished" and outcome in JEV_OUTCOMES):
+                        raise ValueError()
+                    usage_row = row.get("usage")
+                    if usage_row is not None and (not isinstance(usage_row, dict) or set(usage_row) != {"input_tokens", "output_tokens"}
+                            or any(type(value) is not int or value < 0 for value in usage_row.values())):
+                        raise ValueError()
+                    if row.get("cost_usd") is not None:
+                        raise ValueError()  # This receipt version has no verified pricing contract.
+                    passed, scores = row.get("passed"), row.get("scores")
+                    if outcome in ("accepted", "rejected"):
+                        if usage_row is None or not isinstance(passed, dict) or set(passed) != JEV_CRITERIA \
+                                or any(type(value) is not bool for value in passed.values()) \
+                                or (outcome == "accepted") != all(passed.values()):
+                            raise ValueError()
+                        # Older receipts omit scores; new ones validate the exact values behind `passed`.
+                        if scores is not None and (not isinstance(scores, dict) or set(scores) != JEV_CRITERIA
+                                or any(type(value) not in (int, float) or value < 0 or value > 1
+                                       or isinstance(value, float) and not math.isfinite(value)
+                                       for value in scores.values())
+                                or any(passed[key] != (scores[key] >= JEV_THRESHOLD) for key in JEV_CRITERIA)):
+                            raise ValueError()
+                    elif usage_row is not None or passed is not None or scores is not None:
+                        raise ValueError()
+                    phases = calls.setdefault(identity, {})
+                    if phase in phases and phases[phase] != row:
+                        phases["conflict"] = True
+                        raise ValueError()
+                    phases[phase] = row
+                except (ValueError, TypeError, KeyError, UnicodeDecodeError):
+                    invalid += 1  # Never echo an input line, key, file name or parser message.
+    rows = []
+    for phases in calls.values():
+        start, end = phases.get("started"), phases.get("finished")
+        binding = ("session_digest", "tool_call_digest", "plan_digest", "policy_digest", "attempt", "model")
+        if phases.get("conflict") or start and end and any(start[key] != end[key] for key in binding):
+            invalid += 1
+            rows.append({"outcome": "unknown", "usage": None})
+        else:
+            rows.append(end or start)
+    outcomes = {}
+    for row in rows:
+        outcomes[row["outcome"]] = outcomes.get(row["outcome"], 0) + 1
+    scored = sorted((row for row in rows if isinstance(row.get("scores"), dict)), key=lambda row: row["attempt"])
+    score_attempts = [{"attempt": row["attempt"], "outcome": row["outcome"],
+                       "minimum_score": min(row["scores"].values()), "criteria": row["scores"]}
+                      for row in scored]
+    best_score = None
+    for attempt in score_attempts:
+        if best_score is None or attempt["minimum_score"] > best_score["minimum_score"]:
+            best_score = attempt
+    known = [row["usage"] for row in rows if row.get("usage") is not None]
+    complete = bool(rows) and len(known) == len(rows) and invalid == 0
+    observed = {key: sum(row[key] for row in known) for key in ("input_tokens", "output_tokens")}
+    return {"status": "available" if complete else "partial" if rows or invalid else "unavailable",
+            "http_attempts": len(rows), "outcomes": outcomes, "invalid_receipts": invalid,
+            "scored_attempts": len(scored), "score_attempts": score_attempts, "best_score": best_score,
+            "usage": observed if complete else None, "observed_usage": observed,
+            "cost_usd": None, "duration_ms_sum": sum(row.get("duration_ms", 0) for row in rows),
+            "cost_note": "External Jev HTTP calls, separate from Pi totals; pricing unavailable, not zero"}
+
+
 def collect(attempt: Path) -> dict:
     parent = parent_stats(attempt / "parent.events.jsonl")
     problems = list(parent["problems"])
@@ -146,6 +239,7 @@ def collect(attempt: Path) -> dict:
         "cost_source": "pi model-price estimate; not gateway billing",
         "coverage": "session-accounted usage; external calls and hidden provider retries are not guaranteed",
         "parent_tool_timing": last.get("tools"), "problems": problems,
+        "external_jev": external_jev(attempt / "artifacts/jev-receipts"),
         # Optional (absent in older telemetry.json): skill names and counts only, never paths/content.
         "skill_reads": parent.pop("skill_reads"), "skill_reads_invalid_names": parent.pop("skill_reads_invalid_names"),
     }

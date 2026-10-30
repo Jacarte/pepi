@@ -70,6 +70,17 @@ uses every selected task. Empty patches are unsuccessful; missing/error reports
 are unknown, not fabricated test failures. Agent status and correctness remain
 separate: a timed-out partial patch can still resolve a task.
 
+Per-task JSON/CSV rows also carry optional `display_label` and `source_url` from
+[task-labels.json](task-labels.json), a reporting-only catalog of official public GitHub
+issue titles and their source URLs. No issue bodies, evaluator bundle data or test output
+are used. Labels stay outside task prompts, frozen presets, task identity and execution
+cache keys. `instance_id` and comparison win/regression arrays remain exact raw IDs.
+Narration and CI lists prefer names (linked to their public source in CI), falling back
+to IDs for unknown tasks; older cached summaries can use the catalog without regrading.
+Saved summary labels take precedence when present. Titles are bounded plain text;
+CI escapes markup/mentions, narration treats them as data, and CSV prefixes formula-like
+titles with an apostrophe. Missing labels/URLs are `null` in JSON and empty in CSV.
+
 Git history (see [README](README.md#git-history-after-the-task-base)): each row carries
 `history_pruning` (`pruned`, `refs_only`, `failed`, `skipped`, or `null` for attempts from before the
 change) and the summary `tasks_history_not_pruned` (`refs_only` + `failed`); `summary.md` notes a non-zero

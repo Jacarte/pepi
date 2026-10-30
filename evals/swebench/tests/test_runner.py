@@ -1,3 +1,4 @@
+import io
 import json
 import subprocess
 import tempfile
@@ -18,9 +19,11 @@ TASK = {"instance_id": "owner__repo-1", "repo": "owner/repo", "base_commit": "a"
 VERSIONS = {"pi": "1.1.0", "pi-provider-litellm": "3.0.1", "pi-subagents": "0.68.0"}
 
 
-def prepare_fixture(root):
+def prepare_fixture(root, tasks=None):
     pepi = root / "pepi"
     pepi.mkdir()
+    (pepi / "agents").mkdir()
+    (pepi / "agents/deep-worker.md").write_text("---\nname: deep-worker\n---\nImplement the assigned task.\n")
     (pepi / "AGENTS.md").write_text("Delegate; verify; report honestly.\n")
     (pepi / "settings.json").write_text(json.dumps({
         "defaultProvider": "litellm", "defaultModel": "model-a",
@@ -30,7 +33,8 @@ def prepare_fixture(root):
     }))
     (pepi / "auth.json").write_text("DO NOT COPY")
     run = root / "run-1"
-    prepare_run(pepi, run, [TASK], [TASK["instance_id"]], VERSIONS, "node:22-bookworm-slim")
+    tasks = [TASK] if tasks is None else tasks
+    prepare_run(pepi, run, tasks, [task["instance_id"] for task in tasks], VERSIONS, "node:22-bookworm-slim")
     return run
 
 
@@ -203,6 +207,130 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(rows[0]["model_patch"], "")
             with self.assertRaises(ValueError):
                 run_tasks(run, 1, "eval", "2", "4g")
+
+
+class RunTasksProgressTests(unittest.TestCase):
+    @patch.dict("os.environ", {"LITELLM_BASE_URL": "https://example.invalid",
+                              "LITELLM_API_KEY": "private-credential-sentinel"})
+    def run_progress(self, outcomes, audit_failed=False):
+        with tempfile.TemporaryDirectory(prefix="private-path-sentinel") as directory:
+            tasks = [dict(TASK, instance_id=f"owner__repo-{i}",
+                          problem_statement="private-description-sentinel")
+                     for i in range(1, len(outcomes) + 1)]
+            run = prepare_fixture(Path(directory), tasks)
+            (run / "builds.json").write_text(json.dumps({
+                task["instance_id"]: {"image_id": "sha256:frozen"} for task in tasks}))
+            stderr = io.StringIO()
+            calls = []
+
+            def attempt(*args):
+                ordinal = len(calls) + 1
+                self.assertTrue(stderr.getvalue().endswith(
+                    f"pepi-eval: task {ordinal}/{len(tasks)} started\n"))
+                self.assertEqual(flush.call_count, 2 * ordinal - 1)
+                calls.append(args)
+                if audit_failed:
+                    args[8].audit_failed = True
+                outcome = outcomes[ordinal - 1]
+                if isinstance(outcome, Exception):
+                    raise outcome
+                return {"instance_id": args[1]["instance_id"], "agent_status": outcome,
+                        "patch": "private-patch-sentinel", "errors": ["private-error-sentinel"],
+                        "timing_seconds": {"agent_wall": 0.01}}
+
+            ticks = [tick for i in range(len(tasks)) for tick in (100 + i * 10, 104.25 + i * 10)]
+            with patch("evals.swebench.runner.Docker", return_value=FakeDocker()), \
+                 patch("evals.swebench.runner.run_one", side_effect=attempt) as run_one_mock, \
+                 patch("evals.swebench.runner.time.monotonic", side_effect=ticks) as clock, \
+                 patch("evals.swebench.runner.sys.stderr", stderr), \
+                 patch.object(stderr, "flush", wraps=stderr.flush) as flush:
+                code = run_tasks(run, 1, "eval", "2", "4g")
+                self.assertEqual(flush.call_count, 2 * run_one_mock.call_count)
+                self.assertEqual(clock.call_count, 2 * run_one_mock.call_count)
+            predictions = [json.loads(line) for line in (run / "predictions.jsonl").read_text().splitlines()]
+            self.assertEqual([row["instance_id"] for row in predictions],
+                             [task["instance_id"] for task in tasks])
+            return code, stderr.getvalue(), run_one_mock.call_count
+
+    def test_progress_format_status_elapsed_and_safe_metadata(self):
+        statuses = ["completed", "timeout", "agent_error", "setup_error", "runner_error", "interrupted"]
+        code, output, count = self.run_progress(statuses)
+        self.assertEqual(code, 130)
+        self.assertEqual(count, len(statuses))
+        expected = "".join(
+            f"pepi-eval: task {i}/{len(statuses)} started\n"
+            f"pepi-eval: task {i}/{len(statuses)} completed agent_status={status} elapsed_seconds=4.2\n"
+            for i, status in enumerate(statuses, 1))
+        self.assertEqual(output, expected)
+        self.assertNotIn("private-", output)
+        self.assertNotIn("owner__repo", output)
+
+    def test_progress_normalizes_runner_exception_without_printing_it(self):
+        code, output, count = self.run_progress([OSError("private-exception-sentinel")])
+        self.assertEqual((code, count), (3, 1))
+        self.assertEqual(output, "pepi-eval: task 1/1 started\n"
+                         "pepi-eval: task 1/1 completed agent_status=runner_error elapsed_seconds=4.2\n")
+
+    @patch.dict("os.environ", {"LITELLM_BASE_URL": "https://example.invalid",
+                              "LITELLM_API_KEY": "private-credential-sentinel"})
+    def test_progress_io_failures_preserve_execution_predictions_cleanup_and_exit_code(self):
+        class FailingStderr(io.StringIO):
+            phase = ""
+            failures = 0
+
+            def write(self, text):
+                if text.startswith("pepi-eval: task "):
+                    self.phase = "started" if text.endswith("started") else "completed"
+                if operation == "write" and self.phase == phase:
+                    self.failures += 1
+                    raise BrokenPipeError("private-stderr-error")
+                return super().write(text)
+
+            def flush(self):
+                if operation == "flush" and self.phase == phase:
+                    self.failures += 1
+                    raise OSError("private-stderr-error")
+                return super().flush()
+
+        for operation in ("write", "flush"):
+            for phase in ("started", "completed"):
+                for failure, status, code in ((None, "completed", 0), ("setup", "setup_error", 3),
+                                              ("interrupt", "interrupted", 130)):
+                    with self.subTest(operation=operation, phase=phase, failure=failure), \
+                         tempfile.TemporaryDirectory() as directory:
+                        tasks = [dict(TASK, instance_id=f"owner__repo-{i}") for i in (1, 2)]
+                        run = prepare_fixture(Path(directory), tasks)
+                        (run / "builds.json").write_text(json.dumps({
+                            task["instance_id"]: {"image_id": "sha256:frozen"} for task in tasks}))
+                        docker, stderr = FakeDocker(failure), FailingStderr()
+                        with patch("evals.swebench.runner.Docker", return_value=docker), \
+                             patch("evals.swebench.runner.sys.stderr", stderr):
+                            self.assertEqual(run_tasks(run, 1, "eval", "2", "4g"), code)
+                        attempts = 1 if failure == "interrupt" else 2
+                        self.assertEqual(stderr.failures, attempts)
+                        for action in ("create", "rm"):
+                            self.assertEqual(sum(cmd[0] == action for cmd in docker.commands), attempts)
+                        rows = [json.loads(line) for line in (run / "predictions.jsonl").read_text().splitlines()]
+                        self.assertEqual([row["instance_id"] for row in rows],
+                                         [task["instance_id"] for task in tasks])
+                        expected_patch = b"diff --git a/a b/a\nnew file mode 100644\n" if failure is None else b""
+                        for task, row in zip(tasks[:attempts], rows[:attempts]):
+                            output = run / "attempts" / task["instance_id"]
+                            self.assertEqual(json.loads((output / "attempt.json").read_text())["agent_status"], status)
+                            self.assertEqual((output / "patch.diff").read_bytes(), expected_patch)
+                            self.assertEqual(row["model_patch"], expected_patch.decode())
+                        if failure == "interrupt":
+                            self.assertEqual(rows[1]["model_patch"], "")
+                            self.assertFalse((run / "attempts" / tasks[1]["instance_id"]).exists())
+
+    def test_progress_does_not_claim_interrupt_or_audit_skipped_tasks_started(self):
+        for status, audit_failed, code in (("interrupted", False, 130), ("runner_error", True, 3)):
+            with self.subTest(status=status):
+                actual_code, output, count = self.run_progress(
+                    [status, "completed", "completed"], audit_failed=audit_failed)
+                self.assertEqual((actual_code, count), (code, 1))
+                self.assertEqual(output, "pepi-eval: task 1/3 started\n"
+                                 f"pepi-eval: task 1/3 completed agent_status={status} elapsed_seconds=4.2\n")
 
 
 class RealGitTests(unittest.TestCase):

@@ -1,0 +1,30 @@
+{
+  "bytecodealliance__wasmtime-15027-safe-v1-l8rcyy": {
+    "display_label": "wasi-http: Ensure buffered body reads aren't dropped when guests pass a host-provided body",
+    "source_url": "https://github.com/bytecodealliance/wasmtime/issues/15027"
+  },
+  "bytecodealliance__wasmtime-15028-safe-v1-l8rcyy": {
+    "display_label": "wasi-http: Report error when guests trap while streaming body",
+    "source_url": "https://github.com/bytecodealliance/wasmtime/issues/15028"
+  },
+  "bytecodealliance__wasmtime-15033-safe-v1-l8rcyy": {
+    "display_label": "Fix a debug-only assert linking assert",
+    "source_url": "https://github.com/bytecodealliance/wasmtime/issues/15033"
+  },
+  "bytecodealliance__wasmtime-15043-safe-v1-l8rcyy": {
+    "display_label": "CM+GC: Add support for flat scalars",
+    "source_url": "https://github.com/bytecodealliance/wasmtime/issues/15043"
+  },
+  "bytecodealliance__wasmtime-14979-safe-v1-l8rcyy": {
+    "display_label": "Add Global::get_numeric taking AsContext",
+    "source_url": "https://github.com/bytecodealliance/wasmtime/issues/14979"
+  },
+  "bytecodealliance__wasmtime-14961-safe-v1-l8rcyy": {
+    "display_label": "wasi-http: Add benchmarks for individual wasi:http p3 APIs",
+    "source_url": "https://github.com/bytecodealliance/wasmtime/issues/14961"
+  },
+  "bytecodealliance__wasmtime-14902-safe-v1-l8rcyy": {
+    "display_label": "serve: reject --addr with --systemd-listenfd",
+    "source_url": "https://github.com/bytecodealliance/wasmtime/issues/14902"
+  }
+}

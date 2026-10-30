@@ -17,6 +17,7 @@ from pathlib import Path
 from .common import fingerprint, identifier, read_json, read_manifest, write_json
 from .evalscript import RESTORE_POLICY, RESTORE_POLICY_VERSION, checkout_paths, rewrite_eval_script
 from .telemetry import collect, number, records
+from .task_labels import csv_label, display_metadata
 from .testpaths import STRIP_POLICY, STRIP_POLICY_VERSION, existing_paths, patch_test_edits, strip_test_files
 
 
@@ -399,6 +400,19 @@ def variant_outcomes(run: Path, manifest: dict, submitted: dict, official_inputs
     return {"outcomes": outcomes, "exit_code": record["exit_code"], "run_id": record["run_id"], "record": record}
 
 
+def external_jev_summary(rows: list[dict]) -> dict:
+    records = [row.get("external_jev") for row in rows]
+    known = [row for row in records if isinstance(row, dict)]
+    return {"http_attempts_observed": sum(number(row.get("http_attempts")) or 0 for row in known),
+            "scored_attempts_observed": sum(number(row.get("scored_attempts")) or 0 for row in known),
+            "tasks_with_complete_usage": sum(row.get("status") == "available" for row in known),
+            "tasks_missing_or_partial": len(rows) - sum(row.get("status") == "available" for row in known),
+            "observed_input_tokens": sum(number((row.get("observed_usage") or {}).get("input_tokens")) or 0 for row in known),
+            "observed_output_tokens": sum(number((row.get("observed_usage") or {}).get("output_tokens")) or 0 for row in known),
+            "cost_usd": None,
+            "note": "External HTTP accounting only; never added to Pi totals. Unknown spend is not zero."}
+
+
 def summarize_run(run: Path) -> dict:
     manifest = read_manifest(run)
     submitted = predictions(run, manifest)
@@ -424,7 +438,8 @@ def summarize_run(run: Path) -> dict:
         if agent_status == "completed" and (telemetry.get("reported_active_children") or 0) > 0:
             agent_status = "unfinished_children"
         rows.append({
-            "instance_id": instance_id, "resolved": resolved, "grading_status": status,
+            "instance_id": instance_id, **display_metadata(instance_id),
+            "resolved": resolved, "grading_status": status,
             "agent_status": agent_status,
             "agent_wall_seconds": attempt.get("timing_seconds", {}).get("agent_wall"),
             "setup_seconds": attempt.get("timing_seconds", {}).get("setup"),
@@ -432,6 +447,7 @@ def summarize_run(run: Path) -> dict:
             "output_tokens": total.get("output"), "cache_read_tokens": total.get("cacheRead"),
             "cache_write_tokens": total.get("cacheWrite"), "estimated_cost_usd": total.get("cost"),
             "accounting_status": telemetry.get("accounting_status", "unavailable"),
+            "external_jev": telemetry.get("external_jev"),
             **patch_test_edits(patch),
             # runner.HISTORY_PRUNE_SCRIPT outcome (pruned/refs_only/failed/skipped); None for older attempts.
             "history_pruning": (attempt.get("history_pruning") or {}).get("status"),
@@ -461,6 +477,7 @@ def summarize_run(run: Path) -> dict:
         "turns_observed": distribution([row["turns"] for row in rows]),
         "available_accounting_tasks": available, "observed_estimated_cost_usd": observed_cost,
         "estimated_total_cost_usd": observed_cost if full_cost else None,
+        "external_jev": external_jev_summary(rows),
         "estimated_cost_per_resolved": observed_cost / solved if full_cost and solved else None,
         "cost_caveat": "Pi estimates within reported coverage; includes failed attempts; not gateway billing",
         "tasks_modifying_existing_tests": sum(row["test_edit_kind"] == "modified_existing" for row in rows),
@@ -501,7 +518,8 @@ def summarize_run(run: Path) -> dict:
     with (run / "summary.csv").open("w", encoding="utf-8", newline="") as stream:
         writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
         writer.writeheader()
-        writer.writerows({**row, "test_files_touched": ";".join(row["test_files_touched"])} for row in rows)
+        writer.writerows({**row, "display_label": csv_label(row["display_label"]),
+                          "test_files_touched": ";".join(row["test_files_touched"])} for row in rows)
     scores = []
     if strict is not None:
         unknown_strict = (f"; {summary['unknown_grades_strict']} unknown"
@@ -535,8 +553,10 @@ def summarize_run(run: Path) -> dict:
         f"Resolved-task latency: {summary['latency_resolved_seconds']}.\n\n"
         f"Available accounting: {available}/{count}. Estimated cost per resolved task: "
         f"{summary['estimated_cost_per_resolved']}. `null`/`None` means unknown or undefined, not zero.\n\n"
-        "See summary.csv for per-task time, turns, token categories, cost and failure states.\n"
-        "Costs are Pi estimates, not invoices; reported coverage can omit unobserved work.\n", encoding="utf-8")
+        "See summary.csv for per-task time, turns, token categories, cost, failure states and best Jev criteria scores.\n"
+        "Costs are Pi estimates, not invoices; reported coverage can omit unobserved work.\n"
+        f"External Jev HTTP calls observed: {summary['external_jev']['http_attempts_observed']}; "
+        "external spend unavailable (not zero), separate from Pi totals.\n", encoding="utf-8")
     return summary
 
 

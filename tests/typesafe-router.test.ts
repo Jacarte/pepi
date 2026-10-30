@@ -28,7 +28,7 @@ function setup(child = false, scores = { human: 0, hard: 0.8, trivial: 0, routin
     fetch: async () => {
       fetches++;
       return { ok: true, json: async () => ({ answers: Object.fromEntries(
-        Object.entries(scores).map(([name, noul]) => [name, { noul }]),
+        Object.entries(scores).map(([name, noul]) => [name, { type: "noul", noul }]),
       ) }) };
     },
   });

@@ -26,6 +26,8 @@ def write_settings(directory: Path, **extra):
     settings.update(extra)
     (directory / "settings.json").write_text(json.dumps(settings))
     (directory / "AGENTS.md").write_text("rules\n")
+    (directory / "agents").mkdir(exist_ok=True)
+    (directory / "agents/deep-worker.md").write_text("---\nname: deep-worker\n---\nImplement the assigned task.\n")
 
 
 class RecordingDocker(FakeDocker):
@@ -61,7 +63,7 @@ class PrepareConfigTests(unittest.TestCase):
             self.assertEqual(profile["defaultModel"], "injected-model")
             self.assertEqual(manifest["config"]["label"], "variant-b")
             self.assertEqual(manifest["config"]["source"], "injected")
-            self.assertEqual(set(manifest["config"]["files"]), {"settings.json", "AGENTS.md"})
+            self.assertEqual(set(manifest["config"]["files"]), {"settings.json", "AGENTS.md", "agents/deep-worker.md"})
             self.assertEqual((base / "run-1/build/profile/AGENTS.md").read_text(), "rules\n")
 
     def test_different_configs_get_different_ids(self):

@@ -661,7 +661,7 @@ class WorkflowStructureTests(unittest.TestCase):
                          "PYTHONDONTWRITEBYTECODE=1 python -m unittest "
                          "evals.swebench.tests.test_ci_workflow evals.swebench.tests.test_ci_helpers "
                          "evals.swebench.tests.test_ci evals.swebench.tests.test_reporting "
-                         "evals.swebench.tests.test_wasmtime_ci")
+                         "evals.swebench.tests.test_wasmtime_ci evals.swebench.tests.test_cooperative")
 
         steps = lookup["steps"]
         python_setup = step_index(steps, lambda step: uses(step, "actions/setup-python"))

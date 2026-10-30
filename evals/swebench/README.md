@@ -110,6 +110,7 @@ agent process status, test outcomes, latency and estimated usage are reported se
 | `resolved_delta`, `wins`, `regressions`, `inconclusive` | `compare` JSON | Paired resolution change and task IDs that improved, regressed or could not be compared. |
 | `both_resolved_latency_pairs`, `both_resolved_latency_delta_median_seconds`, `estimated_cost_delta_usd`, `configuration_differences` | `compare` JSON | Median time delta only for tasks resolved in both runs, estimated cost delta when complete, and differences in non-pairing configuration. Positive time/cost deltas mean slower/more expensive candidate. |
 | `grader_exit_code`, `grading_seconds`, `total_instances`, `completed_instances`, `infra_failure_instances`, `ambiguous_failure_instances`, `empty_patch_instances`, `error_instances` | `grading.json` / `results.json` | Evaluator execution health/counts; these do not by themselves indicate model success. |
+| Jev attempts, per-attempt criteria, outcome and best attempt | Per-task `telemetry.json`, `summary.json`/`.csv`, and PR comment | Numeric probabilities only; the best attempt maximizes its weakest criterion and is marked. Raw issues, plans, scorer responses and receipts are excluded. |
 | `build_seconds`, image ID, platform; CPU, memory, deadline, network, concurrency | `builds.json` / `execution.json` | Build provenance and measurement protocol, not quality scores; keep them consistent across paired runs. |
 | Tool calls/errors, retries, compactions, child/model usage, per-tool timing, skill reads | Per-task `telemetry.json` | Diagnostic telemetry with coverage limits; external calls/provider retries may be unobserved. See [TELEMETRY.md](TELEMETRY.md). |
 
@@ -148,11 +149,30 @@ the inspected Pi 1.1.0 catalog; compatible custom extension providers are not
 provisioned. Other builtins, e.g. `anthropic`, use dedicated runtime `auth.json`,
 not arbitrary host environment forwarding.
 
+Both daily profiles load the generic cooperative planner extension and set
+`cooperativePlanner: true` for the freezer. This requires Pi **1.1.0** and
+pi-subagents **0.78.0** and copies exactly four arm-owned files:
+`extensions/cooperative-planner/{extension.ts,controller.mjs,scorer.mjs}` and
+`agents/planner.md`. Their bytes are fingerprinted; missing or unsafe files fail
+closed, with no fallback to the harness for an injected arm. With the flag absent
+or false, neither the extension nor the static planner is provisioned. Pi 1.1.0
+tolerates the custom flag; frozen settings use only the explicit extension entry.
+No arbitrary host extensions, optional model router, memory or skills are added.
+The generic working rules retain configured models when optional routing is absent
+and respect runtime isolation limits; scoring and dispatch errors remain fail-closed.
+
+Enabled runs require an explicitly forwarded `TYPESAFE_API_KEY` (`EVAL_ENV` in CI,
+`--pass-env TYPESAFE_API_KEY` with the CLI) and operator-approved access to
+`https://api.typesafe.ai/v1/systemone`. Only the public issue and proposed plan go
+to that scoring service, never hidden evaluator/reference data. The harness does
+not open egress or infer authorization from reachability. External HTTP accounting
+is separate from Pi usage; incomplete cost coverage remains unknown.
+
 `models.json` accepts provisioned-provider `modelOverrides` and model definitions
 with literal id/name, reasoning, input, contextWindow, maxTokens, cost and supported
 API metadata. Literal HTTP(S) base URLs must have no userinfo, query, fragment or
 interpolation. Keys, headers, commands, environment references and other model
-fields are refused without printing values. Codex's 500000-token context overrides
+fields are refused without printing values. Codex's configured context-window overrides
 are retained. This is intentionally narrower than Pi's full custom-model schema.
 
 ### Codex (builtin OAuth, no LiteLLM)
@@ -167,7 +187,8 @@ python -m evals.swebench build evals/swebench/runs/codex-01
 chmod 700 /path/to/eval-secrets
 chmod 600 /path/to/eval-secrets/auth.json
 python -m evals.swebench run evals/swebench/runs/codex-01 \
-  --secrets-dir /path/to/eval-secrets --timeout-seconds 1200 --network pepi-eval
+  --secrets-dir /path/to/eval-secrets --pass-env TYPESAFE_API_KEY \
+  --timeout-seconds 1200 --network pepi-eval
 ```
 
 Use real Pi provider-keyed credentials, for example this **schema only**:
@@ -223,6 +244,18 @@ artifacts and security model.
 `PEPI_EVAL_*` names belong to the workflow and are refused in its `EVAL_ENV` secret, and the
 destructive runner scripts (`evals/ci/free-disk.sh`, `prune-images.sh`) refuse to run outside
 GitHub Actions.
+
+For every preset, lookup and baseline execution assemble the pinned main checkout's
+own `profile.sh PROFILE`, ordinary `AGENTS.md` and configuration; the candidate uses
+the PR checkout's. CI never selects a preset-specific collaboration prompt. The PR
+harness explicitly appends each arm's frozen `/opt/pepi-agent/AGENTS.md` to Pi's system
+prompt, then the same [security contract](instructions.md). The later contract's runtime
+safety limits take precedence; it does not impose a collaboration strategy. Missing baseline files that would borrow from the PR
+fail the fallback guard; changed main bytes invalidate the baseline hash/cache.
+Candidate-only config edits cannot change assembled baseline identity. After merge,
+main becomes the incremental baseline, not a permanent direct-control arm.
+`ci assemble-config --agents-override FILE` remains available for explicit local
+experiments, with its regular-file validation and hashing, but CI does not use it.
 
 Benchmark different configurations by injecting files after cloning (for example
 from GitHub secrets). Order matters: the frozen profile is hashed at `prepare`.
@@ -300,7 +333,8 @@ Operator setup (required before real CI can run):
 4. Provision the Linux/amd64 self-hosted runner with Docker, adequate disk/RAM and a
    **pre-existing operator-managed `pepi-eval` network**. CI will not create a generic
    bridge for Wasmtime. Enforce an egress allowlist outside the harness: allow only the
-   approved provider endpoints and genuinely required build registries; **deny GitHub
+   approved provider/service endpoints (including the scoring endpoint only when explicitly
+   approved for an enabled profile) and genuinely required build registries; **deny GitHub
    from agent containers**, including API/raw/codeload endpoints and alternate routes.
    A network named `pepi-eval` alone is not enforcement. Test the policy before approval.
    Host-side base-image builds need GitHub, apt, Rust and crate registry access; keep
@@ -332,15 +366,19 @@ No image cache is pruned by this base-image step. Existing end-of-job agent-imag
 is unchanged. Provision enough time/disk for cold Rust builds; the existing 350-minute
 job limit covers setup, seven sequential attempts and grading, not just model time.
 
-Both configs use the harness-owned
-[`presets/wasmtime-safe-v1/AGENTS.md`](presets/wasmtime-safe-v1/AGENTS.md): direct single-agent
-implementation, no routing/delegation/subagents, make a patch and run focused tests.
-`ci assemble-config --agents-override FILE` refuses missing, symlinked or special files
-(including symlinked parents), replaces only the assembled AGENTS.md, and hashes its bytes.
-The global AGENTS.md is untouched. MCP is disabled; concurrency stays **1**; the default
-Pi invocation timeout is **1800 seconds** (`EVAL_TIMEOUT_SECONDS` may override it).
-Verified20 and Multilingual10 retain their existing instructions, MCP/network behavior
-and timeouts.
+Like all presets, this compares main versus PR configuration using each arm's generic
+AGENTS.md and profile. The obsolete preset-specific direct/two-worker prompt is removed.
+There is no target-specific planner or worker-count policy; model, planning and coordination
+effects are not separately attributable in this two-arm comparison.
+
+MCP remains disabled for this preset; task concurrency stays **1** and the default Pi
+invocation timeout is **1800 seconds** (`EVAL_TIMEOUT_SECONDS` may override it). Other
+presets retain their MCP/network behavior and timeouts. The common security contract
+prohibits Git metadata changes, including worktrees, and leaves all changes in /testbed.
+Labeled PR CI narrates baseline versus candidate with tasks solved first, then time/cost
+and accounted child invocations. Counts alone do not prove concurrency or independent
+decomposition; incomplete cost coverage stays unknown. The report is evidence for human
+review, not an automatic improvement/merge gate.
 
 Wasmtime's slim cache/handoff/artifact sets exclude evaluator/build logs, raw test output,
 eval scripts and pre-existing narratives. Public outputs retain summary-level metrics,
@@ -359,7 +397,8 @@ Docker, provider calls or GitHub access:
 ```sh
 PYTHONDONTWRITEBYTECODE=1 python -m unittest \
   evals.swebench.tests.test_wasmtime_ci evals.swebench.tests.test_ci_workflow \
-  evals.swebench.tests.test_ci_helpers evals.swebench.tests.test_preset
+  evals.swebench.tests.test_ci_helpers evals.swebench.tests.test_preset \
+  evals.swebench.tests.test_cooperative
 ```
 
 ### .env forwarding

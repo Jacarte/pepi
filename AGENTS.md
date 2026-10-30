@@ -33,6 +33,7 @@ including `worker`, and subagent workflows.
 ### Rule of thumb (mandatory routing)
 
 - `scout` before you understand the code.
+- `planner` after scout context for nontrivial coding-task decomposition.
 - `researcher` before you trust external facts.
 - `evidence-auditor` before you rely on important research.
 - `worker` to implement routine slices; `deep-worker` for complex, coupled, or
@@ -50,12 +51,25 @@ result, and add `oracle` whenever a decision is risky or consequential. Spawn
 `researcher` / `evidence-auditor` whenever external facts or research drive the
 outcome.
 
-Default flow:
+Default coding flow:
 
 ```text
-scout -> [researcher -> evidence-auditor] -> worker / deep-worker (parallel if independent)
-      -> parent integrates + runs checks -> reviewer -> (oracle if risky) -> worker / deep-worker fixes
+scout -> [researcher -> evidence-auditor] -> cooperative_plan (planner <-> parent Jev scoring)
+      -> parent approves dispatch -> workers -> parent integrates + verifies -> reviewer
+      -> (oracle if risky) -> worker / deep-worker fixes
+not_parallelizable (before scoring) -> ordinary worker / deep-worker -> parent checks -> reviewer
 ```
+
+Both profiles load the cooperative planner extension by default; plain `pi` is
+enough after applying the profile. Use it for nontrivial coding tasks only, after
+scout discovery and resolving open decisions. Supply `cooperative_plan` with the
+task, scout findings, and constraints (including runtime network, Git metadata
+and isolation restrictions); it launches the static `planner` role.
+The parent owns Jev scoring/feedback, validates every criterion >= 0.8, reviews
+the accepted plan, and alone authorizes dispatch. An explicit `not_parallelizable`
+result before scoring restores the existing ordinary worker/deep-worker route with
+a reason; it is not approval and launches nothing. Planning never replaces scout,
+implementation, or reviewer checks. Keep trivial and non-code work proportional.
 
 For non-code tasks, a worker or `delegate` produces the outcome when it is
 nontrivial, and `reviewer` checks it. Specialists do the work; the parent
@@ -91,10 +105,15 @@ orchestrates and integrates.
 
 - Model routing is explicit through the `jev_route` tool. It does not run
   automatically on user input. Model mappings remain in `models-router.json`.
-- Before an authorized implementation delegation, call `jev_route` with
-  action `recommend`. Supply the complete assignment, relevant findings,
-  constraints, and acceptance checks. Pass the returned `model` string
-  unchanged as the `model` argument when launching the subagent.
+- Before an authorized implementation delegation, when `jev_route` is available
+  and permitted by the runtime, call it with action `recommend`. Supply the complete
+  assignment, relevant findings, constraints, and acceptance checks. Pass the returned
+  `model` string unchanged as the `model` argument when launching the subagent.
+- If the optional router is absent or prohibited by runtime policy, retain the
+  configured role/provider/model choices and disclose that routing was unavailable.
+  Do not install host extensions or widen network access to obtain it. This is not
+  a routing recommendation and never waives required scoring or approval gates;
+  controller-owned dispatch uses its configured models.
 - Parent, delegate, and worker sessions may call `jev_route` with action
   `switch_self` when the current assignment requires a different model. This
   changes only the calling session. It does not change another running agent,
@@ -131,9 +150,12 @@ orchestrates and integrates.
   use separate calls when the parent must integrate or decide between them.
 - Spawn independent tasks concurrently within the same phase. Do not start
   result review before the workers' outcome and check evidence are ready.
-- Parallelize workers (`worker` or `deep-worker`) across independent slices using separate managed
-  worktrees; never let mutating workers edit the parent's checkout or
-  overlapping files concurrently. Sequence slices that share files or contracts.
+- Parallelize workers (`worker` or `deep-worker`) across independent slices using
+  separate managed worktrees when runtime policy permits. If Git metadata changes
+  are prohibited, explicitly choose supported shared-tree isolation (`isolation: "none"`),
+  never `auto` or worktree creation. Require exclusive file ownership; sequence
+  conflicting slices and keep the parent from editing or testing until all active
+  workers are terminal. If ownership cannot be enforced, execute sequentially.
 - Never redo a child's investigation. If a child's result is insufficient,
   steer or resume that child. Exception: see "Stuck children: parent takeover".
 
@@ -312,6 +334,7 @@ gap; do not substitute them for the mandatory roles. Implementation goes to
 | Work | Agent |
 | --- | --- |
 | Find code, files, symbols, call paths, "where is X" | `scout` (CodeGraph-first when indexed) |
+| Decompose a nontrivial coding task after scout context | `planner` (read-only; parent decides and dispatches) |
 | Routine code change, run the checks for that change | `worker` (parallel when independent) |
 | Complex, coupled, security-sensitive, or high-risk code change | `deep-worker` (parallel when independent) |
 | Check a nontrivial result, diff, plan, or solution | `reviewer` (mandatory) |
@@ -324,6 +347,9 @@ Installed agent definitions remain the authority for capabilities. Canonical
 pi-subagents roles:
 
 - `scout`: focused local code discovery and a compact implementation handoff.
+- `planner`: the static read/search-only planning role, fresh context, no nested
+  delegation or edits. Returns file ownership, dependencies, integration order,
+  checks, and risks; grants no scores, approval, or dispatch authority.
 - `worker`: routine implementation and appropriate executable checks for its slice.
 - `deep-worker`: high-capability implementation for complex, coupled, or
   high-risk slices: root-cause diagnosis, invariant-preserving changes,
@@ -341,6 +367,39 @@ pi-subagents roles:
 - `evidence-auditor`: independently check source support for decision-critical
   research claims, not routine code verification.
 - `delegate`: a focused general task that does not need a specialist.
+
+### Default-loaded cooperative planning
+
+Both profiles load `extensions/cooperative-planner/extension.ts`. There is one
+planner definition, `agents/planner.md`; no runtime planner identity is registered.
+Loading leaves ordinary direct tools and read-only subagent management available,
+but blocks subagent launches until `cooperative_plan` runs. Only `cooperative_plan`
+activates the full restrictive gate. Use it for nontrivial coding, not trivial or
+non-code tasks. Do not launch the planner directly to bypass cooperative scoring.
+
+The parent controller launches `planner` for at most three iterations per call.
+It retains the plan with the highest minimum criterion score and displays only
+that percentage in the parent session. Every criterion must reach 0.8 for
+approval or dispatch; a best-but-rejected plan is diagnostic only. The parent
+reviews an accepted plan before calling `cooperative_dispatch` with its exact
+digest. Use `cooperative_checkpoint`
+inspect -> parent integration -> verify between waves. After cooperative dispatch,
+only final successful verification releases the gate for ordinary reviewer delegation.
+
+Before scoring, the planner may return `{"status":"not_parallelizable","reason":"..."}`
+for a task that cannot safely split into independent slices. The controller releases
+the gate without calling Jev, approving a plan, or dispatching workers. The parent
+uses the existing ordinary worker/deep-worker route with that reason, then integrates
+and obtains reviewer checks. Do not force bogus parallel work. This fallback is not
+available after Jev scoring starts; revise rejected plans for up to three iterations,
+then return only the best diagnostic plan without dispatch authorization.
+Failure, cancellation, and branch navigation stay fail-closed until a new session;
+never use a new session to race unfinished workers.
+
+TypeSafe egress must be explicitly authorized and `TYPESAFE_API_KEY` supplied.
+API errors never grant approval. Standalone `jev_score_plan` never activates the
+gate or authorizes dispatch; during cooperative work it invalidates prior approval.
+The planner cannot score, approve, or dispatch: these belong to the parent.
 
 ### Choosing `worker` vs `deep-worker`
 
@@ -392,13 +451,12 @@ this rule; the discovery owner checks once if its status is unknown.
   genuinely independent work with non-overlapping write ownership. Assign shared
   interfaces, fixtures, generated files, and reports to one executor, or finish
   them before dependent work starts.
-- For parallel mutating workers, use isolated managed
-  worktrees by default (`worktree: true` / `isolation: "worktree"`) and give each
-  worker explicit owned paths and acceptance checks. Do not have concurrent
-  workers share a
-  checkout, edit the same files, or independently change a shared contract.
-  If worktree isolation is unavailable, sequence conflicting work instead of
-  risking concurrent edits. Integrate results only after the workers finish.
+- For parallel mutating workers, use isolated managed worktrees by default
+  (`worktree: true` / `isolation: "worktree"`) only when runtime policy permits.
+  Otherwise use the shared-tree ownership or sequential execution rule above.
+  Give each worker explicit owned paths and acceptance checks; never allow
+  concurrent edits to the same files or shared contracts. Integrate results only
+  after the workers finish.
 - Give each child the outcome, starting paths, established facts, open questions,
   owned scope, acceptance checks, and relevant constraints. Include the
   applicable working rules; do not assume they were inherited.

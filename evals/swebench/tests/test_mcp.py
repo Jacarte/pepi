@@ -87,6 +87,8 @@ class McpTests(unittest.TestCase):
     def test_injected_provisioning_has_provenance_and_never_mixes_locks(self):
         injected = self.base / "injected"
         self.provision(directory=injected)
+        (injected / "agents").mkdir()
+        (injected / "agents/deep-worker.md").write_bytes((self.root / "agents/deep-worker.md").read_bytes())
         manifest = self.prepare(config_dir=injected)
         self.assertEqual(manifest["config"]["source"], "injected")
         self.run = self.base / "run-2"

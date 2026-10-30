@@ -1,4 +1,4 @@
-"""Wasmtime CI boundary: public metadata, private pinned evaluator, direct agent; entirely offline."""
+"""Private evaluator boundaries and target-neutral, checkout-owned CI configuration; offline."""
 import json
 import os
 import subprocess
@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from evals.swebench import ci, preset
+from evals.swebench import ci, narrate, preset
 from evals.swebench.common import read_json, read_manifest, write_json
 from evals.swebench.prepare import prepare_run
 from evals.swebench.tests import test_ci_helpers as helpers, test_ci_workflow as workflow
@@ -77,6 +77,7 @@ class AgentsOverrideTests(helpers.Temp):
         self.write("profiles/direct/settings.json", "{}", self.repo)
         self.write("settings.json", "{}", self.repo)
         self.write("AGENTS.md", "global delegation rules", self.repo)
+        self.write("agents/deep-worker.md", "arm-owned worker", self.repo)
 
     def assemble(self, name, *args):
         return helpers.invoke("assemble-config", "--repo", self.repo, "--profile", "direct",
@@ -223,13 +224,20 @@ class WasmtimeWorkflowTests(helpers.Temp):
             steps = self.jobs[job_name]["steps"]
             self.assertLess(steps.index(checkout), next(i for i, s in enumerate(steps) if s.get("id") == "run"))
 
-    def test_preset_only_agents_override_and_cache_identity(self):
+    def test_all_assembly_steps_use_arm_owned_config_without_preset_overrides(self):
         for name in ("lookup", "baseline", "candidate"):
             step = next(s for s in self.jobs[name]["steps"] if workflow.runs(s, "ci assemble-config"))
-            self.assertIn('if [[ "$PEPI_CI_PRESET" == wasmtime-safe-v1 ]]', step["run"])
-            self.assertIn('agents_args=()', step["run"])
-            self.assertIn('presets/wasmtime-safe-v1/AGENTS.md', step["run"])
-            self.assertIn('assemble-config "${agents_args[@]}"', step["run"])
+            self.assertNotIn("PEPI_CI_PRESET", step["run"])
+            self.assertNotIn("agents_args", step["run"])
+            self.assertNotIn("agents-override", step["run"])
+            checkout = "harness" if name == "candidate" else "config-src"
+            self.assertIn(f'assemble-config --repo "$GITHUB_WORKSPACE/{checkout}"', step["run"])
+            if name != "candidate":
+                self.assertIn('--fallback-root "$GITHUB_WORKSPACE/harness"', step["run"])
+        for job, ref in (("lookup", "${{ github.event_name == 'push' && github.sha || 'main' }}"),
+                         ("baseline", "${{ needs.lookup.outputs.main_sha }}")):
+            checkout = next(s for s in self.jobs[job]["steps"] if s.get("with", {}).get("path") == "config-src")
+            self.assertEqual(checkout["with"]["ref"], ref)
         report_config = next(s for s in self.jobs["report"]["steps"] if workflow.runs(s, "ci assemble-config"))
         self.assertNotIn("agents-override", report_config["run"])
         self.write("config/settings.json", "{}")
@@ -243,6 +251,112 @@ class WasmtimeWorkflowTests(helpers.Temp):
         for other in (key({**pins, "task_repo_revision": "b" * 40}), key({**pins, "dataset": "other"}),
                       key(name="verified20-v1"), key(repository="operator/other-evaluator")):
             self.assertNotEqual(base["key"], other["key"])
+
+    def config_checkouts(self):
+        workspace = self.root / "workspace"
+        for checkout in ("config-src", "harness"):
+            repo = workspace / checkout
+            self.write("profile.sh", (REPO / "profile.sh").read_text(), repo)
+            self.write("profiles/bedrock/settings.json", "{}", repo)
+            self.write("settings.json", "{}", repo)
+            self.write("AGENTS.md", f"{checkout} ordinary instructions", repo)
+            self.write("agents/deep-worker.md", f"{checkout} worker instructions", repo)
+        return workspace, "AGENTS.md"
+
+    def assemble_arm(self, job, workspace, name, **env):
+        step = next(s for s in self.jobs[job]["steps"] if workflow.runs(s, "ci assemble-config"))
+        temp = self.root / name
+        temp.mkdir()
+        result, outputs = self.run_step(step, GITHUB_WORKSPACE=str(workspace), RUNNER_TEMP=str(temp), **env)
+        config = temp / ("pepi-config-baseline" if job == "lookup" else "pepi-config")
+        return result, outputs, config
+
+    def test_executed_assemblies_keep_each_arms_agents_and_hash_identity(self):
+        workspace, relative = self.config_checkouts()
+        result, outputs, base = self.assemble_arm("lookup", workspace, "lookup")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        base_hash = outputs["sha256"]
+        self.assertEqual(base_hash, ci.config_hash(base))
+        result, _, fresh = self.assemble_arm("baseline", workspace, "baseline", EXPECTED_SHA256=base_hash)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(ci.config_hash(fresh), base_hash)
+        result, _, candidate = self.assemble_arm("candidate", workspace, "candidate")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((base / "AGENTS.md").read_bytes(), (workspace / "config-src" / relative).read_bytes())
+        self.assertEqual((candidate / "AGENTS.md").read_bytes(), (workspace / "harness" / relative).read_bytes())
+        candidate_hash = ci.config_hash(candidate)
+        self.assertNotEqual(candidate_hash, base_hash)
+        pins = dict(task_repo_revision=REVISION, dataset=preset.WASMTIME_DATASET, concurrency="1")
+        def key(config):
+            return ci.cache_key(REPO, config, "bedrock", "wasmtime-safe-v1", pins, {}, "2026-W01")["key"]
+        self.assertEqual(key(base), key(fresh))
+        self.assertNotEqual(key(base), key(candidate))
+        # Candidate-only prompt edits must never affect baseline config identity.
+        (workspace / "harness" / relative).write_text("changed candidate instructions")
+        result, outputs, unchanged = self.assemble_arm("lookup", workspace, "lookup-again")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(outputs["sha256"], base_hash)
+        self.assertEqual(key(unchanged), key(base))
+        result, _, changed = self.assemble_arm("candidate", workspace, "candidate-again")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotEqual(ci.config_hash(changed), candidate_hash)
+        # Main edits invalidate the baseline and the lookup/execution consistency check.
+        (workspace / "config-src" / relative).write_text("changed main instructions")
+        result, outputs, changed = self.assemble_arm("lookup", workspace, "lookup-main-change")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotEqual(outputs["sha256"], base_hash)
+        self.assertNotEqual(key(changed), key(base))
+        result, _, _ = self.assemble_arm("baseline", workspace, "stale-baseline", EXPECTED_SHA256=base_hash)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("baseline config differs", result.stdout)
+
+    def test_missing_main_agents_never_falls_back_to_candidate(self):
+        workspace, relative = self.config_checkouts()
+        (workspace / "config-src" / relative).unlink()
+        for job in ("lookup", "baseline"):
+            result, _, config = self.assemble_arm(job, workspace, job, EXPECTED_SHA256="unused")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("config files absent here would come from the harness checkout: AGENTS.md", result.stderr)
+            self.assertFalse((config / "AGENTS.md").exists())
+
+    def test_every_preset_uses_the_same_arm_owned_assembly(self):
+        workspace, relative = self.config_checkouts()
+        hashes = {}
+        for preset_name in ("verified20-v1", "multilingual10-v1", "wasmtime-safe-v1"):
+            base_hash = ""
+            for job in ("lookup", "baseline", "candidate"):
+                result, outputs, config = self.assemble_arm(job, workspace, f"{preset_name}-{job}",
+                    PEPI_CI_PRESET=preset_name, EXPECTED_SHA256=base_hash)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                owner = "harness" if job == "candidate" else "config-src"
+                self.assertEqual((config / relative).read_bytes(), (workspace / owner / relative).read_bytes())
+                if job == "lookup":
+                    base_hash = outputs["sha256"]
+                hashes.setdefault(job, ci.config_hash(config))
+                self.assertEqual(ci.config_hash(config), hashes[job])
+
+    def test_profile_agents_overlay_is_owned_by_each_checkout(self):
+        workspace, relative = self.config_checkouts()
+        for checkout in ("config-src", "harness"):
+            self.write("profiles/bedrock/AGENTS.md", f"{checkout} profile instructions", workspace / checkout)
+        base_hash = ""
+        for job in ("lookup", "baseline", "candidate"):
+            result, outputs, config = self.assemble_arm(job, workspace, job, EXPECTED_SHA256=base_hash)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            owner = "harness" if job == "candidate" else "config-src"
+            self.assertEqual((config / relative).read_text(), f"{owner} profile instructions")
+            if job == "lookup":
+                base_hash = outputs["sha256"]
+
+    def test_report_narrates_baseline_then_candidate_before_building_comment(self):
+        steps = self.jobs["report"]["steps"]
+        step = next(s for s in steps if workflow.runs(s, "evals/ci/narrate.sh"))
+        self.assertIn('narrate.sh "$GITHUB_WORKSPACE/pepi-baseline-cache" "$GITHUB_WORKSPACE/pepi-candidate"',
+                      step["run"])
+        self.assertNotIn("if", step)
+        comment = next(s for s in steps if workflow.runs(s, "ci comment"))
+        self.assertLess(steps.index(step), steps.index(comment))
+        self.assertIn('--narrative "$RUNNER_TEMP/pepi-report/narrative.md"', comment["run"])
 
 
 class WasmtimeRunBoundaryTests(helpers.Temp):
@@ -320,6 +434,59 @@ class WasmtimeRunBoundaryTests(helpers.Temp):
                                "bedrock", "wasmtime-safe-v1")
         self.assertIn("deny GitHub", body)
         self.assertNotIn("unrestricted", body)
+
+
+class WasmtimeNarrationTests(helpers.Temp):
+    def test_two_arm_facts_keep_solved_time_cost_and_child_usage_without_oracle_data(self):
+        base = helpers.fake_run(self.root, "main", ("resolved", "unresolved", "unresolved"))
+        candidate = helpers.fake_run(self.root, "pr-42", ("resolved", "resolved", "unresolved"))
+        summaries = []
+        for run, children, cost, seconds in ((base, [], 3.0, 60),
+                (candidate, [{"agent": "worker", "runId": "a"}, {"agent": "worker", "runId": "b"}], 6.0, 40)):
+            data = read_json(run / "summary.json")
+            data.update(dataset=preset.WASMTIME_DATASET, config_id=run.name,
+                        estimated_total_cost_usd=cost, observed_estimated_cost_usd=cost)
+            data["latency_all_seconds"].update(median=seconds, p95=seconds + 10)
+            data["protocol"]["mcp"] = {"enabled": False, "commands": []}
+            write_json(run / "summary.json", data)
+            summaries.append(data)
+            for row in data["instances"]:
+                write_json(run / "attempts" / row["instance_id"] / "telemetry.json", {
+                    "accounting_status": "available", "children": children,
+                    "parent_tool_timing": {"calls": 3 if children else 2, "errors": 0,
+                                           "by_tool": {"bash": 2, **({"subagent": 1} if children else {})}}})
+        facts = narrate.build_facts(summaries, [base, candidate])
+        self.assertEqual(facts["baseline_run_id"], "main")
+        self.assertEqual([r["resolved"] for r in facts["runs"]], [1, 2])
+        self.assertEqual([r["latency_all_median_seconds"] for r in facts["runs"]], [60, 40])
+        self.assertEqual([r["estimated_total_cost_usd"] for r in facts["runs"]], [3, 6])
+        self.assertEqual(facts["comparisons"][0]["wins"], ["owner__repo-2"])
+        self.assertEqual(facts["comparisons"][0]["subagent_invocation_differences"], [
+            {"agent": "worker", "baseline": 0, "candidate": 6, "difference": 6}])
+        self.assertEqual(facts["runs"][0]["subagent_usage"]["total_children"], 0)
+        self.assertEqual(facts["runs"][1]["subagent_usage"]["subagent_count_cross_check"],
+                         "children_more_than_tool_calls")
+        prompt = narrate.build_prompt(narrate.canonical(facts))
+        for rule in ("Tasks solved is the primary outcome", "Time and cost are secondary",
+                     "never describe missing child usage as free", "Child counts do not prove concurrent execution"):
+            self.assertIn(rule, prompt)
+        for forbidden in ("SECRET-PROBLEM-STATEMENT", "gold.patch", "test_output.txt", "SESSION", "STDERR"):
+            self.assertNotIn(forbidden, prompt)
+        # The deterministic PR report retains metrics even if the optional narrator fails.
+        summaries[1].update(estimated_total_cost_usd=None, available_accounting_tasks=2)
+        write_json(candidate / "summary.json", summaries[1])
+        body = ci.comment_body(base, candidate, None, REVISION, "42", "2", "https://github.com/o/r/actions/runs/2",
+                               "bedrock", "wasmtime-safe-v1")
+        self.assertIn("| resolved (official) | 1/3 | 2/3 |", body)
+        self.assertIn("| agent seconds (observed median) | 60 | 40 |", body)
+        self.assertIn("| agent seconds (observed p95) | 70 | 50 |", body)
+        self.assertIn("| estimated total cost (USD) | 3 | unavailable |", body)
+        self.assertIn("| observed cost (USD, may be partial) | 3 | 6 |", body)
+        self.assertIn("| tasks with full accounting | 3/3 | 2/3 |", body)
+        self.assertIn("Arms use their own configuration", body)
+        self.assertIn("tool and child counts are context only", body)
+        self.assertIn("Tasks solved is primary", body)
+        self.assertIn("Narrative unavailable", body)
 
 
 class WasmtimeBaseImageTests(helpers.Temp):

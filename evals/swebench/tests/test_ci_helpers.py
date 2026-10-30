@@ -17,6 +17,7 @@ from unittest.mock import patch
 from evals.swebench import ci
 from evals.swebench.common import write_json
 from evals.swebench.runner import run_tasks
+from evals.swebench.task_labels import CATALOG
 from evals.swebench.tests.test_ci import RecordingDocker
 from evals.swebench.tests.test_narrate import summary
 from evals.swebench.tests.test_runner import TASK, prepare_fixture
@@ -125,6 +126,7 @@ class AssembleConfigTests(Temp):
         shutil.copyfile(REPO / "profile.sh", repo / "profile.sh")
         self.write("settings.json", '{"defaultModel": "root"}', repo)
         self.write("AGENTS.md", "rules\n", repo)
+        self.write("agents/deep-worker.md", "arm-owned worker", repo)
         self.write("workflows/a.ts", "export {}\n", repo)
         self.write("mcp.json", '{"secret": true}', repo)
         self.write("auth.json", "{}", repo)
@@ -141,7 +143,7 @@ class AssembleConfigTests(Temp):
         self.assertEqual(code, 0, err)
         files = sorted(path.relative_to(self.root / "out").as_posix()
                        for path in (self.root / "out").rglob("*") if path.is_file())
-        self.assertEqual(files, ["AGENTS.md", "settings.json", "workflows/a.ts"])
+        self.assertEqual(files, ["AGENTS.md", "agents/deep-worker.md", "settings.json", "workflows/a.ts"])
         self.assertEqual(json.loads((self.root / "out/settings.json").read_text()), {"defaultModel": "bed"})
         self.assertEqual(json.loads((repo / "settings.json").read_text()), {"defaultModel": "root"})
         record = json.loads(out)
@@ -285,6 +287,13 @@ class CacheKeyTests(Temp):
                          "evals/swebench/runs/r/summary.json", "evals/swebench/__pycache__/x.pyc", "README.md",
                          "evals/swebench/runs/new/predictions.jsonl"):
             self.write(relative, "different", self.harness)
+        self.assertEqual(self.key(), base)
+
+    def test_reporting_catalog_edits_do_not_change_execution_cache_key(self):
+        base = self.key()
+        path = self.write("evals/swebench/task-labels.json", '{"id": {"display_label": "First title"}}', self.harness)
+        self.assertEqual(self.key(), base)
+        path.write_text('{"id": {"display_label": "Corrected public title"}}')
         self.assertEqual(self.key(), base)
 
     def test_bad_inputs_are_usage_errors(self):
@@ -833,6 +842,89 @@ class CommentTests(Temp):
         self.assertIn("https://github.com/o/r/actions/runs/987", body)
         self.assertIn("(cached)", body)
         self.assertIn("> All good.", body)
+
+    def test_comment_names_wins_and_regressions_without_changing_comparison_ids(self):
+        base = fake_run(self.root, "base", ("resolved", "unresolved", "resolved"))
+        cand = fake_run(self.root, "cand", ("unresolved", "resolved", "resolved"))
+        labels = {"owner__repo-1": {"display_label": "Public regression title", "source_url": "https://github.com/o/r/issues/1"},
+                  "owner__repo-2": {"display_label": "Public win title", "source_url": "https://github.com/o/r/issues/2"}}
+        with patch.dict(CATALOG, labels):
+            code, body = self.comment(None, base, cand)
+        self.assertEqual(code, 0, body)
+        self.assertIn("- Wins: [Public win title](https://github.com/o/r/issues/2)", body)
+        self.assertIn("- Regressions: [Public regression title](https://github.com/o/r/issues/1)", body)
+        self.assertNotIn("owner__repo-", body)
+        result, error = ci.comparison(ci.load_summary(base), ci.load_summary(cand))
+        self.assertIsNone(error)
+        self.assertEqual(result["wins"], ["owner__repo-2"])
+        self.assertEqual(result["regressions"], ["owner__repo-1"])
+
+    def test_comment_shows_only_best_jev_criteria_scores_not_the_plan(self):
+        base = fake_run(self.root, "base", ("resolved", "unresolved", "resolved"))
+        cand = fake_run(self.root, "cand", ("resolved", "resolved", "resolved"))
+        summary_path = cand / "summary.json"
+        summary_data = json.loads(summary_path.read_text())
+        first = {"task_coverage": 0.6, "slice_independence": 0.7,
+                 "ownership_conflicts": 0.8, "integration_feasibility": 0.8}
+        second = {"task_coverage": 0.68, "slice_independence": 0.75,
+                  "ownership_conflicts": 0.79, "integration_feasibility": 0.9}
+        third = {"task_coverage": 0.71, "slice_independence": 0.799,
+                 "ownership_conflicts": 0.88, "integration_feasibility": 0.9}
+        summary_data["instances"][0]["external_jev"] = {
+            "scored_attempts": 3,
+            "score_attempts": [{"attempt": 1, "outcome": "rejected", "criteria": first},
+                                {"attempt": 2, "outcome": "rejected", "criteria": second},
+                                {"attempt": 3, "outcome": "rejected", "criteria": third}],
+            "best_score": {"attempt": 3, "outcome": "rejected", "minimum_score": 0.71, "criteria": third},
+        }
+        write_json(summary_path, summary_data)
+        code, body = self.comment(None, base, cand)
+        self.assertEqual(code, 0, body)
+        self.assertIn("Jev criteria scores by attempt", body)
+        self.assertIn("The best attempt is marked; dispatch still requires at least 80% on every criterion.", body)
+        self.assertIn("| candidate | `owner__repo-1` | 1 |  | rejected | 60% | 70% | 80% | 80% | 60% |", body)
+        self.assertIn("| candidate | `owner__repo-1` | 2 |  | rejected | 68% | 75% | 79% | 90% | 68% |", body)
+        self.assertIn("| candidate | `owner__repo-1` | 3 | yes | rejected | 71% | 79.9% | 88% | 90% | 71% |", body)
+        self.assertNotIn("secret-plan", body)
+
+    def test_saved_display_label_is_plain_text_and_only_public_issue_urls_are_linked(self):
+        hostile = '`code` *bold* [click](https://evil.invalid) ![img](x) <b>hi</b> @octocat #12 | cell'
+        row = {"display_label": hostile, "source_url": "javascript:alert(1)"}
+        text = ci.task_name("owner__repo-1", row)
+        self.assertNotIn("<b>", text)
+        self.assertIn("&lt;b&gt;", text)
+        self.assertNotIn("@octocat", text)
+        self.assertNotIn("https://evil", text)
+        self.assertNotIn("#12", text)
+        self.assertIn(r"\`code\`", text)
+        self.assertIn(r"\*bold\*", text)
+        self.assertIn(r"\| cell", text)
+        self.assertNotIn("javascript", text)
+        self.assertEqual(ci.id_list(["owner__repo-1"]), "`owner__repo-1`")
+        self.assertEqual(ci.task_name("owner__repo-1", {"display_label": "bad\nlabel"}), "`owner__repo-1`")
+        self.assertEqual(ci.id_list(["owner__repo-1"], tasks={"owner__repo-1": {"display_label": "Saved title"}}),
+                         "Saved title")
+
+    def test_display_labels_respect_comment_budget(self):
+        many_ids = [f"owner__repo-{i}" for i in range(100)]
+        crafted = {"wins": many_ids, "regressions": many_ids, "inconclusive": many_ids,
+                   "configuration_differences": {}, "exceeds_noise_threshold": False}
+        labels = {name: {"display_label": "[" * 300, "source_url": "https://github.com/o/r/issues/1"} for name in many_ids}
+        with patch.dict(CATALOG, labels), patch.object(ci, "comparison", return_value=(crafted, None)):
+            code, body = self.comment("long narrative\n" * 10000)
+        self.assertEqual(code, 0)
+        self.assertLessEqual(len(body), ci.COMMENT_LIMIT)
+        self.assertIn("more", body)
+        self.assertIn("https://github.com/o/r/actions/runs/987", body)
+
+    def test_metric_cells_preserve_zero_and_reject_missing_or_invalid_values(self):
+        for invalid in (None, "@someone", True, -1, float("nan"), float("inf"), {}):
+            self.assertEqual(ci.metric_cell({"cost": invalid}, "cost"), "unavailable")
+        self.assertEqual(ci.metric_cell(None, "cost"), "unavailable")
+        self.assertEqual(ci.metric_cell({}, "latency", "median"), "unavailable")
+        self.assertEqual(ci.metric_cell({"latency": "bad"}, "latency", "median"), "unavailable")
+        self.assertEqual(ci.metric_cell({"cost": 0}, "cost"), "0")
+        self.assertEqual(ci.metric_cell({"latency": {"median": 1.25}}, "latency", "median"), "1.25")
 
     def test_unavailable_narrative_and_incomparable_runs(self):
         code, body = self.comment(None)

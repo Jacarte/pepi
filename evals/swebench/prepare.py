@@ -11,7 +11,7 @@ from .common import (DATASET, fingerprint, git_dirty, git_revision, identifier, 
                      version, write_json)
 
 from .mcp import freeze_mcp
-from .profile import config_source, isolated_settings, safe_models
+from .profile import config_source, isolated_settings, safe_models, safe_path
 from .preset import selection_record
 
 HERE = Path(__file__).parent
@@ -46,21 +46,45 @@ def sanitize_tasks(tasks: list[dict], ids: list[str], dataset: str = DATASET) ->
     return result
 
 
-KEPT_SETTINGS = ("defaultModel", "defaultProvider", "defaultThinkingLevel", "subagents")
+KEPT_SETTINGS = ("defaultModel", "defaultProvider", "defaultThinkingLevel", "subagents", "cooperativePlanner")
+COOPERATIVE_FILES = tuple(f"extensions/cooperative-planner/{name}" for name in
+                          ("extension.ts", "controller.mjs", "scorer.mjs")) + ("agents/planner.md",)
+REQUIRED_AGENT_FILES = ("agents/deep-worker.md",)
 CONFIG_FILES = ("settings.json", "models.json", "AGENTS.md", "workflows", "extensions/subagent/config.json",
-                "mcp-packages.json", "mcp-package-lock.json")
+                "mcp-packages.json", "mcp-package-lock.json", *REQUIRED_AGENT_FILES, *COOPERATIVE_FILES)
 
 
 def make_profile(root: Path, build: Path, versions: dict, config_dir: Path | None = None,
                  drop_mcp: bool = False, profile_name: str | None = None) -> dict:
     """Write the frozen profile; return non-secret provenance for the manifest.
 
-    Files use injected > named profile > repo precedence; named models never use repo fallback.
+    Ordinary files use injected > named profile > repo precedence; named models never use repo fallback.
+    Static roles and the cooperative bundle require arm-owned files, never harness fallback.
     Secret files (auth.json, mcp.json, .env) are never read: pass them to `run`.
     """
     source = config_source(root, config_dir, profile_name)
     settings = read_json(source("settings.json"))
     profile, plan = isolated_settings(settings, versions)
+    cooperative = settings.get("cooperativePlanner", False)
+    if type(cooperative) is not bool:
+        raise ValueError("cooperativePlanner must be boolean")
+    # Static roles belong to this arm even when cooperative planning is disabled.
+    owner = config_dir if config_dir is not None else root
+    bundle = {}
+    for name in REQUIRED_AGENT_FILES:
+        path = safe_path(owner, name)
+        if not path.is_file():
+            raise ValueError(f"Required agent must be an arm-owned regular file: {name}")
+        bundle[name] = path
+    if cooperative:
+        if versions["pi"] != "1.1.0" or versions["pi-subagents"] != "0.78.0":
+            raise ValueError("Cooperative planner requires inspected Pi 1.1.0 / pi-subagents 0.78.0 APIs")
+        # Optional executable code belongs to this arm, never the harness fallback checkout.
+        for name in COOPERATIVE_FILES:
+            path = safe_path(owner, name)
+            if not path.is_file():
+                raise ValueError(f"Enabled cooperative planner bundle is incomplete: {name}")
+            bundle[name] = path
     mcp_policy, mcp_files = freeze_mcp(source, build, versions["pi"], drop_mcp)
     dropped = {"mcp": drop_mcp,
                "packages": [redact_url_userinfo(str(package)) for package in
@@ -75,18 +99,26 @@ def make_profile(root: Path, build: Path, versions: dict, config_dir: Path | Non
         profile["extensions"] = ["-builtin:mcp"]
     destination = build / "profile"
     destination.mkdir(parents=True)
+    if cooperative:
+        profile.setdefault("extensions", []).append("./extensions/cooperative-planner/extension.ts")
+    for name, path in bundle.items():
+        target = destination / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(path, target)
     write_json(destination / "settings.json", profile)
     write_json(build / "provider-plan.json", plan)
     models = source("models.json")
     if models.is_file():
         write_json(destination / "models.json", safe_models(models))
-    files = {"settings.json": sha256_file(source("settings.json")), **mcp_files}
+    files = {"settings.json": sha256_file(source("settings.json")), **mcp_files,
+             **{name: sha256_file(path) for name, path in bundle.items()}}
     if models.is_file():
         files["models.json"] = sha256_file(models)
     used_injected = (
         models.is_file() and config_dir is not None and models.is_relative_to(config_dir)
         or source("settings.json").parent == config_dir
-        or bool(mcp_files) and source("mcp-packages.json").parent == config_dir)
+        or bool(mcp_files) and source("mcp-packages.json").parent == config_dir
+        or bool(bundle) and config_dir is not None)
     agents = source("AGENTS.md")
     shutil.copyfile(agents, destination / "AGENTS.md")
     files["AGENTS.md"] = sha256_file(agents)
@@ -112,7 +144,8 @@ def make_profile(root: Path, build: Path, versions: dict, config_dir: Path | Non
     shutil.copyfile(HERE / "instructions.md", build / "instructions.md")
     return {"source": "injected" if used_injected else "profile" if profile_name else "repo",
             "profile": profile_name, "files": files,
-            "dropped_features": dropped, "mcp": mcp_policy}
+            "dropped_features": dropped, "mcp": mcp_policy,
+            **({"cooperative_planner": {"enabled": True, "files": list(COOPERATIVE_FILES)}} if cooperative else {})}
 
 
 def prepare_run(root: Path, run: Path, tasks: list[dict], ids: list[str], versions: dict,

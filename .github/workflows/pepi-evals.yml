@@ -6,9 +6,11 @@
 # Push to main: lookup ── baseline (main's harness and config) ── saves the shared baseline cache.
 #
 # The PR's harness (evals/ code) runs both evals; only the Pi config differs (main vs PR), both passed
-# as PEPI_EVAL_CONFIG_DIR. Secrets PI_AUTH (auth.json content) and EVAL_ENV (.env content) live in the
-# GitHub Environment `pepi-evals` (required reviewers): only baseline, candidate and report reference it,
-# so each of them waits for an approval. Repository variables: PROFILE (required), EVAL_PRESET, EVAL_IDS,
+# as PEPI_EVAL_CONFIG_DIR. Each arm uses its own profile and ordinary AGENTS.md, for every preset
+# (never fall back to the PR config for main). Secrets PI_AUTH (auth.json content)
+# and EVAL_ENV (.env content) live in the GitHub Environment `pepi-evals` (required reviewers): only
+# baseline, candidate and report reference it, so each waits for approval.
+# Repository variables: PROFILE (required), EVAL_PRESET, EVAL_IDS,
 # EVAL_RUNS_ON and optional pins (see the env block below).
 # baseline/candidate run on a self-hosted runner by default (task images need ~60 GB of disk); lookup and
 # report always run on GitHub-hosted runners (no Docker; report holds the secrets and a write token).
@@ -228,7 +230,7 @@ jobs:
           PYTHONDONTWRITEBYTECODE=1 python -m unittest \
             evals.swebench.tests.test_ci_workflow evals.swebench.tests.test_ci_helpers \
             evals.swebench.tests.test_ci evals.swebench.tests.test_reporting \
-            evals.swebench.tests.test_wasmtime_ci
+            evals.swebench.tests.test_wasmtime_ci evals.swebench.tests.test_cooperative
 
       - name: Resolve the preset
         id: preset
@@ -279,11 +281,7 @@ jobs:
         working-directory: harness
         run: |
           set -euo pipefail
-          agents_args=()
-          if [[ "$PEPI_CI_PRESET" == wasmtime-safe-v1 ]]; then
-            agents_args=(--agents-override "$GITHUB_WORKSPACE/harness/evals/swebench/presets/wasmtime-safe-v1/AGENTS.md")
-          fi
-          python3 -m evals.swebench.ci assemble-config "${agents_args[@]}" --repo "$GITHUB_WORKSPACE/config-src" \
+          python3 -m evals.swebench.ci assemble-config --repo "$GITHUB_WORKSPACE/config-src" \
             --profile "$PEPI_CI_PROFILE" --out "$RUNNER_TEMP/pepi-config-baseline" \
             --fallback-root "$GITHUB_WORKSPACE/harness" > "$RUNNER_TEMP/pepi-config-baseline.json"
           cat "$RUNNER_TEMP/pepi-config-baseline.json"
@@ -492,11 +490,7 @@ jobs:
           EXPECTED_SHA256: ${{ needs.lookup.outputs.config_sha256 }}
         run: |
           set -euo pipefail
-          agents_args=()
-          if [[ "$PEPI_CI_PRESET" == wasmtime-safe-v1 ]]; then
-            agents_args=(--agents-override "$GITHUB_WORKSPACE/harness/evals/swebench/presets/wasmtime-safe-v1/AGENTS.md")
-          fi
-          python3 -m evals.swebench.ci assemble-config "${agents_args[@]}" --repo "$GITHUB_WORKSPACE/config-src" \
+          python3 -m evals.swebench.ci assemble-config --repo "$GITHUB_WORKSPACE/config-src" \
             --profile "$PEPI_CI_PROFILE" --out "$RUNNER_TEMP/pepi-config" \
             --fallback-root "$GITHUB_WORKSPACE/harness" > "$RUNNER_TEMP/pepi-config.json"
           cat "$RUNNER_TEMP/pepi-config.json"
@@ -837,11 +831,7 @@ jobs:
         working-directory: harness
         run: |
           set -euo pipefail
-          agents_args=()
-          if [[ "$PEPI_CI_PRESET" == wasmtime-safe-v1 ]]; then
-            agents_args=(--agents-override "$GITHUB_WORKSPACE/harness/evals/swebench/presets/wasmtime-safe-v1/AGENTS.md")
-          fi
-          python3 -m evals.swebench.ci assemble-config "${agents_args[@]}" --repo "$GITHUB_WORKSPACE/harness" \
+          python3 -m evals.swebench.ci assemble-config --repo "$GITHUB_WORKSPACE/harness" \
             --profile "$PEPI_CI_PROFILE" --out "$RUNNER_TEMP/pepi-config"
 
       - name: Write secrets (auth.json, .env)

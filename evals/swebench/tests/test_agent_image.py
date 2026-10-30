@@ -9,6 +9,8 @@ import unittest
 from pathlib import Path
 
 from evals.swebench.runner import CONTROLLER_ENV, PI_COMMAND, PI_NODE
+from evals.swebench.prepare import prepare_run
+from evals.swebench.tests.test_runner import TASK, VERSIONS, prepare_fixture
 
 CONDA_SH = "/opt/miniconda3/etc/profile.d/conda.sh"
 DOCKERFILE = Path(__file__).resolve().parents[1] / "Dockerfile"
@@ -57,6 +59,7 @@ class PiCommandTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.args_log.read_text().splitlines(),
                          ["conda=no", "--print", "--mode", "json", "--session-dir", "/output/sessions",
+                          "--append-system-prompt", "/opt/pepi-agent/AGENTS.md",
                           "--append-system-prompt", "/opt/pepi-eval/instructions.md", "@/input/issue.md"])
 
     def test_python_image_activates_the_testbed_env_before_pi(self):
@@ -69,6 +72,34 @@ class PiCommandTests(unittest.TestCase):
         result = self.run_command(self.with_conda("conda() { return 7; }\n"))
         self.assertEqual(result.returncode, 7)
         self.assertFalse(self.args_log.exists())
+
+    def test_each_arm_appends_its_own_frozen_rules_before_common_safety(self):
+        baseline = prepare_fixture(self.root)
+        candidate_rules = "Candidate only: use cooperative_plan for nontrivial repairs.\n"
+        (self.root / "pepi/AGENTS.md").write_text(candidate_rules)
+        candidate = self.root / "candidate"
+        prepare_run(self.root / "pepi", candidate, [TASK], [TASK["instance_id"]], VERSIONS, "node:22-bookworm-slim")
+        self.env["PEPI_EVAL_MCP_FLAG"] = "--no-mcp"
+        result = self.run_command(self.with_conda("conda() { return 0; }\n"))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        argv = self.args_log.read_text().splitlines()[1:]
+        self.assertIn("--no-mcp", argv)
+        paths = [argv[i + 1] for i, arg in enumerate(argv) if arg == "--append-system-prompt"]
+        self.assertEqual(paths, ["/opt/pepi-agent/AGENTS.md", "/opt/pepi-eval/instructions.md"])
+        self.assertEqual(argv[-1], "@/input/issue.md")
+        prompts = []
+        for run in (baseline, candidate):
+            files = {paths[0]: run / "build/profile/AGENTS.md", paths[1]: run / "build/instructions.md"}
+            prompts.append("\n\n".join(files[path].read_text() for path in paths))
+        self.assertTrue(prompts[0].startswith("Delegate; verify; report honestly.\n"))
+        self.assertNotIn("cooperative_plan", prompts[0])
+        self.assertTrue(prompts[1].startswith(candidate_rules))
+        common = (DOCKERFILE.parent / "instructions.md").read_text()
+        for prompt in prompts:
+            self.assertTrue(prompt.endswith(common))
+            self.assertIn("runtime limits take precedence over conflicting host working rules", prompt)
+        self.assertEqual(json.loads((candidate / "manifest.json").read_text())["tasks"][0]["problem_statement"],
+                         TASK["problem_statement"])
 
     def test_pi_is_the_last_command(self):
         self.assertTrue(PI_COMMAND.split("&& ")[-1].startswith("exec pi "))

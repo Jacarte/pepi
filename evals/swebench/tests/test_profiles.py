@@ -26,11 +26,13 @@ def oauth(i=0):
                               "refresh": TOKENS[i * 2 + 1], "expires": 1, "accountId": "test-account"}}
 
 
-def repository(base):
+def repository(base, *, cooperative=False):
     root = base / "repo"
     root.mkdir()
     write_json(root / "settings.json", {"defaultProvider": "anthropic", "defaultModel": "claude-test"})
     (root / "AGENTS.md").write_text("safe rules")
+    (root / "agents").mkdir()
+    (root / "agents/deep-worker.md").write_bytes((REPO / "agents/deep-worker.md").read_bytes())
     for name in ("bedrock", "codex"):
         selected = root / "profiles" / name
         selected.mkdir(parents=True)
@@ -38,6 +40,12 @@ def repository(base):
             source = REPO / "profiles" / name / filename
             if source.is_file():
                 (selected / filename).write_bytes(source.read_bytes())
+        # Provider/auth fixtures retain their legacy pins and do not exercise optional planning.
+        # Planner-specific tests opt in to the exact current daily profile settings.
+        if not cooperative:
+            settings = read_json(selected / "settings.json")
+            settings["cooperativePlanner"] = False
+            write_json(selected / "settings.json", settings)
         # Named secrets are never opened, even though their syntax is deliberately invalid.
         for filename in ("auth.json", "mcp.json"):
             (selected / filename).write_text("SECRET SENTINEL invalid JSON")
@@ -72,8 +80,8 @@ class ProfileTests(unittest.TestCase):
             self.assertNotIn("litellm", settings)
             self.assertEqual(settings["packages"], ["npm:pi-subagents@0.68.0"])
             self.assertEqual(manifest["versions"], PINS)
-            self.assertEqual(read_json(base / "run/build/profile/models.json")["providers"]["openai-codex"]
-                             ["modelOverrides"]["gpt-6-luna"]["contextWindow"], 500000)
+            self.assertEqual(read_json(base / "run/build/profile/models.json"),
+                             read_json(root / "profiles/codex/models.json"))
             self.assertNotIn("SECRET SENTINEL", json.dumps(manifest))
             docker = FakeDocker()
             with patch("evals.swebench.runner.Docker", return_value=docker):
@@ -100,6 +108,8 @@ class ProfileTests(unittest.TestCase):
             base = Path(directory); root = repository(base)
             injected = base / "injected"; injected.mkdir()
             write_json(injected / "settings.json", {"defaultProvider": "anthropic", "defaultModel": "third"})
+            (injected / "agents").mkdir()
+            (injected / "agents/deep-worker.md").write_bytes((root / "agents/deep-worker.md").read_bytes())
             manifest = prepare(root, base / "run", profile_name="codex", config_dir=injected)
             self.assertEqual(manifest["config"]["source"], "injected")
             settings = read_json(base / "run/build/profile/settings.json")

@@ -35,10 +35,12 @@ EXIT_OK, EXIT_USAGE, EXIT_INFRA, EXIT_INTERRUPTED = 0, 2, 3, 130
 FORBIDDEN_NETWORKS = ("host", "bridge", "default")
 # Python task images activate their conda env; other images (Multilingual: node/go/cargo/ruby/C) have
 # no conda. A failing source/activate still ends the if with its status, so `exec pi` is skipped.
+# Explicitly load this arm's frozen working rules before the shared runtime safety limits.
 PI_COMMAND = (
     "if [ -f /opt/miniconda3/etc/profile.d/conda.sh ]; then "
     "source /opt/miniconda3/etc/profile.d/conda.sh && conda activate testbed; fi && "
     "exec pi ${PEPI_EVAL_MCP_FLAG:-} --print --mode json --session-dir /output/sessions "
+    f"--append-system-prompt {AGENT_DIR}/AGENTS.md "
     "--append-system-prompt /opt/pepi-eval/instructions.md @/input/issue.md"
 )
 # Controller commands inside the task container (everything but the Pi launch) resolve binaries through this
@@ -697,6 +699,14 @@ def frozen_mcp_policy(run: Path) -> dict:
     return read_json(path) if path.is_file() else {"enabled": False, "commands": []}
 
 
+def _task_progress(message: str) -> None:
+    try:
+        print(message, file=sys.stderr, flush=True)
+    except OSError:
+        # A closed pipe or failed log sink must not stop an attempt or lose its prediction.
+        pass
+
+
 def run_tasks(run: Path, timeout: float, network: str, cpus: str, memory: str,
               secrets_dir: Path | None = None, pass_env: list[str] | tuple[str, ...] = (),
               skills_dir: Path | None = None, history_prune_timeout: float = HISTORY_PRUNE_TIMEOUT) -> int:
@@ -712,6 +722,9 @@ def run_tasks(run: Path, timeout: float, network: str, cpus: str, memory: str,
     for name in secrets.forward_environment(list(pass_env)):
         print(f"pepi-eval: warning: {name} is shorter than {MIN_REDACTED_LENGTH} bytes; "
               "its value is forwarded but not redacted from artifacts", file=sys.stderr)
+    if manifest.get("config", {}).get("cooperative_planner", {}).get("enabled"):
+        if "TYPESAFE_API_KEY" not in secrets.forwarded or not os.environ.get("TYPESAFE_API_KEY"):
+            raise ValueError("Cooperative planner requires explicit --pass-env TYPESAFE_API_KEY; operator egress approval is also required")
     # After forwarding: a skill must not carry any value this run redacts.
     skills = load_staged_skills(skills_dir, secrets.values) if skills_dir else []
     if (run / "predictions.jsonl").exists() or (run / "attempts").exists():
@@ -757,10 +770,12 @@ def run_tasks(run: Path, timeout: float, network: str, cpus: str, memory: str,
     label = manifest["config"].get("label")
     model_name = f"{label}-{manifest['config_id']}" if label else manifest["config_id"]
     with (run / "predictions.jsonl").open("x", encoding="utf-8") as predictions:
-        for task in manifest["tasks"]:
+        for ordinal, task in enumerate(manifest["tasks"], 1):
             if interrupted or secrets.audit_failed:
                 row = {"instance_id": task["instance_id"], "agent_status": "not_started", "patch": ""}
             else:
+                _task_progress(f"pepi-eval: task {ordinal}/{len(manifest['tasks'])} started")
+                attempt_started = time.monotonic()
                 try:
                     row = run_one(Docker(), task, builds[task["instance_id"]],
                                   run / "attempts" / task["instance_id"], timeout, network, cpus,
@@ -769,6 +784,9 @@ def run_tasks(run: Path, timeout: float, network: str, cpus: str, memory: str,
                 except Exception as error:  # keep every selected ID in predictions.jsonl
                     row = {"instance_id": task["instance_id"], "agent_status": "runner_error", "patch": "",
                            "errors": [secrets.redact_text(f"{type(error).__name__}: {error}")]}
+                elapsed = time.monotonic() - attempt_started
+                _task_progress(f"pepi-eval: task {ordinal}/{len(manifest['tasks'])} completed "
+                               f"agent_status={row['agent_status']} elapsed_seconds={elapsed:.1f}")
             infra_failed = infra_failed or row["agent_status"] in ("setup_error", "runner_error")
             interrupted = interrupted or row["agent_status"] == "interrupted"
             predictions.write(json.dumps({"instance_id": task["instance_id"],

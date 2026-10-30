@@ -83,7 +83,7 @@ export NEO4J_PASSWORD="..."       # neo4j
 export ELEVENLABS_API_KEY="..."   # speaker
 export DEEPGRAM_API_KEY="..."     # speaker
 # export CONTEXT7_API_KEY="..."   # only if enabling context7
-# export TYPESAFE_API_KEY="..."   # local jev_route tool (not MCP)
+# export TYPESAFE_API_KEY="..."   # local Jev routing/planner scoring tools (not MCP)
 ```
 
 The current profile MCP configs do **not** reference `GITHUB_TOKEN_READONLY`,
@@ -111,6 +111,17 @@ The selected root `settings.json` supplies the `packages` list for pi's startup
 installation. Installed package directories are local, ignored state. Most package
 specs are unpinned, so resolved versions can differ across machines; only
 `pi-subagents` is pinned in these profiles.
+
+Both profiles also load the [cooperative planner](extensions/cooperative-planner/README.md)
+by default; no `pi -e` flag is needed. Use it only for nontrivial coding tasks, after scout
+context. The parent controller launches the single static `agents/planner.md` role, scores
+its plan with Jev, feeds back failed criteria, and alone authorizes dispatch after all scores
+reach 0.8. Loading alone leaves normal tools and roles available. `cooperative_plan` starts
+the gate; final successful checkpoint verification restores ordinary delegation for reviewer.
+Before scoring, an explicit `not_parallelizable` planner result instead releases the gate
+with a reason and returns the parent to ordinary worker/deep-worker routing. It makes no
+Jev call, grants no approval, and launches nothing; failed Jev scores cannot use this fallback.
+Scoring requires `TYPESAFE_API_KEY` and explicitly authorized TypeSafe egress.
 
 ---
 
@@ -170,7 +181,6 @@ these workflow scripts:
 | Workflow | Purpose |
 |---|---|
 | `workflows/pr-review.ts` | PR context → parallel reviews → synthesis. Never publishes; the parent owns user ACK. |
-| `workflows/implement.ts` | T1 worker → verifier; T1R bounded repair; T2/T3 add planning, approval, and reviews. |
 
 `extensions/subagent/config.json` holds display settings (fleet view above the
 editor, inline tool summaries) and model-response aliases.
@@ -204,10 +214,11 @@ entry and the `@vndv/pi-codegraph` package are separate configuration entries.
 
 ## Local extensions
 
-Five TypeScript extension entry points are tracked under `extensions/`:
+Six TypeScript extension entry points are tracked under `extensions/`:
 
 | Extension | What it adds |
 |---|---|
+| `extensions/cooperative-planner/extension.ts` | Default-loaded nontrivial coding planning with static `planner`, parent-owned Jev scoring/approval, dispatch and integration checkpoints |
 | `extensions/codex-usage-bar.ts` | Codex usage-window status via `codex app-server`; requires the Codex CLI for that status query |
 | `extensions/litellm-budget.ts` | LiteLLM spend status and `/budget` |
 | `extensions/pi-typesafe-router.ts` | `jev_route` recommendation/session switching using `models-router.json`; calls `https://api.typesafe.ai/v1/systemone` with `TYPESAFE_API_KEY` (`JEV_MODEL` optionally selects classifier) |

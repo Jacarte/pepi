@@ -1,4 +1,5 @@
 import copy
+import csv
 import hashlib
 import json
 import shutil
@@ -9,6 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from evals.swebench.common import DATASET, fingerprint, read_json, runtime_record, write_json
+from evals.swebench.task_labels import CATALOG
 from evals.swebench.reporting import (RESTORED_DIRECTORY, RESTORED_RECORD, STRICT_DIRECTORY, STRICT_RECORD, compare,
                                       distribution, file_hash, grade_run, main, predictions, summarize_run)
 from evals.swebench.tests.test_testpaths import EXISTING_TEST, NEW_TEST, SOURCE, block as test_block
@@ -68,6 +70,33 @@ class ReportingTests(unittest.TestCase):
         self.assertEqual(result["instances"][1]["grading_status"], "grading_error")
         self.assertTrue((run / "summary.csv").is_file())
         self.assertTrue((run / "summary.md").is_file())
+
+    def test_display_labels_are_report_only_with_mixed_csv_rows_and_stable_comparison_ids(self):
+        run, manifest = self.fixture()
+        unchanged = {name: (run / name).read_bytes() for name in
+                     ("manifest.json", "predictions.jsonl", "build/runtime.json", "execution.json", "grading.json")}
+        old = summarize_run(run)
+        metadata = {"display_label": '=Public title, with "quotes"', "source_url": "https://github.com/o/r/issues/1"}
+        with patch.dict(CATALOG, {"owner__repo-2": metadata}):
+            result = summarize_run(run)
+        self.assertEqual(result["instances"][1]["display_label"], metadata["display_label"])
+        self.assertEqual(result["instances"][1]["source_url"], metadata["source_url"])
+        self.assertIsNone(result["instances"][0]["display_label"])
+        with (run / "summary.csv").open(newline="") as stream:
+            csv_rows = list(csv.DictReader(stream))
+        self.assertEqual([row["instance_id"] for row in csv_rows], [task["instance_id"] for task in manifest["tasks"]])
+        self.assertEqual(csv_rows[0]["display_label"], "")
+        self.assertEqual(csv_rows[1]["display_label"], "'" + metadata["display_label"])
+        self.assertEqual(csv_rows[1]["source_url"], metadata["source_url"])
+        self.assertEqual(result["task_identity"], old["task_identity"])
+        self.assertEqual(compare(old, result), compare(old, old))
+        for row in old["instances"]:  # Old cached summaries had neither optional field.
+            row.pop("display_label")
+            row.pop("source_url")
+        self.assertEqual(compare(old, result)["inconclusive"], ["owner__repo-2"])
+        for name, data in unchanged.items():
+            self.assertEqual((run / name).read_bytes(), data, name)
+        self.assertEqual(fingerprint(run / "build"), manifest["profile_sha256"])
 
     def test_history_pruning_outcome_is_listed_and_unpruned_tasks_are_noted(self):
         run, _ = self.fixture()
@@ -782,16 +811,16 @@ class ReportingTests(unittest.TestCase):
             "grader_exit_code", "grading_seconds",
             "latency_all_seconds", "latency_resolved_seconds", "turns_observed",
             "available_accounting_tasks", "observed_estimated_cost_usd", "estimated_total_cost_usd",
-            "estimated_cost_per_resolved", "cost_caveat", "instances",
+            "estimated_cost_per_resolved", "cost_caveat", "instances", "external_jev",
             "tasks_modifying_existing_tests", "resolved_with_test_edits", "tasks_history_not_pruned",
         }
         self.assertEqual(set(result.keys()), required_keys)
         # Per-instance keys that must always be present
         required_instance_keys = {
-            "instance_id", "resolved", "grading_status", "agent_status",
+            "instance_id", "display_label", "source_url", "resolved", "grading_status", "agent_status",
             "agent_wall_seconds", "setup_seconds", "turns",
             "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens",
-            "estimated_cost_usd", "accounting_status",
+            "estimated_cost_usd", "accounting_status", "external_jev",
             "patch_touches_tests", "test_files_touched", "test_files_touched_count",
             "test_files_modified_existing", "test_files_added", "test_edit_kind", "history_pruning",
         }

@@ -28,6 +28,7 @@ import argparse
 import datetime
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -39,7 +40,9 @@ import time
 from pathlib import Path
 
 from .common import read_json
-from .prepare import CONFIG_FILES
+from .prepare import CONFIG_FILES, COOPERATIVE_FILES, REQUIRED_AGENT_FILES
+from .task_labels import display_metadata
+from .telemetry import JEV_CRITERIA
 
 EXIT_OK, EXIT_FAILED, EXIT_USAGE = 0, 1, 2
 HARNESS_ROOT = Path(__file__).resolve().parents[2]
@@ -312,6 +315,8 @@ def copy_tree_entry(root: Path, relative: str, destination_root: Path, label: st
     """Copy ROOT/RELATIVE (file or directory, no symlinks anywhere) if it exists; True when copied."""
     reject_symlinked_path(root, relative, label)
     source, destination = root / relative, destination_root / relative
+    if relative in REQUIRED_AGENT_FILES and not source.is_file():
+        raise UsageError(f"Required agent must be an arm-owned regular file: {relative}")
     if not source.exists():
         return False
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -383,6 +388,7 @@ def assemble_config(repo: Path, profile: str, out: Path, fallback_root: Path | N
         # prepare falls back to --pepi-root for files absent from --config-dir; for the baseline that is
         # the PR checkout, so such a file would silently come from the candidate's side.
         record["harness_fallback_files"] = [relative for relative in SOURCE_FILES if relative not in copied
+                                            and relative not in COOPERATIVE_FILES
                                             and (fallback_root / relative).exists()]
     return record
 
@@ -494,6 +500,9 @@ def harness_include(relative: str, is_dir: bool) -> bool:
     leaf = relative.rsplit("/", 1)[-1]
     if is_dir:
         return leaf not in EXCLUDED_DIRS
+    # Public display titles do not affect execution or baseline cache identity.
+    if leaf == "task-labels.json":
+        return False
     if leaf.endswith((".pyc", ".pyo")) or leaf == ".gitignore" or leaf == ".DS_Store":
         return False
     return not leaf.endswith(".md") or leaf in HARNESS_MARKDOWN
@@ -882,6 +891,15 @@ def count_cell(summary: dict | None, key: str) -> str:
     return f"{summary[key]}/{selected}" if isinstance(selected, int) else str(summary[key])
 
 
+def metric_cell(summary: dict | None, key: str, field: str | None = None) -> str:
+    from .telemetry import number
+    value = summary.get(key) if summary else None
+    if field is not None:
+        value = value.get(field) if isinstance(value, dict) else None
+    value = number(value)
+    return f"{value:.4g}" if value is not None else "unavailable"
+
+
 def comparison(baseline: dict | None, candidate: dict | None) -> tuple[dict | None, str | None]:
     if baseline is None or candidate is None:
         return None, "a summary.json is missing"
@@ -902,12 +920,79 @@ HEAD_LIMIT = COMMENT_LIMIT - 2000
 MIN_NARRATIVE = 200
 
 
-def id_list(ids: list, cap: int = ID_LIST_CAP) -> str:
+def task_name(instance_id: str, row: dict | None = None) -> str:
+    metadata = display_metadata(instance_id, row)
+    label, url = metadata["display_label"], metadata["source_url"]
+    if label is None:
+        return code(instance_id)
+    # Titles are plain text, not Markdown; neutralise HTML, mentions and automatic links too.
+    label = re.sub(r"([\\`*_{}\[\]()#+.!|~\-])", r"\\\1", neutralise(label))
+    return f"[{label}]({url})" if url else label
+
+
+def id_list(ids: list, cap: int = ID_LIST_CAP, tasks: dict | None = None) -> str:
     if not ids:
         return "none"
-    shown = ", ".join(code(item) for item in ids[:cap])
+    shown = ", ".join(task_name(item, (tasks or {}).get(item)) for item in ids[:cap])
     more = len(ids) - min(cap, len(ids))
     return (shown + f" (+{more} more)" if shown else f"{more} task(s); see the run artifacts") if more else shown
+
+
+def jev_score_pct(value) -> str | None:
+    if type(value) not in (int, float) or value < 0 or value > 1 \
+            or isinstance(value, float) and not math.isfinite(value):
+        return None
+    return f"{math.floor(value * 1000) / 10:g}%"
+
+
+def jev_score_table(baseline: dict | None, candidate: dict | None) -> list[str]:
+    columns = (("task_coverage", "Coverage"), ("slice_independence", "Slice independence"),
+               ("ownership_conflicts", "Ownership conflicts"),
+               ("integration_feasibility", "Integration feasibility"))
+    rows, omitted = [], 0
+    for side, summary in (("baseline", baseline), ("candidate", candidate)):
+        for task in (summary or {}).get("instances", []):
+            jev = task.get("external_jev") if isinstance(task, dict) else None
+            if not isinstance(jev, dict):
+                continue
+            best = jev.get("best_score")
+            attempts = jev.get("score_attempts")
+            if not isinstance(attempts, list) and isinstance(best, dict):
+                attempts = [best]  # Legacy telemetry only retained the best attempt.
+            if not isinstance(attempts, list):
+                continue
+            instance_id = task.get("instance_id")
+            if not isinstance(instance_id, str) or not INSTANCE_PATTERN.fullmatch(instance_id):
+                continue
+            for attempt in attempts:
+                scores = attempt.get("criteria") if isinstance(attempt, dict) else None
+                if not isinstance(scores, dict) or set(scores) != JEV_CRITERIA:
+                    continue
+                attempt_no, outcome = attempt.get("attempt"), attempt.get("outcome")
+                if type(attempt_no) is not int or attempt_no < 1 or outcome not in ("accepted", "rejected"):
+                    continue
+                percentages = [jev_score_pct(scores[key]) for key, _ in columns]
+                minimum = jev_score_pct(min(scores[key] for key, _ in columns))
+                if any(value is None for value in percentages) or minimum is None:
+                    continue
+                is_best = isinstance(best, dict) and attempt_no == best.get("attempt") \
+                    and scores == best.get("criteria")
+                cells = [side, task_name(instance_id, task), str(attempt_no), "yes" if is_best else "", outcome]
+                cells.extend(percentages)
+                cells.append(minimum)
+                if len(rows) < 60:
+                    rows.append("| " + " | ".join(cells) + " |")
+                else:
+                    omitted += 1
+    if not rows:
+        return []
+    headers = ["Arm", "Task", "Attempt", "Best?", "Outcome", *(label for _, label in columns), "Minimum"]
+    lines = ["", "<details><summary>Jev criteria scores by attempt</summary>", "",
+             "The best attempt is marked; dispatch still requires at least 80% on every criterion.", "",
+             "| " + " | ".join(headers) + " |", "|" + "|".join(["---"] * len(headers)) + "|", *rows]
+    if omitted:
+        lines.append(f"(+{omitted} more score attempt(s) omitted; see the run artifacts.)")
+    return [*lines, "", "</details>"]
 
 
 def name_list(names: list, cap: int = NAME_LIST_CAP) -> str:
@@ -933,24 +1018,36 @@ def comment_head(baseline: dict | None, candidate: dict | None, result: dict | N
     for label, key in (("resolved (official)", "resolved"), ("resolved (strict: test edits removed)", "resolved_strict"),
                        ("resolved (test checkout repaired)", "resolved_restored"), ("unknown grades", "unknown_grades")):
         lines.append(f"| {label} | {count_cell(baseline, key)} | {count_cell(candidate, key)} |")
-    lines.append("")
+    for label, key, field in (("agent seconds (observed median)", "latency_all_seconds", "median"),
+                              ("agent seconds (observed p95)", "latency_all_seconds", "p95"),
+                              ("estimated total cost (USD)", "estimated_total_cost_usd", None),
+                              ("observed cost (USD, may be partial)", "observed_estimated_cost_usd", None)):
+        lines.append(f"| {label} | {metric_cell(baseline, key, field)} | {metric_cell(candidate, key, field)} |")
+    lines.append(f"| tasks with full accounting | {count_cell(baseline, 'available_accounting_tasks')} | "
+                 f"{count_cell(candidate, 'available_accounting_tasks')} |")
+    lines += ["", "Tasks solved is primary; time and cost are secondary. Costs are Pi estimates, not invoices; "
+              "unavailable totals are not zero.", ""]
+    lines += ["Arms use their own configuration; tool and child counts are context only and do not prove concurrency or causality.", ""]
+    tasks = {row["instance_id"]: row for summary in (baseline, candidate)
+             for row in (summary or {}).get("instances", [])}
     if result is not None:
         noise = ("**exceeds** the noise threshold" if result["exceeds_noise_threshold"]
                  else f"within noise (needs |wins - regressions| > {NOISE_THRESHOLD} and no inconclusive tasks)")
-        lines += [f"- Wins: {id_list(result['wins'], id_cap)}",
-                  f"- Regressions: {id_list(result['regressions'], id_cap)}",
-                  f"- Inconclusive: {id_list(result['inconclusive'], id_cap)}",
+        lines += [f"- Wins: {id_list(result['wins'], id_cap, tasks)}",
+                  f"- Regressions: {id_list(result['regressions'], id_cap, tasks)}",
+                  f"- Inconclusive: {id_list(result['inconclusive'], id_cap, tasks)}",
                   f"- Difference: {noise}",
                   f"- Configuration differences (names only): "
                   f"{name_list(sorted(result['configuration_differences']), name_cap)}"]
     else:
         lines.append(f"- Comparison unavailable: {problem}")
+    lines.extend(jev_score_table(baseline, candidate))
     for side in ("baseline", "candidate"):
         lines.append(f"- Infrastructure failures ({side}): "
-                     f"{id_list(verdict_result.get('infra_tasks', {}).get(side, []), id_cap)}")
+                     f"{id_list(verdict_result.get('infra_tasks', {}).get(side, []), id_cap, tasks)}")
         if verdict_result.get("timeouts", {}).get(side):
             lines.append(f"- Timeouts ({side}, not counted as infrastructure): "
-                         f"{id_list(verdict_result['timeouts'][side], id_cap)}")
+                         f"{id_list(verdict_result['timeouts'][side], id_cap, tasks)}")
     reasons = [re.sub(r"[^A-Za-z0-9 ,.:_()-]", "", str(reason))[:200] for reason in verdict_result["reasons"]]
     if len(reasons) > MAX_REASONS:
         reasons = reasons[:MAX_REASONS] + [f"{len(reasons) - MAX_REASONS} more"]
