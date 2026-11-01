@@ -430,6 +430,7 @@ this rule; the discovery owner checks once if its status is unknown.
 
 ## Verify against risk and requirements
 
+- In a Maelstrom repository or any workspace/worktree of one, before claiming work is done, run `bunx nx run-many -t check test build typecheck e2e` locally and require it to pass completely green.
 - Establish sufficient verification early: relevant regression coverage,
   affected interfaces, and repository-required checks. Scale depth to risk,
   including plausible failures the existing checks cannot detect.
