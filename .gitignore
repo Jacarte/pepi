@@ -68,3 +68,4 @@ logs/
 /settings.json
 /mcp.json
 /models-router.json
+litellm*

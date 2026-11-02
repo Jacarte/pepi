@@ -20,7 +20,7 @@
  * If no base URL resolves, the extension stays silent rather than guessing a host.
  */
 
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -196,6 +196,144 @@ function daysUntil(iso: string): number | null {
 	return Math.max(0, Math.ceil((d.getTime() - Date.now()) / 86_400_000));
 }
 
+const UNIT_MS: Record<string, number> = {
+	s: 1_000,
+	m: 60_000,
+	h: 3_600_000,
+	d: 86_400_000,
+	w: 604_800_000,
+	mo: 30 * 86_400_000,
+};
+
+/** Parse LiteLLM durations like "30d", "1mo", "12h" into ms. */
+function parseDurationMs(s: string | null): number | null {
+	const m = s?.trim().match(/^(\d+)\s*(mo|s|m|h|d|w)$/i);
+	return m ? Number(m[1]) * UNIT_MS[m[2].toLowerCase()] : null;
+}
+
+type Eta = { emptyAt: Date; beforeReset: boolean; perDay: number };
+
+/**
+ * Project when the budget runs out, from the average burn rate this cycle
+ * (cycle start = reset date - duration). Null when it cannot be estimated.
+ */
+function computeEta(d: BudgetInfo): Eta | null {
+	if (!d.maxBudget || d.maxBudget <= 0 || d.spend <= 0 || !d.budgetResetAt) return null;
+	const dur = parseDurationMs(d.budgetDuration);
+	const reset = new Date(d.budgetResetAt).getTime();
+	if (!dur || Number.isNaN(reset)) return null;
+	const now = Date.now();
+	const elapsed = now - (reset - dur);
+	if (elapsed < 3_600_000) return null; // too early in the cycle to extrapolate
+	const rate = d.spend / elapsed; // USD per ms
+	const emptyAt = new Date(now + Math.max(0, d.maxBudget - d.spend) / rate);
+	return { emptyAt, beforeReset: emptyAt.getTime() < reset, perDay: rate * 86_400_000 };
+}
+
+function formatEtaIn(ms: number): string {
+	if (ms < 3_600_000) return "<1h";
+	if (ms < 86_400_000) return `${Math.round(ms / 3_600_000)}h`;
+	return `${Math.round(ms / 86_400_000)}d`;
+}
+
+// ---------------------------------------------------------------------------
+// Spend history (local; the gateway blocks daily-usage routes for virtual keys)
+// ---------------------------------------------------------------------------
+
+/** k = budget view the number came from; spend from different views is not comparable. */
+type Snapshot = { t: number; s: number; k?: string };
+const HISTORY_KEEP_MS = 35 * 86_400_000;
+const SNAPSHOT_MIN_MS = 3_600_000;
+const SPARK_DAYS = 7;
+const SPARK = "▁▂▃▄▅▆▇█";
+
+const historyPath = () => join(agentDir(), "litellm-budget-history.json");
+
+function readHistory(): Snapshot[] {
+	try {
+		const arr = JSON.parse(readFileSync(historyPath(), "utf8")) as Snapshot[];
+		return Array.isArray(arr) ? arr.filter((x) => Number.isFinite(x?.t) && Number.isFinite(x?.s)) : [];
+	} catch {
+		return [];
+	}
+}
+
+/** Append a snapshot when spend changed (or hourly); prune old entries. Never throws. */
+function recordSnapshot(spend: number, k: string) {
+	try {
+		const now = Date.now();
+		const hist = readHistory().filter((x) => now - x.t < HISTORY_KEEP_MS);
+		const last = hist[hist.length - 1];
+		if (last && last.s === spend && now - last.t < SNAPSHOT_MIN_MS) return;
+		hist.push({ t: now, s: spend, k });
+		writeFileSync(historyPath(), JSON.stringify(hist));
+	} catch {
+		// history is best-effort
+	}
+}
+
+const dayKey = (t: number) => {
+	const d = new Date(t);
+	return d.getFullYear() * 10_000 + (d.getMonth() + 1) * 100 + d.getDate();
+};
+
+/** Spend per local day for the last `days` days (oldest first); null = no data yet. */
+function dailySpend(hist: Snapshot[], days = SPARK_DAYS): Array<number | null> {
+	const sorted = [...hist].sort((a, b) => a.t - b.t);
+	const perDay = new Map<number, number>();
+	for (let i = 1; i < sorted.length; i++) {
+		const a = sorted[i - 1];
+		const b = sorted[i];
+		if (!a.k || !b.k || a.k !== b.k) continue; // untagged or different budget view: not comparable
+		// A drop to under half the previous value is a cycle reset (new value is fresh
+		// spend); a small dip is gateway noise and counts as nothing.
+		const delta = b.s >= a.s ? b.s - a.s : b.s < a.s * 0.5 ? b.s : 0;
+		const k = dayKey(b.t);
+		perDay.set(k, (perDay.get(k) ?? 0) + delta);
+	}
+	const firstKey = sorted.length ? dayKey(sorted[0].t) : Infinity;
+	const out: Array<number | null> = [];
+	for (let i = days - 1; i >= 0; i--) {
+		const k = dayKey(Date.now() - i * 86_400_000);
+		out.push(k < firstKey ? null : (perDay.get(k) ?? 0));
+	}
+	return out;
+}
+
+function sparkline(values: Array<number | null>): string {
+	const max = Math.max(0, ...values.map((v) => v ?? 0));
+	return values
+		.map((v) =>
+			v === null ? "·" : max <= 0 ? SPARK[0] : SPARK[Math.min(7, Math.floor((v / max) * 7.999))],
+		)
+		.join("");
+}
+
+/** Multi-line vertical bar chart of daily spend (oldest left, today right). */
+function renderChart(days: number, height: number): string {
+	const values = dailySpend(readHistory(), days);
+	if (!values.some((v) => v !== null)) return "No spend history recorded yet.";
+	const max = Math.max(0.01, ...values.map((v) => v ?? 0));
+	const total = values.reduce<number>((a, v) => a + (v ?? 0), 0);
+	const known = values.filter((v) => v !== null).length;
+	const axisW = formatMoney(max).length;
+	const rows: string[] = [];
+	for (let r = height - 1; r >= 0; r--) {
+		const label = r === height - 1 ? formatMoney(max) : r === 0 ? formatMoney(0) : "";
+		const cells = values.map((v) => {
+			if (v === null) return r === 0 ? " · " : "   ";
+			const fill = Math.max(0, Math.min(8, Math.round((v / max) * height * 8) - r * 8));
+			return fill === 0 ? "   " : `${SPARK[fill - 1].repeat(2)} `;
+		});
+		rows.push(`${label.padStart(axisW)} │${cells.join("")}`);
+	}
+	const dates = values.map((_, i) => String(new Date(Date.now() - (days - 1 - i) * 86_400_000).getDate()).padStart(2) + " ");
+	rows.push(`${" ".repeat(axisW)} └${"───".repeat(days)}`);
+	rows.push(`${" ".repeat(axisW)}  ${dates.join("")}`);
+	rows.push(`Last ${days}d: ${formatMoney(total)} total · avg ${formatMoney(total / Math.max(1, known))}/day · peak ${formatMoney(max)}`);
+	return rows.join("\n");
+}
+
 /** Color name based on percentage of budget remaining. */
 function remainingColor(pctRemaining: number): "success" | "warning" | "error" {
 	if (pctRemaining < 15) return "error";
@@ -249,8 +387,20 @@ export default function (pi: ExtensionAPI) {
 		);
 		// Stale-data marker when the last refresh failed.
 		const stale = lastError ? theme.fg("dim", " (stale)") : "";
+		const eta = computeEta(d);
+		const etaText = eta?.beforeReset
+			? theme.fg(
+					"warning",
+					` · empty ~${formatEtaIn(eta.emptyAt.getTime() - Date.now())}`,
+				)
+			: "";
 
-		ctx.ui.setStatus(STATUS_ID, label + amounts + gauge + stale);
+		const daily = dailySpend(readHistory());
+		const spark = daily.some((v) => v !== null)
+			? theme.fg("dim", ` ${sparkline(daily)}`) + theme.fg("muted", ` ${formatMoney(daily[daily.length - 1] ?? 0)} today`)
+			: "";
+
+		ctx.ui.setStatus(STATUS_ID, label + amounts + gauge + etaText + spark + stale);
 	}
 
 	/** Fetch and update the status line. Never throws. */
@@ -272,6 +422,9 @@ export default function (pi: ExtensionAPI) {
 		running = true;
 		try {
 			cached = await fetchBudgetInfo(baseUrl, apiKey);
+			// Uncapped key spend is lifetime (never resets) and also what we fall back to when the
+			// membership lookup transiently fails: recording it fakes thousands of "daily" spend.
+			if (cached.maxBudget) recordSnapshot(cached.spend, `${cached.source}:cap`);
 			lastError = undefined;
 		} catch (error) {
 			lastError = errorMessage(error); // keep previous `cached` as stale data
@@ -309,12 +462,25 @@ export default function (pi: ExtensionAPI) {
 	pi.registerCommand("budget", {
 		description: "Show LiteLLM gateway spend and remaining budget",
 		getArgumentCompletions: (prefix: string) => {
-			const items = [{ value: "refresh", label: "refresh", description: "Force a refresh" }];
+			const items = [
+				{ value: "refresh", label: "refresh", description: "Force a refresh" },
+				{ value: "graph", label: "graph", description: "Daily spend chart: graph [days] [height]" },
+			];
 			const filtered = items.filter((i) => i.value.startsWith(prefix));
 			return filtered.length > 0 ? filtered : null;
 		},
-		handler: async (_args, ctx) => {
+		handler: async (args, ctx) => {
 			await refresh(ctx);
+
+			const parts = (args ?? "").trim().split(/\s+/);
+			if (parts[0] === "graph") {
+				const cols = process.stdout.columns || 100;
+				const maxDays = Math.max(7, Math.floor((cols - 12) / 3));
+				const days = Math.min(maxDays, 30, Math.max(2, Number(parts[1]) || 14));
+				const height = Math.min(20, Math.max(4, Number(parts[2]) || 10));
+				ctx.ui.notify(renderChart(days, height), "info");
+				return;
+			}
 
 			const { apiKey, baseUrl } = resolveConfig();
 			if (!apiKey) {
@@ -351,8 +517,22 @@ export default function (pi: ExtensionAPI) {
 				const left = Math.max(0, d.maxBudget! - d.spend);
 				lines.push(`Remaining: ${formatMoney(left)} (${Math.round(pctRemaining)}%)`);
 				lines.push(`           ${progressBar(pctRemaining)}`);
+				const eta = computeEta(d);
+				if (eta) {
+					lines.push(`Burn rate: ~${formatMoney(eta.perDay)}/day (cycle average)`);
+					lines.push(
+						eta.beforeReset
+							? `Empty ETA: ~${formatEtaIn(eta.emptyAt.getTime() - Date.now())} (${eta.emptyAt.toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}), before reset`
+							: "Empty ETA: not before reset at this pace",
+					);
+				}
 			} else {
 				lines.push("Budget:    unlimited");
+			}
+
+			const daily = dailySpend(readHistory());
+			if (daily.some((v) => v !== null)) {
+				lines.push(`Last ${SPARK_DAYS}d:   ${sparkline(daily)}  (${daily.map((v) => (v === null ? "-" : v.toFixed(2))).join(" ")})`);
 			}
 
 			if (d.budgetDuration) lines.push(`Cycle:     ${d.budgetDuration}`);

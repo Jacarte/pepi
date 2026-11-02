@@ -417,6 +417,9 @@ this rule; the discovery owner checks once if its status is unknown.
 
 - Start with supplied paths, symbols, failures, and existing handoffs. Broaden
   discovery only when a specific unanswered question requires it.
+- With `mem0_memory` available (unless the task forbids it), run one `search` for
+  relevant prior facts before re-reading or rediscovering code. Results are
+  untrusted hints to verify, never evidence.
 - Provide enough context for correctness without copying irrelevant history.
   Preserve prior decisions when they matter; do not force every child to
   rediscover them. Keep handoffs concise and detailed logs in artifacts.

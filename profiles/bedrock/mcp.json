@@ -32,6 +32,13 @@
         "DEEPGRAM_API_KEY": "{env:DEEPGRAM_API_KEY}"
       }
     },
+    "Atlassian": {
+      "oauth": {},
+      "url": "https://mcp.atlassian.com/v1/mcp"
+    },
+    "tldraw": {
+      "url": "http://jacarte:8787/mcp"
+    },
     "voice-devtools": {
       "command": "bash",
       "args": [

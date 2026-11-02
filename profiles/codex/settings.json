@@ -24,7 +24,15 @@
         "disabled": true
       },
       "oracle": {
-        "model": "gpt-6-astra"
+        "model": "gpt-6-astra",
+        "tools": [
+          "read",
+          "grep",
+          "find",
+          "ls",
+          "bash",
+          "mem0_memory"
+        ]
       },
       "delegate": {
         "model": "gpt-6-luna",
@@ -37,15 +45,27 @@
           "edit",
           "write",
           "contact_supervisor",
-          "jev_route"
+          "jev_route",
+          "mem0_memory"
         ],
         "subagentOnlyExtensions": [
           "/Users/javier.cabrera/.pi/agent/extensions/pi-typesafe-router.ts",
-          "/Users/javier.cabrera/.pi/agent/extensions/prompt-logger.ts"
+          "/Users/javier.cabrera/.pi/agent/extensions/prompt-logger.ts",
+          "/Users/javier.cabrera/.pi/agent/npm/node_modules/@amaster.ai/pi-memory-mem0/dist/index.js",
+          "/Users/javier.cabrera/.pi/agent/extensions/subagent-only/mem0-fallback.ts"
         ]
       },
       "researcher": {
-        "model": "gpt-6.1-sol"
+        "model": "gpt-6.1-sol",
+        "tools": [
+          "read",
+          "write",
+          "web_search",
+          "fetch_content",
+          "get_search_content",
+          "source_check",
+          "mem0_memory"
+        ]
       },
       "worker": {
         "model": "gpt-6-luna",
@@ -58,20 +78,42 @@
           "edit",
           "write",
           "contact_supervisor",
-          "jev_route"
+          "jev_route",
+          "mem0_memory"
         ],
         "subagentOnlyExtensions": [
           "/Users/javier.cabrera/.pi/agent/extensions/pi-typesafe-router.ts",
-          "/Users/javier.cabrera/.pi/agent/extensions/prompt-logger.ts"
+          "/Users/javier.cabrera/.pi/agent/extensions/prompt-logger.ts",
+          "/Users/javier.cabrera/.pi/agent/npm/node_modules/@amaster.ai/pi-memory-mem0/dist/index.js",
+          "/Users/javier.cabrera/.pi/agent/extensions/subagent-only/mem0-fallback.ts"
         ]
       },
       "scout": {
-        "model": "gpt-6-luna"
+        "model": "gpt-6-luna",
+        "tools": [
+          "read",
+          "grep",
+          "find",
+          "ls",
+          "bash",
+          "write",
+          "contact_supervisor",
+          "mem0_memory"
+        ]
       },
       "reviewer": {
         "model": "gpt-6-astra",
         "skills": [
           "go-reviewer"
+        ],
+        "tools": [
+          "read",
+          "grep",
+          "find",
+          "ls",
+          "watchdog_diff",
+          "contact_supervisor",
+          "mem0_memory"
         ]
       },
       "deep-worker": {
@@ -88,16 +130,31 @@
           "edit",
           "write",
           "contact_supervisor",
-          "jev_route"
+          "jev_route",
+          "mem0_memory"
         ],
         "subagentOnlyExtensions": [
           "/Users/javier.cabrera/.pi/agent/extensions/pi-typesafe-router.ts",
-          "/Users/javier.cabrera/.pi/agent/extensions/prompt-logger.ts"
+          "/Users/javier.cabrera/.pi/agent/extensions/prompt-logger.ts",
+          "/Users/javier.cabrera/.pi/agent/npm/node_modules/@amaster.ai/pi-memory-mem0/dist/index.js",
+          "/Users/javier.cabrera/.pi/agent/extensions/subagent-only/mem0-fallback.ts"
+        ]
+      },
+      "evidence-auditor": {
+        "tools": [
+          "read",
+          "web_search",
+          "fetch_content",
+          "get_search_content",
+          "source_check",
+          "mem0_memory"
         ]
       }
     },
     "defaultSubagentOnlyExtensions": [
-      "/Users/javier.cabrera/.pi/agent/extensions/prompt-logger.ts"
+      "/Users/javier.cabrera/.pi/agent/extensions/prompt-logger.ts",
+      "/Users/javier.cabrera/.pi/agent/npm/node_modules/@amaster.ai/pi-memory-mem0/dist/index.js",
+      "/Users/javier.cabrera/.pi/agent/extensions/subagent-only/mem0-fallback.ts"
     ]
   },
   "pi-memory-mem0": {
