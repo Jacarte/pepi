@@ -39,7 +39,37 @@ func New(
 	}
 }
 
-func (m *Daggervals) Foo(ctx context.Context, auth *dagger.Secret, agentEnv *dagger.File) ([]string, error) {
+func (m *Daggervals) Hello(ctx context.Context, auth *dagger.Secret, agentEnv *dagger.File) ([]string, error) {
+	rootContainer, err := dag.Container().
+		From("ubuntu:24.04").
+		// install nodejs, npm, and git
+		WithExec([]string{"apt-get", "update"}).
+		WithExec([]string{"env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "install", "-y", "git", "curl", "tcpdump", "tshark"}).
+		WithExec([]string{"curl", "-fsSL", "https://deb.nodesource.com/setup_24.x", "-o", "nodesource_setup.sh"}).
+		WithExec([]string{"bash", "nodesource_setup.sh"}).
+		WithExec([]string{"apt-get", "install", "-y", "nodejs"}).
+		// check npm version
+		WithExec([]string{"npm", "--version"}).
+		// TODO, install ketch
+		Sync(ctx)
+
+	if err != nil {
+		return nil, err
+	}
+
+	evalEngine := engine.NewEngine(
+		llm.NewPiAgent(),
+		&setup.PiSetup{Workspace: m.Source, Auth: auth, Env: agentEnv.AsEnvFile()},
+		[]task.FixTask{task.HelloWorldTask},
+	)
+	outcomes, err := evalEngine.Run(ctx, rootContainer)
+	if err != nil {
+		return nil, err
+	}
+	return serializeTaskOutcomes(outcomes)
+}
+
+func (m *Daggervals) Evals(ctx context.Context, auth *dagger.Secret, agentEnv *dagger.File) ([]string, error) {
 	rootContainer, err := dag.Container().
 		From("ubuntu:24.04").
 		// install nodejs, npm, and git
