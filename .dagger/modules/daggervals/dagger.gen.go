@@ -215,7 +215,14 @@ func invoke(ctx context.Context, parentJSON []byte, parentName string, fnName st
 					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg auth", err))
 				}
 			}
-			return (*Daggervals).Foo(&parent, ctx, auth)
+			var agentEnv *dagger.File
+			if inputArgs["agentEnv"] != nil {
+				err = json.Unmarshal([]byte(inputArgs["agentEnv"]), &agentEnv)
+				if err != nil {
+					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg agentEnv", err))
+				}
+			}
+			return (*Daggervals).Foo(&parent, ctx, auth, agentEnv)
 		case "":
 			var parent Daggervals
 			err = json.Unmarshal(parentJSON, &parent)
@@ -236,19 +243,20 @@ func invoke(ctx context.Context, parentJSON []byte, parentName string, fnName st
 	case "":
 		return dag.Module().
 			WithObject(
-				dag.TypeDef().WithObject("Daggervals", dagger.TypeDefWithObjectOpts{SourceMap: dag.SourceMap("main.go", 13, 6)}).
+				dag.TypeDef().WithObject("Daggervals", dagger.TypeDefWithObjectOpts{SourceMap: dag.SourceMap("main.go", 14, 6)}).
 					WithFunction(
 						dag.Function("Foo",
 							dag.TypeDef().WithListOf(dag.TypeDef().WithKind(dagger.TypeDefKindStringKind))).
-							WithSourceMap(dag.SourceMap("main.go", 41, 1)).
-							WithArg("auth", dag.TypeDef().WithObject("Secret"), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 41, 47)})).
-					WithField("Source", dag.TypeDef().WithObject("Directory"), dagger.TypeDefWithFieldOpts{SourceMap: dag.SourceMap("main.go", 14, 2)}).
-					WithField("Auth", dag.TypeDef().WithObject("Secret"), dagger.TypeDefWithFieldOpts{SourceMap: dag.SourceMap("main.go", 15, 2)}).
+							WithSourceMap(dag.SourceMap("main.go", 42, 1)).
+							WithArg("auth", dag.TypeDef().WithObject("Secret"), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 42, 47)}).
+							WithArg("agentEnv", dag.TypeDef().WithObject("File"), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 42, 68)})).
+					WithField("Source", dag.TypeDef().WithObject("Directory"), dagger.TypeDefWithFieldOpts{SourceMap: dag.SourceMap("main.go", 15, 2)}).
+					WithField("Auth", dag.TypeDef().WithObject("Secret"), dagger.TypeDefWithFieldOpts{SourceMap: dag.SourceMap("main.go", 16, 2)}).
 					WithConstructor(
 						dag.Function("New",
 							dag.TypeDef().WithObject("Daggervals")).
-							WithSourceMap(dag.SourceMap("main.go", 18, 1)).
-							WithArg("ws", dag.TypeDef().WithObject("Workspace"), dagger.FunctionWithArgOpts{Description: "The current workspace, auto-populated by Dagger.", SourceMap: dag.SourceMap("main.go", 20, 2)}))), nil
+							WithSourceMap(dag.SourceMap("main.go", 19, 1)).
+							WithArg("ws", dag.TypeDef().WithObject("Workspace"), dagger.FunctionWithArgOpts{Description: "The current workspace, auto-populated by Dagger.", SourceMap: dag.SourceMap("main.go", 21, 2)}))), nil
 	default:
 		return nil, fmt.Errorf("unknown object %s", parentName)
 	}

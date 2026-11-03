@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"dagger/daggervals/internal/dagger"
+	"dagger/daggervals/internal/evals/network"
 	tasks "dagger/daggervals/internal/evals/task"
 )
 
@@ -22,8 +23,8 @@ type Setup interface {
 // Calls the LLM to generate code
 type LLM interface {
 	CallPrompt(container *dagger.Container, prompt string) *dagger.Container
-	RunTask(container *dagger.Container, task tasks.FixTask) *dagger.Container
-	GetStats(ctx context.Context, container *dagger.Container) (Stats, error)
+	TaskCommand(task tasks.FixTask) []string
+	GetAgentStats(ctx context.Context, container *dagger.Container) (AgentStats, error)
 }
 
 type Engine struct {
@@ -32,7 +33,7 @@ type Engine struct {
 	Tasks  []tasks.FixTask
 }
 
-type Stats struct {
+type AgentStats struct {
 	Turns      int64
 	Input      int64
 	Output     int64
@@ -41,10 +42,22 @@ type Stats struct {
 	CostUSD    float64
 }
 
+type ProcessStats struct {
+	CPUUsage    float64
+	MemoryUsage int64
+	DiskUsage   int64
+}
+
+// NetworkStats is passive packet accounting, not HTTP request or URL logging.
+type NetworkStats = network.Stats
+
 // TaskOutcome keeps verification failures as data so callers can still report stats.
 type TaskOutcome struct {
-	Task            string
-	Stats           Stats
+	Task string
+
+	AgentStats      AgentStats
+	ProcessStats    ProcessStats
+	NetworkStats    NetworkStats
 	Valid           bool
 	ValidationError error
 }
@@ -59,28 +72,40 @@ func NewEngine(agent LLM, setter Setup, tasks []tasks.FixTask) *Engine {
 
 func (e *Engine) Run(ctx context.Context, container *dagger.Container) ([]TaskOutcome, error) {
 	outcomes := make([]TaskOutcome, 0, len(e.Tasks))
-	// Setup the container with the needed files
-	setupFunc := e.Setter.Setup()(container)
-	// run up to here
-	// TODO, do this in parallel
+	// Pi provisioning and toolchains are outside the capture window.
+	setupFunc, err := e.Setter.Setup()(container).Sync(ctx)
+	if err != nil {
+		return outcomes, err
+	}
 	for _, task := range e.Tasks {
-		// Prepare env
 		setupFunc = task.Env.PrepareEnv(ctx)(setupFunc)
-		setupFunc, err := setupFunc.Sync(ctx)
+		prepared, err := setupFunc.Sync(ctx)
 		if err != nil {
 			return outcomes, err
 		}
-		// Call the agent to run the task
-		result := e.Agent.RunTask(setupFunc, task)
+		var testEnvScript string
+		if task.TestEnv != nil {
+			testEnvScript, err = task.TestEnv.Script(ctx)
+			if err != nil {
+				return outcomes, fmt.Errorf("prepare test environment script: %w", err)
+			}
+		}
+		result, err := network.Measure(prepared, testEnvScript, e.Agent.TaskCommand(task))
+		if err != nil {
+			return outcomes, err
+		}
 		// Force execution even when the oracle does not query the container.
 		result, err = result.Sync(ctx)
 		if err != nil {
 			return outcomes, err
 		}
+		// The measured exec has stopped capture, parsed it, and removed raw data.
+		networkStats, networkErr := network.ReadStats(ctx, result)
 		// Extract and print stats before verification, even if verification fails.
-		stats, statsErr := e.Agent.GetStats(ctx, result)
-		if statsErr == nil {
-			fmt.Printf("Task %s stats: %+v\n", task.Baseline.Repo, stats)
+		agentStats, agentErr := e.Agent.GetAgentStats(ctx, result)
+		statsErr := errors.Join(agentErr, networkErr)
+		if agentErr == nil {
+			fmt.Printf("Task %s stats: %+v\n", task.Baseline.Repo, agentStats)
 		}
 		// Verify the final answer even if stats extraction failed.
 		valid, validationErr := task.Oracle.ValidateFinalAnswer(ctx, result)
@@ -91,7 +116,8 @@ func (e *Engine) Run(ctx context.Context, container *dagger.Container) ([]TaskOu
 		}
 		outcomes = append(outcomes, TaskOutcome{
 			Task:            task.Baseline.Repo,
-			Stats:           stats,
+			AgentStats:      agentStats,
+			NetworkStats:    networkStats,
 			Valid:           valid && validationErr == nil,
 			ValidationError: validationErr,
 		})

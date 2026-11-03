@@ -37,10 +37,12 @@ func (r *Daggervals) Auth() *Secret {
 	}
 }
 
-func (r *Daggervals) Foo(ctx context.Context, auth *Secret) ([]string, error) {
+func (r *Daggervals) Foo(ctx context.Context, auth *Secret, agentEnv *File) ([]string, error) {
 	assertNotNil("auth", auth)
+	assertNotNil("agentEnv", agentEnv)
 	q := r.query.Select("foo")
 	q = q.Arg("auth", auth)
+	q = q.Arg("agentEnv", agentEnv)
 
 	var response []string
 

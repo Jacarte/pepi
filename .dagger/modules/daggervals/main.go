@@ -39,21 +39,26 @@ func New(
 	}
 }
 
-func (m *Daggervals) Foo(ctx context.Context, auth *dagger.Secret) ([]string, error) {
+func (m *Daggervals) Foo(ctx context.Context, auth *dagger.Secret, agentEnv *dagger.File) ([]string, error) {
 	rootContainer, err := dag.Container().
-		From("node:trixie-slim").
+		From("ubuntu:24.04").
+		// install nodejs, npm, and git
+		WithExec([]string{"apt-get", "update"}).
+		WithExec([]string{"env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "install", "-y", "git", "curl", "tcpdump", "tshark"}).
+		WithExec([]string{"curl", "-fsSL", "https://deb.nodesource.com/setup_24.x", "-o", "nodesource_setup.sh"}).
+		WithExec([]string{"bash", "nodesource_setup.sh"}).
+		WithExec([]string{"apt-get", "install", "-y", "nodejs"}).
 		// check npm version
 		WithExec([]string{"npm", "--version"}).
 		Sync(ctx)
 
-		// TODO set a proxy for intercepting calls
 	if err != nil {
 		return nil, err
 	}
 
 	evalEngine := engine.NewEngine(
 		llm.NewPiAgent(),
-		&setup.PiSetup{Workspace: m.Source, Auth: auth},
+		&setup.PiSetup{Workspace: m.Source, Auth: auth, Env: agentEnv.AsEnvFile()},
 		[]task.FixTask{task.HelloWorldTask},
 	)
 	outcomes, err := evalEngine.Run(ctx, rootContainer)
@@ -64,10 +69,11 @@ func (m *Daggervals) Foo(ctx context.Context, auth *dagger.Secret) ([]string, er
 }
 
 type taskResult struct {
-	Task            string      `json:"task"`
-	Stats           statsResult `json:"stats"`
-	Valid           bool        `json:"valid"`
-	ValidationError string      `json:"validationError,omitempty"`
+	Task            string              `json:"task"`
+	Stats           statsResult         `json:"stats"`
+	NetworkStats    engine.NetworkStats `json:"networkStats"`
+	Valid           bool                `json:"valid"`
+	ValidationError string              `json:"validationError,omitempty"`
 }
 
 type statsResult struct {
@@ -83,15 +89,16 @@ func serializeTaskOutcomes(outcomes []engine.TaskOutcome) ([]string, error) {
 	results := make([]string, 0, len(outcomes))
 	for _, outcome := range outcomes {
 		result := taskResult{
-			Task:  outcome.Task,
-			Valid: outcome.Valid,
+			Task:         outcome.Task,
+			Valid:        outcome.Valid,
+			NetworkStats: outcome.NetworkStats,
 			Stats: statsResult{
-				Turns:      outcome.Stats.Turns,
-				Input:      outcome.Stats.Input,
-				Output:     outcome.Stats.Output,
-				CacheRead:  outcome.Stats.CacheRead,
-				CacheWrite: outcome.Stats.CacheWrite,
-				CostUSD:    outcome.Stats.CostUSD,
+				Turns:      outcome.AgentStats.Turns,
+				Input:      outcome.AgentStats.Input,
+				Output:     outcome.AgentStats.Output,
+				CacheRead:  outcome.AgentStats.CacheRead,
+				CacheWrite: outcome.AgentStats.CacheWrite,
+				CostUSD:    outcome.AgentStats.CostUSD,
 			},
 		}
 		if outcome.ValidationError != nil {

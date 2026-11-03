@@ -33,7 +33,7 @@ func NewPiAgent() *PiAgent {
 // call
 func (agent *PiAgent) CallPrompt(container *dagger.Container, prompt string) *dagger.Container {
 	// Pi prompts are called as "pi -p <prompt>"
-	concatCommand := append(agent.command, "-p", prompt)
+	concatCommand := append(append([]string{}, agent.command...), "-p", prompt)
 	return container.
 		WithExec(concatCommand)
 }
@@ -41,11 +41,16 @@ func (agent *PiAgent) CallPrompt(container *dagger.Container, prompt string) *da
 // Run a task and return the container with the
 // call
 func (agent *PiAgent) RunTask(container *dagger.Container, task task.FixTask) *dagger.Container {
-	return agent.CallPrompt(container, task.ProblemStatement)
+	return container.WithExec(agent.TaskCommand(task))
 }
 
-// GetStats reads usage totals from the newest Pi session without changing container.
-func (agent *PiAgent) GetStats(ctx context.Context, container *dagger.Container) (engine.Stats, error) {
+// TaskCommand lets the engine run setup and Pi under the same capture exec.
+func (agent *PiAgent) TaskCommand(task task.FixTask) []string {
+	return append(append([]string{}, agent.command...), "-p", task.ProblemStatement)
+}
+
+// GetAgentStats reads usage totals from the newest Pi session without changing container.
+func (agent *PiAgent) GetAgentStats(ctx context.Context, container *dagger.Container) (engine.AgentStats, error) {
 	// FIXME this can be an embed JS file content
 	// Will look prettier
 	const script = `
@@ -81,13 +86,13 @@ process.stdout.write(JSON.stringify(stats));
 `
 	output, err := container.WithExec([]string{"node", "-e", script}).Stdout(ctx)
 	if err != nil {
-		return engine.Stats{}, fmt.Errorf("read Pi session stats: %w", err)
+		return engine.AgentStats{}, fmt.Errorf("read Pi session stats: %w", err)
 	}
 	var stats piStats
 	if err := json.Unmarshal([]byte(output), &stats); err != nil {
-		return engine.Stats{}, fmt.Errorf("parse Pi session stats: %w", err)
+		return engine.AgentStats{}, fmt.Errorf("parse Pi session stats: %w", err)
 	}
-	return engine.Stats{
+	return engine.AgentStats{
 		Turns:      stats.Turns,
 		Input:      stats.Input,
 		Output:     stats.Output,

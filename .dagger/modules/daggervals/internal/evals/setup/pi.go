@@ -5,9 +5,10 @@ import "dagger/daggervals/internal/dagger"
 type PiSetup struct {
 	Workspace *dagger.Directory
 	Auth      *dagger.Secret
+	Env       *dagger.EnvFile
 }
 
-// Copy needed fles, setup
+// Copy needed files, setup
 // the needed for pi and return a new Container setup function
 func (c *PiSetup) Setup() dagger.WithContainerFunc {
 
@@ -20,13 +21,10 @@ func (c *PiSetup) Setup() dagger.WithContainerFunc {
 		container = container.WithMountedDirectory("/root/.pi/agent", c.Workspace).
 			WithMountedSecret("/root/.pi/agent/auth.json", c.Auth).
 			// TODO read the profile from an ENV passed here
-			WithExec([]string{"/root/.pi/agent/profile.sh", "codex"})
-
-		// TODO copy the auth.json from a secret
+			WithExec([]string{"/root/.pi/agent/profile.sh", "codex"}).
+			WithEnvFileVariables(c.Env)
 
 		// TODO Set some MCPs as services
-
-		// TODO propagate envs from passed envs, e.g. Typesafe
 
 		// Return the container with the setup done
 		return container
