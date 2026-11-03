@@ -1,11 +1,13 @@
 #!/bin/bash
 set -euo pipefail
 export LC_ALL=C
+unset DAGGERVALS_PROCESS_STATS DAGGERVALS_STATS_LOG DAGGERVALS_PARENT_PID
 # The first argument is a nonce so Dagger cannot replay an earlier capture.
 setup=$2; parser=$3; report=$4; shift 4
 work=$(mktemp -d /tmp/daggervals-net.XXXXXXXX)
+process_report=/tmp/daggervals-process.jsonl
 capture_pid=; task_pid=
-rm -f "$report"
+rm -f "$report" "$process_report"
 
 stop_task() {
     if [[ -n "$task_pid" ]]; then
@@ -41,7 +43,7 @@ cleanup() {
     stop_task
     stop_capture || true
     rm -rf "$work"
-    if ((status != 0)); then rm -f "$report"; fi
+    if ((status != 0)); then rm -f "$report" "$process_report"; fi
     exit "$status"
 }
 trap cleanup EXIT
@@ -68,7 +70,14 @@ fi
 # Sourcing setup allows its cwd and environment to reach the agent. Setup logs
 # go to stderr: the exec's stdout remains the agent's answer for the oracle.
 setsid timeout --foreground --signal=TERM --kill-after=5s 1800s \
-    bash -e -c 'source "$1" >&2; shift; exec "$@"' measured-task "$setup" "$@" &
+    bash -e -c '
+        source "$1" >&2
+        export DAGGERVALS_PROCESS_STATS=1 DAGGERVALS_STATS_LOG="$2"
+        shift 2
+        # Fork after setup so its shell CPU/RSS is not charged to the Pi process.
+        (export DAGGERVALS_PARENT_PID=$BASHPID; exec "$@") &
+        wait "$!"
+    ' measured-task "$setup" "$work/process.jsonl" "$@" &
 task_pid=$!
 status=0
 wait "$task_pid" || status=$?
@@ -87,4 +96,5 @@ if ((status != 0)); then
 fi
 # Parse offline only after capture stops, with its own bounded cleanup.
 timeout --signal=TERM --kill-after=5s 60s node "$parser" "$work/traffic.pcap" "$work/tcpdump.log" > "$report"
+if [[ -f "$work/process.jsonl" ]]; then mv "$work/process.jsonl" "$process_report"; fi
 # EXIT removes raw capture/logs before Dagger snapshots the result.

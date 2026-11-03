@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"strings"
 
 	"dagger/daggervals/internal/dagger"
 	"dagger/daggervals/internal/evals/engine"
@@ -14,14 +16,7 @@ type PiAgent struct {
 	command []string
 }
 
-type piStats struct {
-	Turns      int64   `json:"turns"`
-	Input      int64   `json:"input"`
-	Output     int64   `json:"output"`
-	CacheRead  int64   `json:"cacheRead"`
-	CacheWrite int64   `json:"cacheWrite"`
-	CostUSD    float64 `json:"cost_usd"`
-}
+const processReportPath = "/tmp/daggervals-process.jsonl"
 
 func NewPiAgent() *PiAgent {
 	return &PiAgent{
@@ -41,7 +36,7 @@ func (agent *PiAgent) CallPrompt(container *dagger.Container, prompt string) *da
 // Run a task and return the container with the
 // call
 func (agent *PiAgent) RunTask(container *dagger.Container, task task.FixTask) *dagger.Container {
-	return container.WithExec(agent.TaskCommand(task))
+	return agent.CallPrompt(container, task.ProblemStatement)
 }
 
 // TaskCommand lets the engine run setup and Pi under the same capture exec.
@@ -49,55 +44,77 @@ func (agent *PiAgent) TaskCommand(task task.FixTask) []string {
 	return append(append([]string{}, agent.command...), "-p", task.ProblemStatement)
 }
 
-// GetAgentStats reads usage totals from the newest Pi session without changing container.
-func (agent *PiAgent) GetAgentStats(ctx context.Context, container *dagger.Container) (engine.AgentStats, error) {
-	// FIXME this can be an embed JS file content
-	// Will look prettier
-	const script = `
-const fs = require("node:fs");
-const path = require("node:path");
-let newest;
-function findSessions(dir) {
-  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-    const file = path.join(dir, entry.name);
-    if (entry.isDirectory()) {
-      findSessions(file);
-    } else if (entry.isFile() && entry.name.endsWith(".jsonl")) {
-      const mtime = fs.statSync(file).mtimeMs;
-      if (!newest || mtime > newest.mtime) newest = { file, mtime };
-    }
-  }
-}
-findSessions("/root/.pi/agent/sessions");
-if (!newest) throw new Error("no Pi session .jsonl files found");
-const stats = { turns: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost_usd: 0 };
-for (const line of fs.readFileSync(newest.file, "utf8").split(/\r?\n/)) {
-  if (!line.trim()) continue;
-  const entry = JSON.parse(line);
-  if (entry?.type !== "message" || entry.message?.role !== "assistant") continue;
-  stats.turns++;
-  const usage = entry.message.usage;
-  for (const key of ["input", "output", "cacheRead", "cacheWrite"]) {
-    stats[key] += usage?.[key] ?? 0;
-  }
-  stats.cost_usd += usage?.cost?.total ?? 0;
-}
-process.stdout.write(JSON.stringify(stats));
-`
-	output, err := container.WithExec([]string{"node", "-e", script}).Stdout(ctx)
+// GetStats reads metadata from the normally loaded, env-gated Pi extension.
+// Parent usage comes from its session manager, never the newest child JSONL.
+func (agent *PiAgent) GetStats(ctx context.Context, container *dagger.Container) (engine.AgentStats, engine.ProcessStats, error) {
+	output, err := container.File(processReportPath).Contents(ctx)
 	if err != nil {
-		return engine.AgentStats{}, fmt.Errorf("read Pi session stats: %w", err)
+		return engine.AgentStats{}, engine.ProcessStats{}, fmt.Errorf("read Pi process stats: %w", err)
 	}
-	var stats piStats
-	if err := json.Unmarshal([]byte(output), &stats); err != nil {
-		return engine.AgentStats{}, fmt.Errorf("parse Pi session stats: %w", err)
+	return parsePiStats(output)
+}
+
+// The extension emits only allowlisted metadata. Go groups agent records, not
+// Pi transcripts or pi-subagents internals. A completion marker rejects partial logs.
+func parsePiStats(contents string) (engine.AgentStats, engine.ProcessStats, error) {
+	var stats engine.AgentStats
+	processes := engine.ProcessStats{Groups: []engine.ProcessGroup{}, BackgroundProcesses: []engine.ProcessResource{}, Warnings: []string{}}
+	groups := make(map[string]int)
+	complete, parentSeen := false, false
+	decoder := json.NewDecoder(strings.NewReader(contents))
+	for {
+		var record struct {
+			Type       string                 `json:"type"`
+			Role       string                 `json:"role"`
+			AgentType  string                 `json:"agentType"`
+			AgentStats engine.AgentStats      `json:"agentStats"`
+			Instance   engine.ProcessInstance `json:"instance"`
+			Process    engine.ProcessResource `json:"process"`
+			Message    string                 `json:"message"`
+		}
+		err := decoder.Decode(&record)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return stats, processes, fmt.Errorf("parse Pi process stats: %w", err)
+		}
+		if complete {
+			return stats, processes, fmt.Errorf("Pi process stats contain records after completion")
+		}
+		switch record.Type {
+		case "parent_start":
+		case "agent":
+			if record.AgentType == "" || record.Instance.ID == "" || (record.Role != "parent" && record.Role != "child") {
+				return stats, processes, fmt.Errorf("Pi process stats invalid agent identity")
+			}
+			if record.Role == "parent" {
+				parent := record.Instance
+				if parentSeen || parent.Resources == nil || parent.Resources.CPUTimeMs == nil || parent.Resources.PeakMemoryBytes == nil || parent.StartedAt == nil || parent.EndedAt == nil || parent.DurationMs == nil {
+					return stats, processes, fmt.Errorf("Pi process stats invalid parent measurement")
+				}
+				parentSeen, stats = true, record.AgentStats
+			}
+			key := record.Role + ":" + record.AgentType
+			index, ok := groups[key]
+			if !ok {
+				index = len(processes.Groups)
+				groups[key] = index
+				processes.Groups = append(processes.Groups, engine.ProcessGroup{Role: record.Role, AgentType: record.AgentType, Instances: []engine.ProcessInstance{}})
+			}
+			processes.Groups[index].Instances = append(processes.Groups[index].Instances, record.Instance)
+		case "background_process":
+			processes.BackgroundProcesses = append(processes.BackgroundProcesses, record.Process)
+		case "warning":
+			processes.Warnings = append(processes.Warnings, record.Message)
+		case "complete":
+			complete = true
+		default:
+			return stats, processes, fmt.Errorf("Pi process stats unknown record type")
+		}
 	}
-	return engine.AgentStats{
-		Turns:      stats.Turns,
-		Input:      stats.Input,
-		Output:     stats.Output,
-		CacheRead:  stats.CacheRead,
-		CacheWrite: stats.CacheWrite,
-		CostUSD:    stats.CostUSD,
-	}, nil
+	if !complete || !parentSeen {
+		return stats, processes, fmt.Errorf("Pi process stats incomplete capture")
+	}
+	return stats, processes, nil
 }

@@ -24,7 +24,7 @@ type Setup interface {
 type LLM interface {
 	CallPrompt(container *dagger.Container, prompt string) *dagger.Container
 	TaskCommand(task tasks.FixTask) []string
-	GetAgentStats(ctx context.Context, container *dagger.Container) (AgentStats, error)
+	GetStats(ctx context.Context, container *dagger.Container) (AgentStats, ProcessStats, error)
 }
 
 type Engine struct {
@@ -34,18 +34,59 @@ type Engine struct {
 }
 
 type AgentStats struct {
-	Turns      int64
-	Input      int64
-	Output     int64
-	CacheRead  int64
-	CacheWrite int64
-	CostUSD    float64
+	Turns      int64   `json:"turns"`
+	Input      int64   `json:"input"`
+	Output     int64   `json:"output"`
+	CacheRead  int64   `json:"cacheRead"`
+	CacheWrite int64   `json:"cacheWrite"`
+	CostUSD    float64 `json:"cost_usd"`
 }
 
+// ProcessStats separates logical agent instances from OS processes. Foreground
+// agents share the parent process; background steps may share a runner process.
 type ProcessStats struct {
-	CPUUsage    float64
-	MemoryUsage int64
-	DiskUsage   int64
+	Groups              []ProcessGroup    `json:"groups"`
+	BackgroundProcesses []ProcessResource `json:"backgroundProcesses"`
+	Warnings            []string          `json:"warnings"`
+}
+
+type ProcessGroup struct {
+	Role      string            `json:"role"`
+	AgentType string            `json:"agentType"`
+	Instances []ProcessInstance `json:"instances"`
+}
+
+type ProcessInstance struct {
+	ID           string           `json:"id"`
+	Mode         string           `json:"mode"`
+	Status       string           `json:"status"`
+	StartedAt    *string          `json:"startedAt"`
+	EndedAt      *string          `json:"endedAt"`
+	DurationMs   *float64         `json:"durationMs"`
+	TimingSource string           `json:"timingSource"`
+	ProcessID    string           `json:"processId"`
+	Resources    *ProcessResource `json:"resources"`
+	Usage        *ProcessUsage    `json:"usage"`
+	UsageSource  string           `json:"usageSource"`
+}
+
+// Null metrics are unavailable, not zero. Sampled background metrics are lower
+// bounds at the last observation, never apportioned across logical children.
+type ProcessResource struct {
+	ID              string   `json:"id"`
+	PID             int      `json:"pid"`
+	CPUTimeMs       *float64 `json:"cpuTimeMs"`
+	PeakMemoryBytes *int64   `json:"peakMemoryBytes"`
+	Measurement     string   `json:"measurement"`
+}
+
+type ProcessUsage struct {
+	Turns      *int64   `json:"turns"`
+	Input      *int64   `json:"input"`
+	Output     *int64   `json:"output"`
+	CacheRead  *int64   `json:"cacheRead"`
+	CacheWrite *int64   `json:"cacheWrite"`
+	CostUSD    *float64 `json:"cost_usd"`
 }
 
 // NetworkStats is passive packet accounting, not HTTP request or URL logging.
@@ -102,7 +143,7 @@ func (e *Engine) Run(ctx context.Context, container *dagger.Container) ([]TaskOu
 		// The measured exec has stopped capture, parsed it, and removed raw data.
 		networkStats, networkErr := network.ReadStats(ctx, result)
 		// Extract and print stats before verification, even if verification fails.
-		agentStats, agentErr := e.Agent.GetAgentStats(ctx, result)
+		agentStats, processStats, agentErr := e.Agent.GetStats(ctx, result)
 		statsErr := errors.Join(agentErr, networkErr)
 		if agentErr == nil {
 			fmt.Printf("Task %s stats: %+v\n", task.Baseline.Repo, agentStats)
@@ -117,6 +158,7 @@ func (e *Engine) Run(ctx context.Context, container *dagger.Container) ([]TaskOu
 		outcomes = append(outcomes, TaskOutcome{
 			Task:            task.Baseline.Repo,
 			AgentStats:      agentStats,
+			ProcessStats:    processStats,
 			NetworkStats:    networkStats,
 			Valid:           valid && validationErr == nil,
 			ValidationError: validationErr,

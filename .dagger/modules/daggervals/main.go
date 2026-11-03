@@ -50,6 +50,7 @@ func (m *Daggervals) Foo(ctx context.Context, auth *dagger.Secret, agentEnv *dag
 		WithExec([]string{"apt-get", "install", "-y", "nodejs"}).
 		// check npm version
 		WithExec([]string{"npm", "--version"}).
+		// TODO, install ketch
 		Sync(ctx)
 
 	if err != nil {
@@ -72,6 +73,7 @@ type taskResult struct {
 	Task            string              `json:"task"`
 	Stats           statsResult         `json:"stats"`
 	NetworkStats    engine.NetworkStats `json:"networkStats"`
+	ProcessStats    engine.ProcessStats `json:"processStats"`
 	Valid           bool                `json:"valid"`
 	ValidationError string              `json:"validationError,omitempty"`
 }
@@ -92,6 +94,7 @@ func serializeTaskOutcomes(outcomes []engine.TaskOutcome) ([]string, error) {
 			Task:         outcome.Task,
 			Valid:        outcome.Valid,
 			NetworkStats: outcome.NetworkStats,
+			ProcessStats: outcome.ProcessStats,
 			Stats: statsResult{
 				Turns:      outcome.AgentStats.Turns,
 				Input:      outcome.AgentStats.Input,
