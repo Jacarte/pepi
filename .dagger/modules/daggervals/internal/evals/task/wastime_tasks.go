@@ -9,7 +9,10 @@ import (
 	"strings"
 )
 
-type WasmtimeTask struct{}
+type WasmtimeTask struct {
+	Repo   string
+	Commit string
+}
 
 func (WasmtimeTask) PrepareEnv(ctx context.Context) dagger.WithContainerFunc {
 	return func(container *dagger.Container) *dagger.Container {
@@ -17,7 +20,25 @@ func (WasmtimeTask) PrepareEnv(ctx context.Context) dagger.WithContainerFunc {
 		container = container.WithExec([]string{
 			"sh", "-c",
 			"curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.97.0",
-		})
+		}).
+			WithEnvVariable("CARGO_BUILD_JOBS", "2").
+			WithEnvVariable("CARGO_PROFILE_DEV_DEBUG", "0").
+			WithEnvVariable("CARGO_PROFILE_TEST_DEBUG", "0").
+			WithEnvVariable("CARGO_INCREMENTAL", "0")
+
+		return container
+	}
+}
+
+// Download git repo
+// Apply patch to break
+func (c WasmtimeTask) PrepareEnvForTesting(ctx context.Context) dagger.WithContainerFunc {
+	return func(container *dagger.Container) *dagger.Container {
+
+		container = container.
+			WithExec([]string{"git", "clone", c.Repo, "/tmp/repo"}).
+			WithWorkdir("/tmp/repo").
+			WithExec([]string{"git", "checkout", c.Commit, "--"})
 
 		return container
 	}
