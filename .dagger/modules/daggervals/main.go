@@ -39,7 +39,7 @@ func New(
 	}
 }
 
-func (m *Daggervals) Hello(ctx context.Context, auth *dagger.Secret, agentEnv *dagger.File) ([]string, error) {
+func (m *Daggervals) Hello(ctx context.Context, auth *dagger.Secret, agentEnv *dagger.File, agentProfile string) ([]string, error) {
 	rootContainer, err := dag.Container().
 		From("ubuntu:24.04").
 		// install nodejs, npm, and git
@@ -59,7 +59,7 @@ func (m *Daggervals) Hello(ctx context.Context, auth *dagger.Secret, agentEnv *d
 
 	evalEngine := engine.NewEngine(
 		llm.NewPiAgent(),
-		&setup.PiSetup{Workspace: m.Source, Auth: auth, Env: agentEnv.AsEnvFile()},
+		&setup.PiSetup{Workspace: m.Source, Auth: auth, Env: agentEnv.AsEnvFile(), Profile: agentProfile},
 		[]task.FixTask{task.HelloWorldTask},
 	)
 	outcomes, err := evalEngine.Run(ctx, rootContainer)
@@ -69,7 +69,7 @@ func (m *Daggervals) Hello(ctx context.Context, auth *dagger.Secret, agentEnv *d
 	return serializeTaskOutcomes(outcomes)
 }
 
-func (m *Daggervals) Evals(ctx context.Context, auth *dagger.Secret, agentEnv *dagger.File) ([]string, error) {
+func (m *Daggervals) Evals(ctx context.Context, auth *dagger.Secret, agentEnv *dagger.File, agentProfile string) ([]string, error) {
 	rootContainer, err := dag.Container().
 		From("ubuntu:24.04").
 		// install nodejs, npm, and git
@@ -89,7 +89,7 @@ func (m *Daggervals) Evals(ctx context.Context, auth *dagger.Secret, agentEnv *d
 
 	evalEngine := engine.NewEngine(
 		llm.NewPiAgent(),
-		&setup.PiSetup{Workspace: m.Source, Auth: auth, Env: agentEnv.AsEnvFile()},
+		&setup.PiSetup{Workspace: m.Source, Auth: auth, Env: agentEnv.AsEnvFile(), Profile: agentProfile},
 		[]task.FixTask{task.HelloWorldTask},
 	)
 	outcomes, err := evalEngine.Run(ctx, rootContainer)

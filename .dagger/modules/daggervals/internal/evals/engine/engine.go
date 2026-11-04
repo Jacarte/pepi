@@ -58,6 +58,8 @@ type ProcessGroup struct {
 
 type ProcessInstance struct {
 	ID           string           `json:"id"`
+	Agent        string           `json:"agent"`
+	Model        *string          `json:"model"`
 	Mode         string           `json:"mode"`
 	Status       string           `json:"status"`
 	StartedAt    *string          `json:"startedAt"`

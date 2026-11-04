@@ -50,10 +50,10 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-# Only the capture process gets a file-size limit (64 MiB). Failure is fatal,
+# Only the capture process gets a file-size limit (256 MiB). Failure is fatal,
 # never a silently truncated report. No promiscuous mode or elevated caps.
 # An 8 MiB capture buffer absorbs bursts; reported packet drops still fail closed.
-(ulimit -c 0; ulimit -f 65536; exec tcpdump -p -i any -B 8192 --immediate-mode -U -s 0 -Z "$(id -un)" -w "$work/traffic.pcap") 2>"$work/tcpdump.log" &
+(ulimit -c 0; ulimit -f 262144; exec tcpdump -p -i any -B 8192 --immediate-mode -U -s 0 -Z "$(id -un)" -w "$work/traffic.pcap") 2>"$work/tcpdump.log" &
 capture_pid=$!
 ready=false
 for ((i=0; i<100; i++)); do
@@ -83,7 +83,7 @@ status=0
 wait "$task_pid" || status=$?
 stop_task
 if ! kill -0 "$capture_pid" 2>/dev/null; then
-    echo 'network capture exited before the task (possibly the 64 MiB limit)' >&2
+    echo 'network capture exited before the task (possibly the 256 MiB limit)' >&2
     exit 1
 fi
 if ! stop_capture; then

@@ -7,6 +7,7 @@ const number = value => typeof value === 'number' && Number.isFinite(value) && v
 const identity = value => typeof value === 'string' && value.length > 0 && value.length <= 256 ? value : null;
 const iso = value => number(value) !== null && value <= 8640000000000000 ? new Date(value).toISOString() : null;
 const terminal = status => ['complete', 'completed', 'failed', 'stopped', 'rejected', 'partial'].includes(status);
+const model = value => typeof value === 'string' && value.length > 0 && value.length <= 256 ? value : null;
 const emptyUsage = () => ({ turns: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost_usd: 0 });
 
 function sessionUsage(entries) {
@@ -63,7 +64,7 @@ class Collector {
     if (!identity(runId) || !identity(agent) || !Number.isInteger(index) || index < 0) return null;
     const id = `${runId}:${index}`;
     if (!this.children.has(id)) this.children.set(id, {
-      id, agent, mode, status: 'unknown', startedAt: null, endedAt: null, durationMs: null,
+      id, agent, model: null, mode, status: 'unknown', startedAt: null, endedAt: null, durationMs: null,
       timingSource: 'unavailable', processId: mode === 'foreground' ? 'parent' : runId,
       resources: null, usage: null, usageSource: 'unavailable',
     });
@@ -81,6 +82,7 @@ class Collector {
       const child = this.child(runId, result.index, result.agent, 'foreground');
       if (!child) continue;
       const progress = result.progress ?? result.progressSummary;
+      child.model = model(result.model) ?? model(progress?.model) ?? child.model;
       const duration = number(result.progressSummary?.durationMs ?? progress?.durationMs);
       const status = result.detached ? 'detached' : progress?.status ?? (result.progressSummary ? (result.exitCode === 0 ? 'completed' : 'failed') : 'running');
       if (child.endedAt !== null && (!terminal(status) || (duration !== null && child.durationMs !== null && duration < child.durationMs))) continue;
@@ -182,6 +184,7 @@ class Collector {
         child.processId = ownRunner ? '' : pid === this.pid ? 'parent' : runId;
         if (ownRunner) this.warnings.add('An async workflow child process was not observed directly.');
         child.status = step.status;
+        child.model = model(step.model) ?? child.model;
         child.startedAt = number(step.startedAt);
         child.endedAt = number(step.endedAt);
         child.durationMs = child.startedAt !== null && child.endedAt !== null ? Math.max(0, child.endedAt - child.startedAt) : number(step.durationMs);
@@ -197,14 +200,15 @@ class Collector {
     }
   }
 
-  records(usage, resource, startedAt, endedAt, exitCode) {
+  records(usage, resource, startedAt, endedAt, exitCode, parentModel = null) {
     this.poll(true);
     const records = [{ type: 'agent', agentType: 'parent', role: 'parent', agentStats: usage, instance: {
-      id: 'parent', mode: 'parent', status: exitCode === 0 ? 'exited' : 'failed', startedAt: iso(startedAt), endedAt: iso(endedAt),
+      id: 'parent', agent: 'parent', model: parentModel, mode: 'parent', status: exitCode === 0 ? 'exited' : 'failed', startedAt: iso(startedAt), endedAt: iso(endedAt),
       durationMs: Math.max(0, endedAt - startedAt), timingSource: 'process-uptime/exit', processId: 'parent',
       resources: resource, usage, usageSource: usage ? 'parent-session' : 'unavailable',
     } }];
-    for (const { agent, ...child } of this.children.values()) {
+    for (const child of this.children.values()) {
+      const agent = child.agent;
       records.push({ type: 'agent', agentType: agent, role: 'child', instance: {
         ...child, startedAt: iso(child.startedAt), endedAt: iso(child.endedAt),
       } });
@@ -236,9 +240,11 @@ export default function processStats(pi) {
   const startedAt = Date.now() - process.uptime() * 1000;
   fs.appendFileSync(logPath, '', { mode: 0o600 });
   let manager;
+  let sessionModel = null;
   pi.on('session_start', (_event, ctx) => {
     if (manager) return;
     manager = ctx.sessionManager;
+    sessionModel = ctx.model?.provider && ctx.model?.id ? `${ctx.model.provider}/${ctx.model.id}` : model(ctx.model?.id);
     fs.appendFileSync(logPath, JSON.stringify({ type: 'parent_start', startedAt: iso(startedAt), resources: parentResources() }) + '\n', { mode: 0o600 });
   });
   pi.on('tool_execution_update', event => collector.details(event.partialResult?.details));
@@ -254,7 +260,10 @@ export default function processStats(pi) {
     clearInterval(timer);
     if (!manager) collector.warnings.add('Parent session unavailable; Pi exited before session_start.');
     const usage = manager ? sessionUsage(manager.getEntries()) : null;
-    const records = collector.records(usage, parentResources(), startedAt, Date.now(), exitCode);
+    // Prefer the model that actually answered; fall back to the session model.
+    const last = manager?.getEntries().filter(e => e.type === 'message' && e.message?.role === 'assistant' && e.message.model).at(-1)?.message;
+    const parentModel = last ? (last.provider ? `${last.provider}/${last.model}` : model(last.model)) : sessionModel;
+    const records = collector.records(usage, parentResources(), startedAt, Date.now(), exitCode, parentModel);
     fs.appendFileSync(logPath, records.map(record => JSON.stringify(record)).join('\n') + '\n', { mode: 0o600 });
   });
 }

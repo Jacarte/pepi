@@ -37,12 +37,27 @@ func (r *Daggervals) Auth() *Secret {
 	}
 }
 
-func (r *Daggervals) Foo(ctx context.Context, auth *Secret, agentEnv *File) ([]string, error) {
+func (r *Daggervals) Evals(ctx context.Context, auth *Secret, agentEnv *File, agentProfile string) ([]string, error) {
 	assertNotNil("auth", auth)
 	assertNotNil("agentEnv", agentEnv)
-	q := r.query.Select("foo")
+	q := r.query.Select("evals")
 	q = q.Arg("auth", auth)
 	q = q.Arg("agentEnv", agentEnv)
+	q = q.Arg("agentProfile", agentProfile)
+
+	var response []string
+
+	q = q.Bind(&response)
+	return response, q.Execute(ctx)
+}
+
+func (r *Daggervals) Hello(ctx context.Context, auth *Secret, agentEnv *File, agentProfile string) ([]string, error) {
+	assertNotNil("auth", auth)
+	assertNotNil("agentEnv", agentEnv)
+	q := r.query.Select("hello")
+	q = q.Arg("auth", auth)
+	q = q.Arg("agentEnv", agentEnv)
+	q = q.Arg("agentProfile", agentProfile)
 
 	var response []string
 

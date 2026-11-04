@@ -6,6 +6,7 @@ type PiSetup struct {
 	Workspace *dagger.Directory
 	Auth      *dagger.Secret
 	Env       *dagger.EnvFile
+	Profile   string
 }
 
 // Copy needed files, setup
@@ -21,7 +22,7 @@ func (c *PiSetup) Setup() dagger.WithContainerFunc {
 		container = container.WithMountedDirectory("/root/.pi/agent", c.Workspace).
 			WithMountedSecret("/root/.pi/agent/auth.json", c.Auth).
 			// TODO read the profile from an ENV passed here
-			WithExec([]string{"/root/.pi/agent/profile.sh", "codex"}).
+			WithExec([]string{"/root/.pi/agent/profile.sh", c.Profile}).
 			WithEnvFileVariables(c.Env)
 
 		// TODO Set some MCPs as services

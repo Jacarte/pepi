@@ -153,37 +153,12 @@ func dispatch(ctx context.Context) (rerr error) {
 		}
 	}()
 
-	parentName, err := fnCall.ParentName(ctx)
+	parentName, fnName, parentJson, inputArgs, err := fnCall.DispatchInputs(ctx)
 	if err != nil {
-		return fmt.Errorf("get parent name: %w", err)
-	}
-	fnName, err := fnCall.Name(ctx)
-	if err != nil {
-		return fmt.Errorf("get fn name: %w", err)
-	}
-	parentJson, err := fnCall.Parent(ctx)
-	if err != nil {
-		return fmt.Errorf("get fn parent: %w", err)
-	}
-	fnArgs, err := fnCall.InputArgs(ctx)
-	if err != nil {
-		return fmt.Errorf("get fn args: %w", err)
+		return fmt.Errorf("get fn call: %w", err)
 	}
 
-	inputArgs := map[string][]byte{}
-	for _, fnArg := range fnArgs {
-		argName, err := fnArg.Name(ctx)
-		if err != nil {
-			return fmt.Errorf("get fn arg name: %w", err)
-		}
-		argValue, err := fnArg.Value(ctx)
-		if err != nil {
-			return fmt.Errorf("get fn arg value: %w", err)
-		}
-		inputArgs[argName] = []byte(argValue)
-	}
-
-	result, err := invoke(ctx, []byte(parentJson), parentName, fnName, inputArgs)
+	result, err := invoke(ctx, parentJson, parentName, fnName, inputArgs)
 	if err != nil {
 		return err
 	}
@@ -202,7 +177,7 @@ func invoke(ctx context.Context, parentJSON []byte, parentName string, fnName st
 	switch parentName {
 	case "Daggervals":
 		switch fnName {
-		case "Foo":
+		case "Evals":
 			var parent Daggervals
 			err = json.Unmarshal(parentJSON, &parent)
 			if err != nil {
@@ -222,7 +197,42 @@ func invoke(ctx context.Context, parentJSON []byte, parentName string, fnName st
 					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg agentEnv", err))
 				}
 			}
-			return (*Daggervals).Foo(&parent, ctx, auth, agentEnv)
+			var agentProfile string
+			if inputArgs["agentProfile"] != nil {
+				err = json.Unmarshal([]byte(inputArgs["agentProfile"]), &agentProfile)
+				if err != nil {
+					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg agentProfile", err))
+				}
+			}
+			return (*Daggervals).Evals(&parent, ctx, auth, agentEnv, agentProfile)
+		case "Hello":
+			var parent Daggervals
+			err = json.Unmarshal(parentJSON, &parent)
+			if err != nil {
+				panic(fmt.Errorf("%s: %w", "failed to unmarshal parent object", err))
+			}
+			var auth *dagger.Secret
+			if inputArgs["auth"] != nil {
+				err = json.Unmarshal([]byte(inputArgs["auth"]), &auth)
+				if err != nil {
+					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg auth", err))
+				}
+			}
+			var agentEnv *dagger.File
+			if inputArgs["agentEnv"] != nil {
+				err = json.Unmarshal([]byte(inputArgs["agentEnv"]), &agentEnv)
+				if err != nil {
+					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg agentEnv", err))
+				}
+			}
+			var agentProfile string
+			if inputArgs["agentProfile"] != nil {
+				err = json.Unmarshal([]byte(inputArgs["agentProfile"]), &agentProfile)
+				if err != nil {
+					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg agentProfile", err))
+				}
+			}
+			return (*Daggervals).Hello(&parent, ctx, auth, agentEnv, agentProfile)
 		case "":
 			var parent Daggervals
 			err = json.Unmarshal(parentJSON, &parent)
@@ -245,11 +255,19 @@ func invoke(ctx context.Context, parentJSON []byte, parentName string, fnName st
 			WithObject(
 				dag.TypeDef().WithObject("Daggervals", dagger.TypeDefWithObjectOpts{SourceMap: dag.SourceMap("main.go", 14, 6)}).
 					WithFunction(
-						dag.Function("Foo",
+						dag.Function("Evals",
+							dag.TypeDef().WithListOf(dag.TypeDef().WithKind(dagger.TypeDefKindStringKind))).
+							WithSourceMap(dag.SourceMap("main.go", 72, 1)).
+							WithArg("auth", dag.TypeDef().WithObject("Secret"), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 72, 49)}).
+							WithArg("agentEnv", dag.TypeDef().WithObject("File"), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 72, 70)}).
+							WithArg("agentProfile", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 72, 93)})).
+					WithFunction(
+						dag.Function("Hello",
 							dag.TypeDef().WithListOf(dag.TypeDef().WithKind(dagger.TypeDefKindStringKind))).
 							WithSourceMap(dag.SourceMap("main.go", 42, 1)).
-							WithArg("auth", dag.TypeDef().WithObject("Secret"), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 42, 47)}).
-							WithArg("agentEnv", dag.TypeDef().WithObject("File"), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 42, 68)})).
+							WithArg("auth", dag.TypeDef().WithObject("Secret"), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 42, 49)}).
+							WithArg("agentEnv", dag.TypeDef().WithObject("File"), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 42, 70)}).
+							WithArg("agentProfile", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 42, 93)})).
 					WithField("Source", dag.TypeDef().WithObject("Directory"), dagger.TypeDefWithFieldOpts{SourceMap: dag.SourceMap("main.go", 15, 2)}).
 					WithField("Auth", dag.TypeDef().WithObject("Secret"), dagger.TypeDefWithFieldOpts{SourceMap: dag.SourceMap("main.go", 16, 2)}).
 					WithConstructor(
