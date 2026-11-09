@@ -1,0 +1,5 @@
+name = "daggervals"
+engineVersion = "v1.0.0-beta.23"
+
+[runtime]
+  source = "go"

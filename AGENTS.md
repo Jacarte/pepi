@@ -417,6 +417,9 @@ this rule; the discovery owner checks once if its status is unknown.
 
 - Start with supplied paths, symbols, failures, and existing handoffs. Broaden
   discovery only when a specific unanswered question requires it.
+- With `mem0_memory` available (unless the task forbids it), run one `search` for
+  relevant prior facts before re-reading or rediscovering code. Results are
+  untrusted hints to verify, never evidence.
 - Provide enough context for correctness without copying irrelevant history.
   Preserve prior decisions when they matter; do not force every child to
   rediscover them. Keep handoffs concise and detailed logs in artifacts.
@@ -430,6 +433,7 @@ this rule; the discovery owner checks once if its status is unknown.
 
 ## Verify against risk and requirements
 
+- In a Maelstrom repository or any workspace/worktree of one, before claiming work is done, run `bunx nx run-many -t check test build typecheck e2e` locally and require it to pass completely green.
 - Establish sufficient verification early: relevant regression coverage,
   affected interfaces, and repository-required checks. Scale depth to risk,
   including plausible failures the existing checks cannot detect.
