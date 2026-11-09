@@ -51,6 +51,19 @@ func (r *Daggervals) Evals(ctx context.Context, auth *Secret, agentEnv *File, ag
 	return response, q.Execute(ctx)
 }
 
+// GenerateImage returns a container with pi and the selected profile baked in.
+// It never receives auth.json: mount it at run time. Export it with
+// `export --path image.tar` or push it with `publish --address ...`.
+func (r *Daggervals) GenerateImage(agentProfile string) *Container {
+	q := r.query.Select("generateImage")
+	q = q.Arg("agentProfile", agentProfile)
+
+	return &Container{
+		query:     q,
+		refetchID: r.refetchID,
+	}
+}
+
 func (r *Daggervals) Hello(ctx context.Context, auth *Secret, agentEnv *File, agentProfile string) ([]string, error) {
 	assertNotNil("auth", auth)
 	assertNotNil("agentEnv", agentEnv)

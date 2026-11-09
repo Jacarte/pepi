@@ -205,6 +205,20 @@ func invoke(ctx context.Context, parentJSON []byte, parentName string, fnName st
 				}
 			}
 			return (*Daggervals).Evals(&parent, ctx, auth, agentEnv, agentProfile)
+		case "GenerateImage":
+			var parent Daggervals
+			err = json.Unmarshal(parentJSON, &parent)
+			if err != nil {
+				panic(fmt.Errorf("%s: %w", "failed to unmarshal parent object", err))
+			}
+			var agentProfile string
+			if inputArgs["agentProfile"] != nil {
+				err = json.Unmarshal([]byte(inputArgs["agentProfile"]), &agentProfile)
+				if err != nil {
+					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg agentProfile", err))
+				}
+			}
+			return (*Daggervals).GenerateImage(&parent, ctx, agentProfile)
 		case "Hello":
 			var parent Daggervals
 			err = json.Unmarshal(parentJSON, &parent)
@@ -261,6 +275,12 @@ func invoke(ctx context.Context, parentJSON []byte, parentName string, fnName st
 							WithArg("auth", dag.TypeDef().WithObject("Secret"), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 72, 49)}).
 							WithArg("agentEnv", dag.TypeDef().WithObject("File"), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 72, 70)}).
 							WithArg("agentProfile", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 72, 93)})).
+					WithFunction(
+						dag.Function("GenerateImage",
+							dag.TypeDef().WithObject("Container")).
+							WithDescription("GenerateImage returns a container with pi and the selected profile baked in.\nIt never receives auth.json: mount it at run time. Export it with\n`export --path image.tar` or push it with `publish --address ...`.").
+							WithSourceMap(dag.SourceMap("main.go", 105, 1)).
+							WithArg("agentProfile", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 105, 57)})).
 					WithFunction(
 						dag.Function("Hello",
 							dag.TypeDef().WithListOf(dag.TypeDef().WithKind(dagger.TypeDefKindStringKind))).

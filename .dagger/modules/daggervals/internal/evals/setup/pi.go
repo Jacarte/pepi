@@ -7,6 +7,9 @@ type PiSetup struct {
 	Auth      *dagger.Secret
 	Env       *dagger.EnvFile
 	Profile   string
+	// Bake copies the workspace into the image filesystem (instead of mounting it)
+	// and skips the auth mount; Auth and Env may then be nil.
+	Bake bool
 }
 
 // Copy needed files, setup
@@ -18,12 +21,19 @@ func (c *PiSetup) Setup() dagger.WithContainerFunc {
 		// install pi
 		container = container.WithExec([]string{"npm", "install", "-g", "--ignore-scripts", "@earendil-works/pi-coding-agent"})
 
-		// Copy the workspace to the container
-		container = container.WithMountedDirectory("/root/.pi/agent", c.Workspace).
-			WithMountedSecret("/root/.pi/agent/auth.json", c.Auth).
-			// TODO read the profile from an ENV passed here
-			WithExec([]string{"/root/.pi/agent/profile.sh", c.Profile}).
-			WithEnvFileVariables(c.Env)
+		if c.Bake {
+			container = container.WithDirectory("/root/.pi/agent", c.Workspace).
+				WithExec([]string{"/root/.pi/agent/profile.sh", c.Profile})
+		} else {
+			// Copy the workspace to the container
+			container = container.WithMountedDirectory("/root/.pi/agent", c.Workspace).
+				WithMountedSecret("/root/.pi/agent/auth.json", c.Auth).
+				// TODO read the profile from an ENV passed here
+				WithExec([]string{"/root/.pi/agent/profile.sh", c.Profile})
+		}
+		if c.Env != nil {
+			container = container.WithEnvFileVariables(c.Env)
+		}
 
 		// TODO Set some MCPs as services
 

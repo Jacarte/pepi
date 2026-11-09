@@ -8,7 +8,8 @@
     "npm:pi-mcp-adapter",
     "npm:@vndv/pi-codegraph",
     "npm:@amaster.ai/pi-memory-mem0",
-    "npm:@dietrichgebert/ponytail"
+    "npm:@dietrichgebert/ponytail",
+    "npm:pi-ketch"
   ],
   "defaultModel": "bedrock-claude-sonnet-5-5",
   "defaultProvider": "litellm",

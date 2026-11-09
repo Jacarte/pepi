@@ -1,0 +1,125 @@
+# Runs the daggervals Dagger module (`dagger call daggervals hello`).
+# Runs on every push to main and manually; the job is bound to the `evals` GitHub Environment, which holds the secrets:
+#   PI_AUTH  content of an evaluation-only auth.json (written to a 0600 temp file, passed as a Dagger secret)
+#   EVAL_ENV content of the agent .env file (optional, may be empty)
+# Never put GitHub expressions inside `run:` scripts; pass values through `env:`.
+
+name: daggervals
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: Profile name under profiles/ (defaults to repository variable PROFILE)
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: daggervals
+  cancel-in-progress: false
+
+env:
+  DAGGER_VERSION: 1.0.0-beta.24
+
+jobs:
+  evals:
+    name: dagger hello
+    runs-on: ubuntu-latest
+    environment: evals
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install Dagger
+        run: |
+          set -euo pipefail
+          curl -fsSL https://dl.dagger.io/dagger/install.sh | DAGGER_VERSION="v${DAGGER_VERSION}" BIN_DIR="$HOME/.local/bin" sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Write secrets
+        env:
+          PI_AUTH: ${{ secrets.PI_AUTH }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$PI_AUTH" ]]; then
+            echo "::error::Secret PI_AUTH is not set in the evals environment."
+            exit 1
+          fi
+          umask 077
+          mkdir -p "$RUNNER_TEMP/secrets"
+          printf '%s' "$PI_AUTH" > "$RUNNER_TEMP/secrets/auth.json"
+
+      - name: Dagger call
+        env:
+          PROFILE_INPUT: ${{ inputs.profile }}
+          PROFILE_VAR: ${{ vars.PROFILE }}
+        run: |
+          set -euo pipefail
+          profile="${PROFILE_INPUT:-$PROFILE_VAR}"
+          if [[ ! "$profile" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$ ]]; then
+            echo "::error::Profile is missing or has unsafe characters."
+            exit 1
+          fi
+          dagger call daggervals hello \
+            --auth "file:$RUNNER_TEMP/secrets/auth.json" \
+            --agent-profile "$profile"
+
+      - name: Remove secrets
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/secrets"
+
+  # Runs only after evals pass. Never receives auth.json or the env file: the image only holds
+  # pi plus the profile; mount auth.json at run time. Published to ghcr.io/<owner>/<repo>-agent.
+  image:
+    name: dagger generate-image
+    needs: evals
+    runs-on: ubuntu-latest
+    environment: evals
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install Dagger
+        run: |
+          set -euo pipefail
+          curl -fsSL https://dl.dagger.io/dagger/install.sh | DAGGER_VERSION="v${DAGGER_VERSION}" BIN_DIR="$HOME/.local/bin" sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      # The Dagger CLI forwards the runner's Docker credentials to the engine for `publish`.
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Dagger generate-image and publish
+        env:
+          PROFILE_INPUT: ${{ inputs.profile }}
+          PROFILE_VAR: ${{ vars.PROFILE }}
+          REPOSITORY: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          profile="${PROFILE_INPUT:-$PROFILE_VAR}"
+          if [[ ! "$profile" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$ ]]; then
+            echo "::error::Profile is missing or has unsafe characters."
+            exit 1
+          fi
+          image="ghcr.io/${REPOSITORY,,}-agent"
+          for tag in "$profile-${SHA::12}" "$profile"; do
+            dagger call daggervals generate-image \
+              --agent-profile "$profile" \
+              publish --address "$image:$tag"
+          done

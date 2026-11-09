@@ -99,6 +99,28 @@ func (m *Daggervals) Evals(ctx context.Context, auth *dagger.Secret, agentEnv *d
 	return serializeTaskOutcomes(outcomes)
 }
 
+// GenerateImage returns a container with pi and the selected profile baked in.
+// It never receives auth.json: mount it at run time. Export it with
+// `export --path image.tar` or push it with `publish --address ...`.
+func (m *Daggervals) GenerateImage(ctx context.Context, agentProfile string) (*dagger.Container, error) {
+	rootContainer, err := dag.Container().
+		From("ubuntu:24.04").
+		WithExec([]string{"apt-get", "update"}).
+		WithExec([]string{"env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "install", "-y", "git", "curl", "tcpdump", "tshark"}).
+		WithExec([]string{"curl", "-fsSL", "https://deb.nodesource.com/setup_24.x", "-o", "nodesource_setup.sh"}).
+		WithExec([]string{"bash", "nodesource_setup.sh"}).
+		WithExec([]string{"apt-get", "install", "-y", "nodejs"}).
+		Sync(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	piSetup := &setup.PiSetup{Workspace: m.Source, Profile: agentProfile, Bake: true}
+	return rootContainer.
+		With(piSetup.Setup()).
+		WithEntrypoint([]string{"pi"}), nil
+}
+
 type taskResult struct {
 	Task            string              `json:"task"`
 	Stats           statsResult         `json:"stats"`
