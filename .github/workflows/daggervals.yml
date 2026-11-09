@@ -71,7 +71,7 @@ jobs:
           dagger call daggervals hello \
             --auth "file:$RUNNER_TEMP/secrets/auth.json" \
             --agent-profile "$profile" \
-            --agent-env "./empty.env"
+            --agent-env "file://./empty.env"
 
       - name: Remove secrets
         if: always()
