@@ -9,7 +9,7 @@
     "npm:pi-ketch",
     "npm:@dietrichgebert/ponytail"
   ],
-  "defaultModel": "gpt-6-luna",
+  "defaultModel": "gpt-6.1-sol",
   "defaultProvider": "openai-codex",
   "defaultThinkingLevel": "high",
   "subagents": {
