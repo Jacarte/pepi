@@ -69,7 +69,7 @@ jobs:
           fi
           echo "" > ./empty.env
           dagger call daggervals hello \
-            --auth "file:$RUNNER_TEMP/secrets/auth.json" \
+            --auth "file://$RUNNER_TEMP/secrets/auth.json" \
             --agent-profile "$profile" \
             --agent-env "file://./empty.env"
 
