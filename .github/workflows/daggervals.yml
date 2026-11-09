@@ -67,9 +67,11 @@ jobs:
             echo "::error::Profile is missing or has unsafe characters."
             exit 1
           fi
+          echo "" > ./empty.env
           dagger call daggervals hello \
             --auth "file:$RUNNER_TEMP/secrets/auth.json" \
-            --agent-profile "$profile"
+            --agent-profile "$profile" \
+            --agent-env "./empty.env"
 
       - name: Remove secrets
         if: always()
