@@ -106,7 +106,7 @@ func (m *Daggervals) GenerateImage(ctx context.Context, agentProfile string) (*d
 	rootContainer, err := dag.Container().
 		From("ubuntu:24.04").
 		WithExec([]string{"apt-get", "update"}).
-		WithExec([]string{"env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "install", "-y", "git", "curl", "tcpdump", "tshark"}).
+		WithExec([]string{"env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "install", "-y", "git", "curl", "tcpdump", "tshark", "gh"}).
 		WithExec([]string{"curl", "-fsSL", "https://deb.nodesource.com/setup_24.x", "-o", "nodesource_setup.sh"}).
 		WithExec([]string{"bash", "nodesource_setup.sh"}).
 		WithExec([]string{"apt-get", "install", "-y", "nodejs"}).

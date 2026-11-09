@@ -20,6 +20,8 @@ func (c *PiSetup) Setup() dagger.WithContainerFunc {
 
 		// install pi
 		container = container.WithExec([]string{"npm", "install", "-g", "--ignore-scripts", "@earendil-works/pi-coding-agent"})
+		// install codegraph
+		container = container.WithExec([]string{"npm", "install", "-g", "@colbymchenry/codegraph"})
 
 		if c.Bake {
 			container = container.WithDirectory("/root/.pi/agent", c.Workspace).
