@@ -52,8 +52,9 @@ trap 'exit 143' TERM
 
 # Only the capture process gets a file-size limit (256 MiB). Failure is fatal,
 # never a silently truncated report. No promiscuous mode or elevated caps.
-# An 8 MiB capture buffer absorbs bursts; reported packet drops still fail closed.
-(ulimit -c 0; ulimit -f 262144; exec tcpdump -p -i any -B 8192 --immediate-mode -U -s 0 -Z "$(id -un)" -w "$work/traffic.pcap") 2>"$work/tcpdump.log" &
+# A 64 MiB kernel buffer absorbs bursts on slow CI runners and packets are not flushed to disk
+# one by one (no -U; SIGINT flushes on stop). Reported packet drops still fail closed.
+(ulimit -c 0; ulimit -f 262144; exec tcpdump -p -i any -B 65536 -s 0 -Z "$(id -un)" -w "$work/traffic.pcap") 2>"$work/tcpdump.log" &
 capture_pid=$!
 ready=false
 for ((i=0; i<100; i++)); do
