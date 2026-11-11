@@ -12,7 +12,7 @@
   "FRONTIER": {
     "provider": "openai-codex",
     "id": "gpt-6-astra",
-    "threshold": 0.85
+    "threshold": 0.92
   },
   "HUMAN": {
     "provider": "human",
