@@ -9,11 +9,10 @@ const MODELS_FILE = resolve(__dirname, "..", "models-router.json");
 const LOG_FILE = resolve(__dirname, "..", "logs", "router.log");
 const ENDPOINT = "https://api.typesafe.ai/v1/systemone";
 const TIMEOUT_MS = 2_000;
-// Below this, hard tasks go to CHEAP (sonnet) instead of FRONTIER (opus).
-const FRONTIER_MIN = 0.7;
 const LANES = ["LOCAL", "CHEAP", "FRONTIER"] as const;
 type Lane = (typeof LANES)[number];
 type Target = { provider: string; id: string };
+type LaneConfig = Target & { threshold: number };
 
 // Noul questions ask whether a proposition is true, not how difficult it is.
 const QUESTIONS = {
@@ -42,12 +41,12 @@ function object(value: unknown, label: string): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
-function loadModels(): Record<Lane, Target> {
+function loadModels(): Record<Lane, LaneConfig> {
   const config = object(
     JSON.parse(readFileSync(MODELS_FILE, "utf8")),
     "models-router.json",
   );
-  const models = {} as Record<Lane, Target>;
+  const models = {} as Record<Lane, LaneConfig>;
   for (const lane of LANES) {
     const entry = object(config[lane], `model mapping for ${lane}`);
     for (const key of ["provider", "id"] as const) {
@@ -57,10 +56,22 @@ function loadModels(): Record<Lane, Target> {
     }
     const provider = (entry.provider as string).trim();
     if (provider === "human") throw new Error("Human is not a model provider.");
-    models[lane] = { provider, id: (entry.id as string).trim() };
+    const threshold = entry.threshold;
+    if (typeof threshold !== "number" || !Number.isFinite(threshold) || threshold < 0 || threshold > 1) {
+      throw new Error(`Jev router: ${lane}.threshold must be a finite number in [0,1].`);
+    }
+    models[lane] = { provider, id: (entry.id as string).trim(), threshold };
   }
   // Existing HUMAN entries are deliberately ignored: routing is not approval.
   return models;
+}
+
+function selectLane(scores: { hard: number; trivial: number }, models: Record<Lane, LaneConfig>): Lane {
+  if (scores.hard > models.FRONTIER.threshold) return "FRONTIER";
+  if (scores.trivial >= models.LOCAL.threshold) return "LOCAL";
+  if (scores.hard >= models.CHEAP.threshold) return "CHEAP";
+  // CHEAP also covers tasks that meet none of the configured thresholds.
+  return "CHEAP";
 }
 
 function probability(answers: Record<string, unknown>, name: string): number {
@@ -165,8 +176,7 @@ export default function(pi: ExtensionAPI) {
         hard: probability(answers, "hard"),
         trivial: probability(answers, "trivial"),
       };
-      const lane: Lane = scores.hard >= FRONTIER_MIN ? "FRONTIER"
-        : scores.trivial >= 0.5 ? "LOCAL" : "CHEAP";
+      const lane = selectLane(scores, models);
       const target = models[lane];
       const model = ctx.modelRegistry.find(target.provider, target.id);
       if (!model) throw new Error(`Jev router: model not registered: ${fullId(target)}.`);

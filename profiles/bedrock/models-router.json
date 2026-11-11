@@ -1,15 +1,18 @@
 {
   "LOCAL": {
     "provider": "litellm",
-    "id": "bedrock-claude-haiku-5-5"
+    "id": "bedrock-claude-haiku-5-5",
+    "threshold": 0.5
   },
   "CHEAP": {
     "provider": "litellm",
-    "id": "bedrock-claude-sonnet-5-5"
+    "id": "bedrock-claude-sonnet-5-5",
+    "threshold": 0.3
   },
   "FRONTIER": {
     "provider": "litellm",
-    "id": "bedrock-claude-opus-5-5"
+    "id": "bedrock-claude-opus-5-5",
+    "threshold": 0.8
   },
   "HUMAN": {
     "provider": "human",

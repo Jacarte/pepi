@@ -158,6 +158,16 @@ Both profiles set thinking level `high` and subagent project-root resolution
 | `CHEAP` | `openai-codex/gpt-6.1-sol` | `litellm/bedrock-claude-sonnet-5-5` |
 | `FRONTIER` | `openai-codex/gpt-6-astra` | `litellm/bedrock-claude-opus-5-5` |
 
+Each lane requires a numeric `threshold` in `[0,1]` alongside `provider` and `id`
+(for example, `"threshold": 0.85`); missing, nonfinite, or nonnumeric values fail
+before classification. Edit the tracked profile files to preserve changes across
+`profile.sh` switches; the tool reads the active root config on each call.
+
+Routing checks `FRONTIER` first (hard score **> 0.85** for Codex, **> 0.8** for
+Bedrock), then `LOCAL` (trivial score **>= 0.5**), then `CHEAP` (hard score
+**>= 0.3**). `LOCAL` wins overlap with `CHEAP`; `CHEAP` is also the fallback when
+no threshold matches. Its threshold therefore does not exclude lower scores.
+
 The Bedrock router's `LOCAL` ID differs from the worker/scout override. Both router
 files also contain `HUMAN`, which the extension deliberately ignores; routing is
 not approval.
