@@ -1,18 +1,16 @@
 {
+  "minConfidence": 0.4,
   "LOCAL": {
     "provider": "openai-codex",
-    "id": "gpt-6-luna",
-    "threshold": 0.5
+    "id": "gpt-6-luna"
   },
   "CHEAP": {
     "provider": "openai-codex",
-    "id": "gpt-6.1-sol",
-    "threshold": 0.3
+    "id": "gpt-6.1-sol"
   },
   "FRONTIER": {
     "provider": "openai-codex",
-    "id": "gpt-6-astra",
-    "threshold": 0.92
+    "id": "gpt-6-astra"
   },
   "HUMAN": {
     "provider": "human",

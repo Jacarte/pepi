@@ -93,12 +93,18 @@ orchestrates and integrates.
   automatically on user input. Model mappings remain in `models-router.json`.
 - Before an authorized implementation delegation, call `jev_route` with
   action `recommend`. Supply the complete assignment, relevant findings,
-  constraints, and acceptance checks. Pass the returned `model` string
-  unchanged as the `model` argument when launching the subagent.
+  constraints, and acceptance checks. Set `role` to the subagent that will do
+  the work and `files` to the relevant paths (not contents). Pass the returned
+  `model` string unchanged as the `model` argument when launching the subagent.
+- Jev escalates to the `FRONTIER` lane when its lane confidence is below
+  `minConfidence` or the blast radius is critical with blast-radius confidence
+  at or above `minConfidence` (exactly equal counts as confident). A critical
+  blast radius below `minConfidence` and a cross-cutting one only raise a
+  `LOCAL` lane to `CHEAP`.
 - Parent, delegate, and worker sessions may call `jev_route` with action
   `switch_self` when the current assignment requires a different model. This
-  changes only the calling session. It does not change another running agent,
-  its tools, its role, or its permissions.
+  changes only the calling session; pass your own `role`. It does not change
+  another running agent, its tools, its role, or its permissions.
 - Set `requiresImages: true` when the selected model must process images.
   Do not send secrets in the task or context supplied to Jev.
 - Reconsider routing only when the assignment or evidence changes materially.

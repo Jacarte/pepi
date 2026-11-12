@@ -158,15 +158,29 @@ Both profiles set thinking level `high` and subagent project-root resolution
 | `CHEAP` | `openai-codex/gpt-6.1-sol` | `litellm/bedrock-claude-sonnet-5-5` |
 | `FRONTIER` | `openai-codex/gpt-6-astra` | `litellm/bedrock-claude-opus-5-5` |
 
-Each lane requires a numeric `threshold` in `[0,1]` alongside `provider` and `id`
-(for example, `"threshold": 0.85`); missing, nonfinite, or nonnumeric values fail
-before classification. Edit the tracked profile files to preserve changes across
-`profile.sh` switches; the tool reads the active root config on each call.
+Each lane requires a nonempty `provider` and `id`. Each file also requires a
+top-level numeric `minConfidence` in `[0,1]` (currently **0.4** in both profiles;
+the Codex value may be tuned separately). Missing, nonfinite, nonnumeric, or
+out-of-range values fail before classification. Edit the tracked profile files to preserve changes
+across `profile.sh` switches; the tool reads the active root config on each call.
 
-Routing checks `FRONTIER` first (hard score **> 0.85** for Codex, **> 0.8** for
-Bedrock), then `LOCAL` (trivial score **>= 0.5**), then `CHEAP` (hard score
-**>= 0.3**). `LOCAL` wins overlap with `CHEAP`; `CHEAP` is also the fallback when
-no threshold matches. Its threshold therefore does not exclude lower scores.
+Jev answers two Choice questions about the supplied `role`, `task`, `context` and
+`files`: `lane` (`local`, `cheap`, `frontier`) and `blast_radius` (`contained`,
+`cross_cutting`, `critical`). The lane choice is used unless a rule raises it, in
+this order:
+
+1. lane confidence below `minConfidence` → `FRONTIER` (`low_confidence`);
+2. `critical` blast radius with blast-radius confidence at or above
+   `minConfidence` → `FRONTIER` (`critical`). Unlike rule 1, exactly
+   `minConfidence` counts as confident here (`>=`, whereas the lane rule is
+   strict `<`);
+3. `critical` blast radius with confidence below `minConfidence` → at least
+   `CHEAP` (`uncertain_critical_floor`), not `FRONTIER`;
+4. `cross_cutting` blast radius → at least `CHEAP` (`cross_cutting_floor`).
+
+Rules never lower a lane. The result reports `escalated` and `reason` (the first
+rule that raised the lane, or `null`). Invalid classifier answers fail; there is
+no fallback lane.
 
 The Bedrock router's `LOCAL` ID differs from the worker/scout override. Both router
 files also contain `HUMAN`, which the extension deliberately ignores; routing is
