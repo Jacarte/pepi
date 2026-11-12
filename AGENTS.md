@@ -308,6 +308,30 @@ progress the user requested:
 Never: delete notes without asking; use markdown links for internal notes;
 create notes without frontmatter; change folder structure without documenting it.
 
+## Herdr collaboration mode
+
+Opt-in only: use it when the user asks for herdr mode and `HERDR_ENV=1`;
+otherwise pi-subagents stays the default. Read `~/.pi/agent/skills/herdr-mode/SKILL.md`
+first.
+
+- Tools: `herdr_spawn`, `herdr_wait`, `herdr_collect`, `herdr_merge`,
+  `herdr_review`, `herdr_cleanup`, plus `herdr_peers` / `herdr_send`.
+- Panes use the same role definitions as pi-subagents. Without `model`, only
+  `worker`/`delegate` are routed like `jev_route recommend`; other roles keep
+  their pinned model. A routing failure fails the spawn.
+- The parent never edits code. It merges mechanically; conflicts go to one
+  `deep-worker` fixer pane in the integration workspace. Merged panes stay alive;
+  `herdr_cleanup` removes workspaces. A lone writer's main-checkout output is never
+  merged by `herdr_merge`.
+- Run-owned workspaces get a best-effort `codegraph init` before pi starts there.
+- Caps: 4 open worker panes, 3 read-only reviewers with distinct lenses, and
+  5 messages per pane pair and direction. Reviewers cannot use peer messaging.
+- `idle`/`done` is not success: read the pane tail with `herdr_collect`.
+- jj: one workspace per parallel writer under `~/.herdr-ws/<run>/`,
+  integrated with `jj new`; git worktrees only when `jj root` fails. Use
+  `--ignore-working-copy` for reads, and never push or create bookmarks.
+
+
 ## Default routing
 
 Apply parent triage first. Nontrivial tasks require `scout`, a worker (`worker` or `deep-worker`), and `reviewer`; add `oracle` for risky decisions.
