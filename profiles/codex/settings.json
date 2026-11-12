@@ -31,7 +31,21 @@
           "find",
           "ls",
           "bash",
-          "mem0_memory"
+          "mem0_memory",
+          "codegraph_search",
+          "codegraph_node",
+          "codegraph_files",
+          "codegraph_callers",
+          "codegraph_callees",
+          "codegraph_impact",
+          "codegraph_explore",
+          "codegraph_status"
+        ],
+        "subagentOnlyExtensions": [
+          "/Users/javier.cabrera/.pi/agent/extensions/prompt-logger.ts",
+          "/Users/javier.cabrera/.pi/agent/npm/node_modules/@amaster.ai/pi-memory-mem0/dist/index.js",
+          "/Users/javier.cabrera/.pi/agent/extensions/subagent-only/mem0-fallback.ts",
+          "/Users/javcab/.pi/agent/npm/node_modules/@vndv/pi-codegraph/extensions/codegraph.ts"
         ]
       },
       "delegate": {
@@ -46,13 +60,22 @@
           "write",
           "contact_supervisor",
           "jev_route",
-          "mem0_memory"
+          "mem0_memory",
+          "codegraph_search",
+          "codegraph_node",
+          "codegraph_files",
+          "codegraph_callers",
+          "codegraph_callees",
+          "codegraph_impact",
+          "codegraph_explore",
+          "codegraph_status"
         ],
         "subagentOnlyExtensions": [
           "/Users/javier.cabrera/.pi/agent/extensions/pi-typesafe-router.ts",
           "/Users/javier.cabrera/.pi/agent/extensions/prompt-logger.ts",
           "/Users/javier.cabrera/.pi/agent/npm/node_modules/@amaster.ai/pi-memory-mem0/dist/index.js",
-          "/Users/javier.cabrera/.pi/agent/extensions/subagent-only/mem0-fallback.ts"
+          "/Users/javier.cabrera/.pi/agent/extensions/subagent-only/mem0-fallback.ts",
+          "/Users/javcab/.pi/agent/npm/node_modules/@vndv/pi-codegraph/extensions/codegraph.ts"
         ]
       },
       "researcher": {
@@ -79,13 +102,22 @@
           "write",
           "contact_supervisor",
           "jev_route",
-          "mem0_memory"
+          "mem0_memory",
+          "codegraph_search",
+          "codegraph_node",
+          "codegraph_files",
+          "codegraph_callers",
+          "codegraph_callees",
+          "codegraph_impact",
+          "codegraph_explore",
+          "codegraph_status"
         ],
         "subagentOnlyExtensions": [
           "/Users/javier.cabrera/.pi/agent/extensions/pi-typesafe-router.ts",
           "/Users/javier.cabrera/.pi/agent/extensions/prompt-logger.ts",
           "/Users/javier.cabrera/.pi/agent/npm/node_modules/@amaster.ai/pi-memory-mem0/dist/index.js",
-          "/Users/javier.cabrera/.pi/agent/extensions/subagent-only/mem0-fallback.ts"
+          "/Users/javier.cabrera/.pi/agent/extensions/subagent-only/mem0-fallback.ts",
+          "/Users/javcab/.pi/agent/npm/node_modules/@vndv/pi-codegraph/extensions/codegraph.ts"
         ]
       },
       "scout": {
@@ -98,7 +130,21 @@
           "bash",
           "write",
           "contact_supervisor",
-          "mem0_memory"
+          "mem0_memory",
+          "codegraph_search",
+          "codegraph_node",
+          "codegraph_files",
+          "codegraph_callers",
+          "codegraph_callees",
+          "codegraph_impact",
+          "codegraph_explore",
+          "codegraph_status"
+        ],
+        "subagentOnlyExtensions": [
+          "/Users/javier.cabrera/.pi/agent/extensions/prompt-logger.ts",
+          "/Users/javier.cabrera/.pi/agent/npm/node_modules/@amaster.ai/pi-memory-mem0/dist/index.js",
+          "/Users/javier.cabrera/.pi/agent/extensions/subagent-only/mem0-fallback.ts",
+          "/Users/javcab/.pi/agent/npm/node_modules/@vndv/pi-codegraph/extensions/codegraph.ts"
         ]
       },
       "reviewer": {
@@ -113,7 +159,21 @@
           "ls",
           "watchdog_diff",
           "contact_supervisor",
-          "mem0_memory"
+          "mem0_memory",
+          "codegraph_search",
+          "codegraph_node",
+          "codegraph_files",
+          "codegraph_callers",
+          "codegraph_callees",
+          "codegraph_impact",
+          "codegraph_explore",
+          "codegraph_status"
+        ],
+        "subagentOnlyExtensions": [
+          "/Users/javier.cabrera/.pi/agent/extensions/prompt-logger.ts",
+          "/Users/javier.cabrera/.pi/agent/npm/node_modules/@amaster.ai/pi-memory-mem0/dist/index.js",
+          "/Users/javier.cabrera/.pi/agent/extensions/subagent-only/mem0-fallback.ts",
+          "/Users/javcab/.pi/agent/npm/node_modules/@vndv/pi-codegraph/extensions/codegraph.ts"
         ]
       },
       "deep-worker": {
@@ -131,13 +191,22 @@
           "write",
           "contact_supervisor",
           "jev_route",
-          "mem0_memory"
+          "mem0_memory",
+          "codegraph_search",
+          "codegraph_node",
+          "codegraph_files",
+          "codegraph_callers",
+          "codegraph_callees",
+          "codegraph_impact",
+          "codegraph_explore",
+          "codegraph_status"
         ],
         "subagentOnlyExtensions": [
           "/Users/javier.cabrera/.pi/agent/extensions/pi-typesafe-router.ts",
           "/Users/javier.cabrera/.pi/agent/extensions/prompt-logger.ts",
           "/Users/javier.cabrera/.pi/agent/npm/node_modules/@amaster.ai/pi-memory-mem0/dist/index.js",
-          "/Users/javier.cabrera/.pi/agent/extensions/subagent-only/mem0-fallback.ts"
+          "/Users/javier.cabrera/.pi/agent/extensions/subagent-only/mem0-fallback.ts",
+          "/Users/javcab/.pi/agent/npm/node_modules/@vndv/pi-codegraph/extensions/codegraph.ts"
         ]
       },
       "evidence-auditor": {
