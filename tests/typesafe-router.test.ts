@@ -154,6 +154,12 @@ for (const child of [false, true]) {
     assert.deepEqual(body.state,
       { role: "unspecified", task: "diagnose a failure", context: "supplied context", files: [] });
     assert.deepEqual(Object.keys(body.questions).sort(), ["blast_radius", "lane"]);
+    // Bounded diff reviews should be eligible for CHEAP regardless of role or file count;
+    // blast-radius escalation remains a separate decision.
+    assert.match(body.questions.lane.criteria.cheap, /code review of a supplied diff/);
+    assert.match(body.questions.lane.criteria.cheap, /Multiple files, shared interfaces/);
+    assert.match(body.questions.lane.criteria.frontier, /ambiguous or conflicting evidence/);
+    assert.match(body.questions.lane.criteria.frontier, /Do not select solely because a task is a review/);
     for (const [name, options] of [["lane", laneOptions], ["blast_radius", blastRadiusOptions]] as const) {
       const question = body.questions[name];
       assert.equal(question.type, "choice");
