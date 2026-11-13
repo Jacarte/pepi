@@ -1,0 +1,235 @@
+{
+  "lastChangelogVersion": "1.1.0",
+  "theme": "dark",
+  "packages": [
+    "npm:pi-subagents@0.78.0",
+    "npm:pi-mcp-adapter",
+    "npm:@vndv/pi-codegraph",
+    "npm:@amaster.ai/pi-memory-mem0",
+    "npm:pi-ketch",
+    "npm:@dietrichgebert/ponytail"
+  ],
+  "defaultModel": "gpt-6.1-sol",
+  "defaultProvider": "openai-codex",
+  "defaultThinkingLevel": "high",
+  "subagents": {
+    "projectRootResolution": "git-root",
+    "defaultModel": "gpt-6.1-sol",
+    "defaultProvider": "openai-codex",
+    "agentOverrides": {
+      "claude-code": {
+        "disabled": true
+      },
+      "claude-code-writer": {
+        "disabled": true
+      },
+      "oracle": {
+        "model": "gpt-6-astra",
+        "tools": [
+          "read",
+          "grep",
+          "find",
+          "ls",
+          "bash",
+          "mem0_memory",
+          "codegraph_search",
+          "codegraph_node",
+          "codegraph_files",
+          "codegraph_callers",
+          "codegraph_callees",
+          "codegraph_impact",
+          "codegraph_explore",
+          "codegraph_status"
+        ],
+        "subagentOnlyExtensions": [
+          "/root/.pi/agent/extensions/prompt-logger.ts",
+          "/root/.pi/agent/npm/node_modules/@amaster.ai/pi-memory-mem0/dist/index.js",
+          "/root/.pi/agent/extensions/subagent-only/mem0-fallback.ts",
+          "/root/.pi/agent/npm/node_modules/@vndv/pi-codegraph/extensions/codegraph.ts"
+        ]
+      },
+      "delegate": {
+        "model": "gpt-6-luna",
+        "tools": [
+          "read",
+          "grep",
+          "find",
+          "ls",
+          "bash",
+          "edit",
+          "write",
+          "contact_supervisor",
+          "jev_route",
+          "mem0_memory",
+          "codegraph_search",
+          "codegraph_node",
+          "codegraph_files",
+          "codegraph_callers",
+          "codegraph_callees",
+          "codegraph_impact",
+          "codegraph_explore",
+          "codegraph_status"
+        ],
+        "subagentOnlyExtensions": [
+          "/root/.pi/agent/extensions/pi-typesafe-router.ts",
+          "/root/.pi/agent/extensions/prompt-logger.ts",
+          "/root/.pi/agent/npm/node_modules/@amaster.ai/pi-memory-mem0/dist/index.js",
+          "/root/.pi/agent/extensions/subagent-only/mem0-fallback.ts",
+          "/root/.pi/agent/npm/node_modules/@vndv/pi-codegraph/extensions/codegraph.ts"
+        ]
+      },
+      "researcher": {
+        "model": "gpt-6.1-sol",
+        "tools": [
+          "read",
+          "write",
+          "web_search",
+          "fetch_content",
+          "get_search_content",
+          "source_check",
+          "mem0_memory"
+        ]
+      },
+      "worker": {
+        "model": "gpt-6-luna",
+        "tools": [
+          "read",
+          "grep",
+          "find",
+          "ls",
+          "bash",
+          "edit",
+          "write",
+          "contact_supervisor",
+          "jev_route",
+          "mem0_memory",
+          "codegraph_search",
+          "codegraph_node",
+          "codegraph_files",
+          "codegraph_callers",
+          "codegraph_callees",
+          "codegraph_impact",
+          "codegraph_explore",
+          "codegraph_status"
+        ],
+        "subagentOnlyExtensions": [
+          "/root/.pi/agent/extensions/pi-typesafe-router.ts",
+          "/root/.pi/agent/extensions/prompt-logger.ts",
+          "/root/.pi/agent/npm/node_modules/@amaster.ai/pi-memory-mem0/dist/index.js",
+          "/root/.pi/agent/extensions/subagent-only/mem0-fallback.ts",
+          "/root/.pi/agent/npm/node_modules/@vndv/pi-codegraph/extensions/codegraph.ts"
+        ]
+      },
+      "scout": {
+        "model": "gpt-6-luna",
+        "tools": [
+          "read",
+          "grep",
+          "find",
+          "ls",
+          "bash",
+          "write",
+          "contact_supervisor",
+          "mem0_memory",
+          "codegraph_search",
+          "codegraph_node",
+          "codegraph_files",
+          "codegraph_callers",
+          "codegraph_callees",
+          "codegraph_impact",
+          "codegraph_explore",
+          "codegraph_status"
+        ],
+        "subagentOnlyExtensions": [
+          "/root/.pi/agent/extensions/prompt-logger.ts",
+          "/root/.pi/agent/npm/node_modules/@amaster.ai/pi-memory-mem0/dist/index.js",
+          "/root/.pi/agent/extensions/subagent-only/mem0-fallback.ts",
+          "/root/.pi/agent/npm/node_modules/@vndv/pi-codegraph/extensions/codegraph.ts"
+        ]
+      },
+      "reviewer": {
+        "model": "gpt-6-astra",
+        "skills": [
+          "go-reviewer"
+        ],
+        "tools": [
+          "read",
+          "grep",
+          "find",
+          "ls",
+          "watchdog_diff",
+          "contact_supervisor",
+          "mem0_memory",
+          "codegraph_search",
+          "codegraph_node",
+          "codegraph_files",
+          "codegraph_callers",
+          "codegraph_callees",
+          "codegraph_impact",
+          "codegraph_explore",
+          "codegraph_status"
+        ],
+        "subagentOnlyExtensions": [
+          "/root/.pi/agent/extensions/prompt-logger.ts",
+          "/root/.pi/agent/npm/node_modules/@amaster.ai/pi-memory-mem0/dist/index.js",
+          "/root/.pi/agent/extensions/subagent-only/mem0-fallback.ts",
+          "/root/.pi/agent/npm/node_modules/@vndv/pi-codegraph/extensions/codegraph.ts"
+        ]
+      },
+      "deep-worker": {
+        "model": "gpt-6-astra",
+        "skills": [
+          "go-reviewer"
+        ],
+        "tools": [
+          "read",
+          "grep",
+          "find",
+          "ls",
+          "bash",
+          "edit",
+          "write",
+          "contact_supervisor",
+          "jev_route",
+          "mem0_memory",
+          "codegraph_search",
+          "codegraph_node",
+          "codegraph_files",
+          "codegraph_callers",
+          "codegraph_callees",
+          "codegraph_impact",
+          "codegraph_explore",
+          "codegraph_status"
+        ],
+        "subagentOnlyExtensions": [
+          "/root/.pi/agent/extensions/pi-typesafe-router.ts",
+          "/root/.pi/agent/extensions/prompt-logger.ts",
+          "/root/.pi/agent/npm/node_modules/@amaster.ai/pi-memory-mem0/dist/index.js",
+          "/root/.pi/agent/extensions/subagent-only/mem0-fallback.ts",
+          "/root/.pi/agent/npm/node_modules/@vndv/pi-codegraph/extensions/codegraph.ts"
+        ]
+      },
+      "evidence-auditor": {
+        "tools": [
+          "read",
+          "web_search",
+          "fetch_content",
+          "get_search_content",
+          "source_check",
+          "mem0_memory"
+        ]
+      }
+    },
+    "defaultSubagentOnlyExtensions": [
+      "/root/.pi/agent/extensions/prompt-logger.ts",
+      "/root/.pi/agent/npm/node_modules/@amaster.ai/pi-memory-mem0/dist/index.js",
+      "/root/.pi/agent/extensions/subagent-only/mem0-fallback.ts"
+    ]
+  },
+  "pi-memory-mem0": {
+    "mode": "self-hosted",
+    "baseUrl": "http://192.168.0.160:18000",
+    "userId": "default-user",
+    "userIdScope": "userIdScope"
+  }
+}
