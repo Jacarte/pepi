@@ -459,12 +459,16 @@ export const ROUTER_QUESTIONS = {
         "a rename, formatting, summarizing supplied text, or a single-file lookup; " +
         "trivially checkable.",
       cheap:
-        "Routine, well-scoped work with a clear target and a local fix, such as a " +
-        "bounded bug fix, adding a test, a small refactor in one module, or reading " +
-        "code to answer where something is.",
+        "Default for routine, bounded engineering tasks: code review of a supplied diff, " +
+        "regression and failure-path checks, debugging with concrete evidence, tests, " +
+        "and scoped fixes or refactors. Multiple files, shared interfaces, or a " +
+        "reviewer/security role alone do not require a frontier model.",
       frontier:
-        "Open-ended or coupled work: needs diagnosis, design trade-offs, a " +
-        "multi-module change, or contradiction-checking, or is hard to verify.",
+        "Reserve for tasks that genuinely need deep, open-ended reasoning: resolving " +
+        "ambiguous or conflicting evidence, novel architecture with consequential " +
+        "trade-offs, or subtle interacting failures that cannot be evaluated with " +
+        "bounded evidence. Do not select solely because a task is a review, touches " +
+        "multiple modules, or mentions concurrency or security.",
     },
   },
   blast_radius: {
