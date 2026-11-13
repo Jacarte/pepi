@@ -162,10 +162,11 @@ Each lane requires a nonempty `provider` and `id`. Each file also requires a
 top-level numeric `minConfidence` in `[0,1]` (currently **0.4** in both profiles;
 the Codex value may be tuned separately). Missing, nonfinite, nonnumeric, or
 out-of-range values fail before classification. Edit the tracked profile files to preserve changes
-across `profile.sh` switches; the tool reads the active root config on each call.
+across `profile.sh` switches; `recommend` reads the active root config on each call.
 
-Jev answers two Choice questions about the supplied `role`, `task`, `context` and
-`files`: `lane` (`local`, `cheap`, `frontier`) and `blast_radius` (`contained`,
+For `jev_route` action `recommend`, Jev answers two Choice questions about the
+supplied `role`, `task`, `context` and `files`: `lane` (`local`, `cheap`, `frontier`)
+and `blast_radius` (`contained`,
 `cross_cutting`, `critical`). The lane choice is used unless a rule raises it, in
 this order:
 
@@ -185,6 +186,29 @@ no fallback lane.
 The Bedrock router's `LOCAL` ID differs from the worker/scout override. Both router
 files also contain `HUMAN`, which the extension deliberately ignores; routing is
 not approval.
+
+`jev_route` action `switch_effort` makes another Jev call with a separate `effort`
+Choice question about the supplied task/role/context/files. It does not reuse the
+lane decision or read `models-router.json`. Jev selects `off`, `minimal`, `low`,
+`medium`, `high`, `xhigh`, or `max`; Pi's `setThinkingLevel` clamps that request to
+the current model's supported levels (non-reasoning models use `off`). The tool
+reads back and reports `requestedEffort`, `actualEffort`, and `changed`. It never
+switches models. Stale session/model decisions and invalid responses fail explicitly.
+
+Before substantive work, the native Pi parent and every native Pi subagent role
+must call `switch_effort` for their own assignment, even after a delegation
+recommendation.
+This is instruction-based policy, not runtime blocking. The requirement is also
+in the tool description because children may not inherit global `AGENTS.md`.
+`recommend` remains required before authorized implementation delegation; pass
+its model ID unchanged when launching the child. Reclassify only when the
+assignment or evidence changes materially, and report classification failures.
+The tracked Bedrock, Codex, and Cloud profiles preserve router availability for
+all eight native Pi subagent roles through `jev_route` allowlists and
+explicit/default `subagentOnlyExtensions`, including when reapplying a profile.
+Existing capability restrictions still apply; adapt the absolute extension paths
+to your machine. External CLI runtimes (`claude-code`, `claude-code-writer`) are
+outside this Pi extension's scope.
 
 ### Subagent workflows
 
@@ -234,7 +258,7 @@ Five TypeScript extension entry points are tracked under `extensions/`:
 |---|---|
 | `extensions/codex-usage-bar.ts` | Codex usage-window status via `codex app-server`; requires the Codex CLI for that status query |
 | `extensions/litellm-budget.ts` | LiteLLM spend status and `/budget` |
-| `extensions/pi-typesafe-router.ts` | `jev_route` recommendation/session switching using `models-router.json`; calls `https://api.typesafe.ai/v1/systemone` with `TYPESAFE_API_KEY` (`JEV_MODEL` optionally selects classifier) |
+| `extensions/pi-typesafe-router.ts` | `jev_route`: model recommendation using `models-router.json`, or separate thinking-effort classification/application without changing models; calls `https://api.typesafe.ai/v1/systemone` with `TYPESAFE_API_KEY` (`JEV_MODEL` optionally selects classifier) |
 | `extensions/prompt-logger.ts` | Provider-request JSONL logging, including prompts/messages/tools; defaults to `logs/prompts.jsonl`. Disable with `PROMPT_LOG=0`, override with `PROMPT_LOG_FILE` |
 | `extensions/top-status.ts` | Status widget above the editor and `/topbar` layout toggle |
 

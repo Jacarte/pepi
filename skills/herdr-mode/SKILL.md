@@ -18,6 +18,9 @@ for herdr mode, use pi-subagents as usual. The tools come from
    `jev_route recommend`; every other role (deep-worker, reviewer, oracle, the fixer…)
    keeps its pinned settings model, and is routed only when none is configured (the
    result says so). Routing failure fails the spawn and nothing is created.
+   For `scout`, omit `model` in `herdr_spawn` so its configured pin is used.
+   Do not pre-route a Herdr scout with `jev_route recommend` or pass a recommended
+   model: an explicit `model` overrides the pin. Other roles' routing is unchanged.
    Layout: the parent pane is split once, side by side, and keeps the full-height left
    half. Every later pane (workers, reviewers, fixer) splits the run pane with the
    largest on-screen area (oldest on ties), to the right if it looks wide (width ≥ 2 ×

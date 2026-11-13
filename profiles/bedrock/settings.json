@@ -28,6 +28,7 @@
       "oracle": {
         "model": "bedrock-claude-opus-5-5",
         "tools": [
+          "jev_route",
           "read",
           "grep",
           "find",
@@ -44,6 +45,7 @@
           "codegraph_status"
         ],
         "subagentOnlyExtensions": [
+          "/Users/javier.cabrera/.pi/agent/extensions/pi-typesafe-router.ts",
           "/Users/javier.cabrera/.pi/agent/extensions/prompt-logger.ts",
           "/Users/javier.cabrera/.pi/agent/npm/node_modules/@amaster.ai/pi-memory-mem0/dist/index.js",
           "/Users/javier.cabrera/.pi/agent/extensions/subagent-only/mem0-fallback.ts",
@@ -83,6 +85,7 @@
       "scout": {
         "model": "bedrock-claude-haiku-4-5",
         "tools": [
+          "jev_route",
           "read",
           "grep",
           "find",
@@ -101,6 +104,7 @@
           "codegraph_status"
         ],
         "subagentOnlyExtensions": [
+          "/Users/javier.cabrera/.pi/agent/extensions/pi-typesafe-router.ts",
           "/Users/javier.cabrera/.pi/agent/extensions/prompt-logger.ts",
           "/Users/javier.cabrera/.pi/agent/npm/node_modules/@amaster.ai/pi-memory-mem0/dist/index.js",
           "/Users/javier.cabrera/.pi/agent/extensions/subagent-only/mem0-fallback.ts",
@@ -109,10 +113,8 @@
       },
       "reviewer": {
         "model": "bedrock-claude-opus-5-5",
-        "skills": [
-          "go-reviewer"
-        ],
         "tools": [
+          "jev_route",
           "read",
           "grep",
           "find",
@@ -130,6 +132,7 @@
           "codegraph_status"
         ],
         "subagentOnlyExtensions": [
+          "/Users/javier.cabrera/.pi/agent/extensions/pi-typesafe-router.ts",
           "/Users/javier.cabrera/.pi/agent/extensions/prompt-logger.ts",
           "/Users/javier.cabrera/.pi/agent/npm/node_modules/@amaster.ai/pi-memory-mem0/dist/index.js",
           "/Users/javier.cabrera/.pi/agent/extensions/subagent-only/mem0-fallback.ts",
@@ -138,9 +141,6 @@
       },
       "deep-worker": {
         "model": "bedrock-claude-opus-5-5",
-        "skills": [
-          "go-reviewer"
-        ],
         "tools": [
           "read",
           "grep",
@@ -200,27 +200,32 @@
       },
       "researcher": {
         "tools": [
+          "jev_route",
           "read",
           "write",
-          "web_search",
-          "fetch_content",
-          "get_search_content",
-          "source_check",
+          "ketch_search",
+          "ketch_scrape",
+          "ketch_code",
+          "ketch_docs",
+          "ketch_crawl",
           "mem0_memory"
         ]
       },
       "evidence-auditor": {
         "tools": [
+          "jev_route",
           "read",
-          "web_search",
-          "fetch_content",
-          "get_search_content",
-          "source_check",
+          "ketch_search",
+          "ketch_scrape",
+          "ketch_code",
+          "ketch_docs",
+          "ketch_crawl",
           "mem0_memory"
         ]
       }
     },
     "defaultSubagentOnlyExtensions": [
+      "/Users/javier.cabrera/.pi/agent/extensions/pi-typesafe-router.ts",
       "/Users/javier.cabrera/.pi/agent/extensions/prompt-logger.ts",
       "/Users/javier.cabrera/.pi/agent/npm/node_modules/@amaster.ai/pi-memory-mem0/dist/index.js",
       "/Users/javier.cabrera/.pi/agent/extensions/subagent-only/mem0-fallback.ts"

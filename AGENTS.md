@@ -87,10 +87,26 @@ orchestrates and integrates.
   is needed, or narrate routine routing decisions to the user. Bounded factual
   answers and mechanical instruction edits with clear checks can remain direct.
 
-### Parent model quality guardrail
+### Model and effort quality guardrail (parent and every subagent)
 
-- Model routing is explicit through the `jev_route` tool. It does not run
-  automatically on user input. Model mappings remain in `models-router.json`.
+- Routing is explicit through the `jev_route` tool. It does not run
+  automatically on user input. Model mappings remain in `models-router.json`
+  for `recommend`; effort classification does not use those mappings.
+- Before substantive work, the parent and **every subagent role** MUST call
+  `jev_route` with action `switch_effort` for its own assignment, passing its
+  own `role` and the task, context, and relevant file paths. This includes
+  scout, worker, deep-worker, reviewer, oracle, researcher, evidence-auditor,
+  and delegate. A parent's `recommend` call does not replace the child's
+  own effort call.
+- `switch_effort` makes a separate Jev request with a thinking-effort question,
+  not the model-lane or blast-radius questions. Jev selects the requested
+  level; Pi clamps it to the current model's capabilities and the tool reports
+  requested/actual effort and whether it changed. It never changes a model,
+  another session, tools, role, or permissions.
+- This is mandatory instruction-based policy, **not a runtime blocking gate**.
+  The tool description carries the requirement into children even when global
+  `AGENTS.md` is not inherited. Each role must load the router extension and
+  allow `jev_route`; inherited tool and extension restrictions still apply.
 - Before an authorized implementation delegation, call `jev_route` with
   action `recommend`. Supply the complete assignment, relevant findings,
   constraints, and acceptance checks. Set `role` to the subagent that will do
@@ -101,11 +117,8 @@ orchestrates and integrates.
   at or above `minConfidence` (exactly equal counts as confident). A critical
   blast radius below `minConfidence` and a cross-cutting one only raise a
   `LOCAL` lane to `CHEAP`.
-- Parent, delegate, and worker sessions may call `jev_route` with action
-  `switch_self` when the current assignment requires a different model. This
-  changes only the calling session; pass your own `role`. It does not change
-  another running agent, its tools, its role, or its permissions.
-- Set `requiresImages: true` when the selected model must process images.
+- For `recommend`, set `requiresImages: true` when the selected model must
+  process images.
   Do not send secrets in the task or context supplied to Jev.
 - Reconsider routing only when the assignment or evidence changes materially.
   Do not repeatedly call the tool to obtain a preferred answer.
@@ -319,6 +332,9 @@ first.
 - Panes use the same role definitions as pi-subagents. Without `model`, only
   `worker`/`delegate` are routed like `jev_route recommend`; other roles keep
   their pinned model. A routing failure fails the spawn.
+- For `scout`, omit `model` in `herdr_spawn` so its configured pin is used.
+  Do not pre-route a Herdr scout with `jev_route recommend` or pass a recommended
+  model: an explicit `model` overrides the pin. Other roles' routing is unchanged.
 - The parent never edits code. It merges mechanically; conflicts go to one
   `deep-worker` fixer pane in the integration workspace. Merged panes stay alive;
   `herdr_cleanup` removes workspaces. A lone writer's main-checkout output is never

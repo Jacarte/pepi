@@ -21,6 +21,7 @@ const configFiles = {
 const lanes = ["LOCAL", "CHEAP", "FRONTIER"];
 const laneOptions = ["local", "cheap", "frontier"];
 const blastRadiusOptions = ["contained", "cross_cutting", "critical"];
+const effortOptions = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 const roles = ["parent", "scout", "worker", "deep-worker", "reviewer", "oracle",
   "researcher", "evidence-auditor", "delegate"];
 const js = stripTypeScriptTypes(source)
@@ -33,6 +34,7 @@ function choice(options: string[], selected: string, confidence = 1) {
 }
 const laneAnswer = (selected: string, confidence = 1) => choice(laneOptions, selected, confidence);
 const blastAnswer = (selected: string, confidence = 1) => choice(blastRadiusOptions, selected, confidence);
+const effortAnswers = (selected: string, confidence = 1) => ({ effort: choice(effortOptions, selected, confidence) });
 // Objects created inside the vm realm have a different Object.prototype.
 const plain = (value: unknown) => JSON.parse(JSON.stringify(value));
 const answersFor = (lane: string, blastRadius = "contained", confidence = 1, blastConfidence = 1) =>
@@ -45,10 +47,12 @@ function setup(options: any = {}) {
   const answers = options.answers ?? answersFor("frontier");
   const requests: any[] = [];
   const selected: any[] = [];
+  const efforts: string[] = [];
+  let thinking = options.thinking ?? "medium";
   const logs: { path: string; data: string }[] = [];
   const models = lanes.map((lane) => ({
     provider: config[lane]?.provider?.trim?.(), id: config[lane]?.id?.trim?.(),
-    input: ["text", "image"], contextWindow: 100_000,
+    input: ["text", "image"], contextWindow: 100_000, reasoning: true,
   }));
   const ctx: any = {
     model: models[0],
@@ -78,12 +82,15 @@ function setup(options: any = {}) {
     StringEnum: (values: string[], opts: any) => ({ name: "StringEnum", values, opts }),
     Text: class { text: string; constructor(text: string) { this.text = text; } },
     process: { env: { TYPESAFE_API_KEY: "offline-test", ...options.env } },
-    AbortSignal,
+    AbortSignal: options.AbortSignal ?? AbortSignal,
     fetch: async (url: string, request: any) => {
       requests.push({ url, ...request });
-      options.onFetch?.(ctx);
+      await options.onFetch?.(ctx);
       return { ok: options.httpStatus === undefined, status: options.httpStatus,
-        json: async () => structuredClone(response()) };
+        json: async () => {
+          await options.onJson?.(ctx);
+          return structuredClone(response());
+        } };
     },
   });
   const tools: any[] = [];
@@ -91,14 +98,21 @@ function setup(options: any = {}) {
     registerTool: (tool: any) => tools.push(tool),
     setModel: async (model: any) => {
       selected.push(model);
-      if (options.refuseSwitch) return false;
-      if (!options.loseSwitch) ctx.model = model;
-      return true;
+      throw new Error("jev_route must never call setModel");
+    },
+    getThinkingLevel: () => thinking,
+    setThinkingLevel: (level: string) => {
+      if (options.failEffort) throw new Error("Pi could not apply effort");
+      efforts.push(level);
+      thinking = options.clampEffort ? options.clampEffort(level, ctx.model)
+        : ctx.model.reasoning ? level : "off";
+      options.onSetEffort?.(ctx);
     },
   });
   assert.equal(tools.length, 1);
   const tool = tools[0];
-  return { config, ctx, decideLane, logs, models, requests, response, selected, tool,
+  return { config, ctx, decideLane, efforts, logs, models, requests, response, selected, tool,
+    getThinking: () => thinking,
     run: (params: any = {}, signal?: AbortSignal) => tool.execute("test-call", {
       action: "recommend", task: "  diagnose a failure  ", ...params,
     }, signal, undefined, ctx),
@@ -111,8 +125,12 @@ for (const child of [false, true]) {
     assert.equal(h.tool.name, "jev_route");
     assert.equal(h.tool.executionMode, "sequential");
     assert.match(h.tool.description, /Pass role/);
+    assert.match(h.tool.description, /parent and EVERY subagent role MUST call switch_effort/);
+    assert.doesNotMatch(h.tool.description, /switch_self/);
     const [properties, schemaOptions] = h.tool.parameters.args;
     assert.deepEqual(plain(schemaOptions), { additionalProperties: false });
+    assert.deepEqual(plain(properties.action.args[0].map((literal: any) => literal.args[0])),
+      ["recommend", "switch_effort"]);
     assert.deepEqual(Object.keys(properties).sort(),
       ["action", "context", "files", "requiresImages", "role", "task"]);
     for (const name of ["context", "files", "requiresImages", "role"]) {
@@ -130,6 +148,7 @@ for (const child of [false, true]) {
     assert.equal(result.details.lane, "FRONTIER");
     assert.equal(result.details.changed, false);
     assert.equal(h.selected.length, 0); // recommend never switches.
+    assert.equal(h.efforts.length, 0); // nor changes effort.
     assert.equal(h.requests.length, 1);
     const body = JSON.parse(h.requests[0].body);
     assert.deepEqual(body.state,
@@ -337,7 +356,8 @@ test("model mapping validation and HUMAN-ignore behavior remain intact", async (
 
 test("invalid classifier answers fail explicitly without switching", async () => {
   const invalid: [string, (answers: any) => void, RegExp][] = [];
-  for (const [name, options] of [["lane", laneOptions], ["blast_radius", blastRadiusOptions]] as const) {
+  for (const [name, options] of [["lane", laneOptions], ["blast_radius", blastRadiusOptions],
+    ["effort", effortOptions]] as const) {
     for (const answer of [undefined, null, [], "local"]) {
       invalid.push([name, (a) => { a[name] = answer; }, new RegExp(`invalid answer for ${name}`)]);
     }
@@ -358,16 +378,20 @@ test("invalid classifier answers fail explicitly without switching", async () =>
       new RegExp(`unexpected probability option for ${name}`)]);
   }
   for (const [name, mutate, error] of invalid) {
-    const answers = answersFor("cheap");
+    const answers = name === "effort" ? effortAnswers("high") : answersFor("cheap");
     mutate(answers);
     const h = setup({ answers });
-    await assert.rejects(h.run({ action: "switch_self" }), error, `${name}: ${error}`);
+    await assert.rejects(h.run({ action: name === "effort" ? "switch_effort" : "recommend" }), error, `${name}: ${error}`);
     assert.equal(h.selected.length, 0);
+    assert.equal(h.efforts.length, 0);
   }
-  for (const response of [{}, { answers: null }, { answers: [] }, []]) {
-    const h = setup({ response });
-    await assert.rejects(h.run({ action: "switch_self" }), /invalid TypeSafe/);
-    assert.equal(h.selected.length, 0);
+  for (const action of ["recommend", "switch_effort"]) {
+    for (const response of [{}, { answers: null }, { answers: [] }, []]) {
+      const h = setup({ response });
+      await assert.rejects(h.run({ action }), /invalid TypeSafe/);
+      assert.equal(h.selected.length, 0);
+      assert.equal(h.efforts.length, 0);
+    }
   }
 });
 
@@ -398,8 +422,6 @@ test("result details, content text and rendering use the Choice contract", async
   const legacy = { details: { action: "recommend", lane: "CHEAP", model: cheap, changed: false,
     scores: { hard: 0.2, trivial: 0.1 } } };
   assert.equal(h.tool.renderResult(legacy, { isPartial: false }, theme).text, `Jev: CHEAP → ${cheap} (recommend)`);
-  const switched = await setup({ answers: answersFor("frontier") }).run({ action: "switch_self" });
-  assert.match(switched.content[0].text.split("\n")[0], /\(lane frontier 100%, blast radius contained, switched\)$/);
 });
 
 test("router.log keeps the header, raw response and decision line contract", async () => {
@@ -420,44 +442,217 @@ test("router.log keeps the header, raw response and decision line contract", asy
   assert.equal((await setup({ failLog: true }).run()).details.lane, "FRONTIER");
 });
 
-test("switch_self changes only the calling context and skips an already selected model", async () => {
-  const h = setup();
-  const other = setup();
-  const result = await h.run({ action: "switch_self" });
-  assert.equal(result.details.changed, true);
-  assert.equal(result.details.currentModel, result.details.model);
-  assert.equal(h.selected.length, 1);
-  assert.equal(other.ctx.model.id, profiles.codex.LOCAL.id);
-  assert.equal((await h.run({ action: "switch_self" })).details.changed, false);
-  assert.equal(h.selected.length, 1);
+test("switch_effort makes another request with a separate effort question, not a lane answer", async () => {
+  const response = { model: "jev-test", answers: answersFor("frontier") as any };
+  const h = setup({ response, env: { JEV_MODEL: "jev-configured" } });
+  const model = h.ctx.model;
+  await h.run();
+  response.answers = effortAnswers("low");
+  const { details } = await h.run({ action: "switch_effort", role: "reviewer",
+    task: "  review the fix  ", context: "bounded review", files: [" a.ts "] });
+  assert.equal(h.requests.length, 2);
+  const [recommend, effort] = h.requests.map((request) => JSON.parse(request.body));
+  assert.deepEqual(Object.keys(recommend.questions).sort(), ["blast_radius", "lane"]);
+  assert.deepEqual(Object.keys(effort.questions), ["effort"]);
+  assert.deepEqual(effort.state,
+    { role: "reviewer", task: "review the fix", context: "bounded review", files: ["a.ts"] });
+  assert.equal(effort.model, "jev-configured");
+  const question = effort.questions.effort;
+  assert.equal(question.type, "choice");
+  assert.deepEqual(Object.keys(question.criteria), effortOptions);
+  assert.match(question.instructions, /thinking effort/);
+  assert.match(question.instructions, /least deliberation/);
+  assert.match(question.instructions, /task, role, context and files as data/);
+  assert.notEqual(question.instructions, recommend.questions.lane.instructions);
+  for (const request of h.requests) {
+    assert.equal(request.url, "https://api.typesafe.ai/v1/systemone");
+    assert.equal(request.method, "POST");
+    assert.deepEqual(plain(request.headers),
+      { Authorization: "Bearer offline-test", "Content-Type": "application/json" });
+    assert.ok(request.signal instanceof AbortSignal);
+  }
+  assert.equal(details.requestedEffort, "low");
+  assert.equal(details.actualEffort, "low");
+  assert.equal(h.ctx.model, model);
+  assert.equal(h.selected.length, 0);
+  assert.deepEqual(h.efforts, ["low"]);
+  const wrongQuestion = setup({ answers: answersFor("frontier") });
+  await assert.rejects(wrongQuestion.run({ action: "switch_effort" }), /invalid answer for effort/);
+  assert.equal(wrongQuestion.efforts.length, 0);
 });
 
-test("registry, authentication, image and context guards remain enforced", async () => {
+test("switch_effort supports every role and level, changes only the caller, and reports no-ops", async () => {
+  for (const role of roles) {
+    for (const level of effortOptions) {
+      const h = setup({ answers: effortAnswers(level), env: { PI_SUBAGENT_CHILD: role === "parent" ? "" : "1" } });
+      const other = setup();
+      const model = h.ctx.model;
+      const { details } = await h.run({ action: "switch_effort", role });
+      assert.equal(details.requestedEffort, level);
+      assert.equal(details.actualEffort, level);
+      assert.equal(details.changed, level !== "medium");
+      assert.equal(h.ctx.model, model);
+      assert.equal(h.selected.length, 0);
+      assert.equal(other.getThinking(), "medium");
+      assert.equal((await h.run({ action: "switch_effort", role })).details.changed, false);
+    }
+  }
+});
+
+test("effort results, rendering and logs report requested versus effective Pi-clamped effort", async () => {
+  // Pi's verified clamp maps unsupported max/xhigh downward, and unsupported off upward.
+  for (const [requested, actual, previous] of [["max", "high", "medium"],
+    ["xhigh", "high", "high"], ["off", "minimal", "high"]]) {
+    const h = setup({ answers: effortAnswers(requested, 0.75), thinking: previous,
+      clampEffort: () => actual });
+    const result = await h.run({ action: "switch_effort", role: "worker" });
+    const model = `${profiles.codex.LOCAL.provider}/${profiles.codex.LOCAL.id}`;
+    assert.deepEqual(plain(result.details), {
+      action: "switch_effort", model, previousModel: model, currentModel: model,
+      previousEffort: previous, requestedEffort: requested, actualEffort: actual,
+      changed: actual !== previous,
+      effortAnswer: { choice: requested, confidence: 0.75,
+        probabilities: effortAnswers(requested).effort.probabilities },
+      classifier: "jev-test", jevUsage: { inputTokens: 12, outputTokens: 3 },
+    });
+    assert.deepEqual(h.efforts, [requested]); // Pass the Jev choice, not a guessed capability level.
+    assert.equal(h.selected.length, 0);
+    const state = actual !== previous ? "changed" : "unchanged";
+    assert.equal(result.content[0].text.split("\n")[0],
+      `Jev effort: requested ${requested}, actual ${actual} (${state}; model unchanged: ${model})`);
+    const theme = { fg: (_color: string, text: string) => text };
+    assert.equal(h.tool.renderResult(result, { isPartial: false }, theme).text,
+      `Jev effort: ${requested} → ${actual} (${state}; model unchanged: ${model})`);
+    const decisionLine = h.logs[1].data.split("\n").find((line) => line.startsWith("{"))!;
+    assert.deepEqual(JSON.parse(decisionLine), { ...plain(result.details), role: "worker" });
+  }
+  const h = setup({ answers: effortAnswers("max"), thinking: "off" });
+  h.ctx.model.reasoning = false;
+  const { details } = await h.run({ action: "switch_effort" });
+  assert.deepEqual([details.requestedEffort, details.actualEffort, details.changed], ["max", "off", false]);
+  assert.equal(h.requests.length, 1); // Non-reasoning still classifies, then Pi clamps to off.
+  assert.equal(h.selected.length, 0);
+});
+
+test("switch_effort is independent of lane mappings, model registry, and context window", async () => {
+  const h = setup({ answers: effortAnswers("high"), rawConfig: "not JSON", failLog: true });
+  h.ctx.modelRegistry = { find: () => assert.fail("registry must not be read"),
+    getAvailable: () => assert.fail("registry must not be read") };
+  h.ctx.getContextUsage = () => assert.fail("effort does not shrink the context window");
+  assert.equal((await h.run({ action: "switch_effort" })).details.actualEffort, "high");
+  const noModel = setup({ answers: effortAnswers("low") });
+  noModel.ctx.model = undefined;
+  await assert.rejects(noModel.run({ action: "switch_effort" }), /no current model/);
+  assert.equal(noModel.requests.length, 0);
+});
+
+test("recommend registry, authentication and image guards remain enforced", async () => {
   for (const [mutate, error] of [
     [(h: any) => { h.ctx.modelRegistry.find = () => undefined; }, /model not registered/],
     [(h: any) => { h.ctx.modelRegistry.getAvailable = () => []; }, /no configured authentication/],
     [(h: any) => { h.models[2].input = ["text"]; }, /does not support images/],
-    [(h: any) => { h.ctx.getContextUsage = () => ({ tokens: 100_000 }); }, /context is too large/],
   ] as const) {
     const h = setup();
     mutate(h);
-    await assert.rejects(h.run({ action: "switch_self", requiresImages: true }), error);
+    await assert.rejects(h.run({ requiresImages: true }), error);
     assert.equal(h.selected.length, 0);
+    assert.equal(h.efforts.length, 0);
   }
-  await assert.rejects(setup({ refuseSwitch: true }).run({ action: "switch_self" }), /Pi refused/);
-  await assert.rejects(setup({ loseSwitch: true }).run({ action: "switch_self" }), /did not retain/);
 });
 
-test("blank tasks, absent credentials, HTTP errors, abort and session changes fail explicitly", async () => {
-  const h = setup();
-  await assert.rejects(h.run({ task: " " }), /must not be blank/);
-  await assert.rejects(h.run({}, AbortSignal.abort()), /abort/i);
-  assert.equal(h.requests.length, 0);
-  await assert.rejects(setup({ env: { TYPESAFE_API_KEY: "" } }).run(), /missing TYPESAFE_API_KEY/);
-  await assert.rejects(setup({ httpStatus: 503 }).run(), /TypeSafe HTTP 503/);
-  const changing = setup({ onFetch: (ctx: any) => { ctx.sessionManager.getSessionId = () => "new-session"; } });
-  await assert.rejects(changing.run({ action: "switch_self" }), /session changed/);
-  assert.equal(changing.selected.length, 0);
+test("removed and unknown actions fail before fetching or mutating", async () => {
+  for (const action of ["switch_self", "unknown", "", undefined]) {
+    const h = setup();
+    await assert.rejects(h.run({ action }), /unsupported action/);
+    assert.equal(h.requests.length, 0);
+    assert.equal(h.selected.length, 0);
+    assert.equal(h.efforts.length, 0);
+  }
+  assert.doesNotMatch(source, /\bsetModel\s*\(/);
+});
+
+test("blank inputs, credentials, HTTP, network, JSON and abort failures do not mutate either action", async () => {
+  for (const action of ["recommend", "switch_effort"]) {
+    for (const [options, params, signal, error] of [
+      [{}, { task: " " }, undefined, /must not be blank/],
+      [{}, { files: [" "] }, undefined, /blank paths/],
+      [{}, {}, AbortSignal.abort(), /abort/i],
+      [{ env: { TYPESAFE_API_KEY: "" } }, {}, undefined, /missing TYPESAFE_API_KEY/],
+      [{ httpStatus: 503 }, {}, undefined, /TypeSafe HTTP 503/],
+      [{ onFetch: () => { throw new Error("network unavailable"); } }, {}, undefined, /network unavailable/],
+      [{ onJson: () => { throw new SyntaxError("bad JSON"); } }, {}, undefined, /bad JSON/],
+    ] as const) {
+      const h = setup({ ...options, answers: action === "switch_effort" ? effortAnswers("high") : answersFor("cheap") });
+      await assert.rejects(h.run({ action, ...params }, signal), error);
+      assert.equal(h.selected.length, 0);
+      assert.equal(h.efforts.length, 0);
+    }
+    const changing = setup({ answers: action === "switch_effort" ? effortAnswers("high") : answersFor("cheap"),
+      onFetch: (ctx: any) => { ctx.sessionManager.getSessionId = () => "new-session"; } });
+    await assert.rejects(changing.run({ action }), /session changed/);
+    assert.equal(changing.selected.length, 0);
+    assert.equal(changing.efforts.length, 0);
+  }
+});
+
+test("effort rejects model changes while awaiting the request or response body", async () => {
+  for (const stage of ["onFetch", "onJson"]) {
+    for (const mutate of [
+      (ctx: any) => { ctx.model = { ...ctx.model, id: "another-model" }; },
+      (ctx: any) => { ctx.model.provider = "another-provider"; },
+      (ctx: any) => { ctx.model = { ...ctx.model, reasoning: false }; },
+      (ctx: any) => { ctx.model = undefined; },
+    ]) {
+      const h = setup({ answers: effortAnswers("high"), [stage]: mutate });
+      await assert.rejects(h.run({ action: "switch_effort" }), /model changed while classifying/);
+      assert.equal(h.selected.length, 0);
+      assert.equal(h.efforts.length, 0);
+    }
+  }
+});
+
+test("effort honors cancellation and the shared timeout even after a response arrives", async () => {
+  for (const timedOut of [false, true]) {
+    const controller = new AbortController();
+    const h = setup({ answers: effortAnswers("high"),
+      onJson: () => controller.abort(new Error(timedOut ? "timeout" : "cancelled")),
+      AbortSignal: { any: AbortSignal.any, timeout: (ms: number) => {
+        assert.equal(ms, 2_000);
+        return timedOut ? controller.signal : AbortSignal.timeout(ms);
+      } },
+    });
+    await assert.rejects(h.run({ action: "switch_effort" }, timedOut ? undefined : controller.signal), /timeout|cancelled/);
+    assert.equal(h.efforts.length, 0);
+    assert.equal(h.selected.length, 0);
+  }
+});
+
+test("effort setter failures and unexpected model changes never trigger a model switch", async () => {
+  const failure = setup({ answers: effortAnswers("high"), failEffort: true });
+  await assert.rejects(failure.run({ action: "switch_effort" }), /Pi could not apply effort/);
+  assert.equal(failure.getThinking(), "medium");
+  assert.equal(failure.selected.length, 0);
+  const changing = setup({ answers: effortAnswers("high"),
+    onSetEffort: (ctx: any) => { ctx.model = { ...ctx.model, id: "external-switch" }; } });
+  await assert.rejects(changing.run({ action: "switch_effort" }), /changed while applying effort/);
+  assert.equal(changing.selected.length, 0); // Do not attempt to restore a model changed externally.
+});
+
+test("tracked profiles preserve router tool and effective extension access for all native subagent roles", () => {
+  for (const [name, home] of [["bedrock", "/Users/javier.cabrera"], ["codex", "/Users/javcab"],
+    ["cloud", "/root"]]) {
+    const { subagents } = readConfig(join("profiles", name, "settings.json"));
+    const router = `${home}/.pi/agent/extensions/pi-typesafe-router.ts`;
+    assert.ok(subagents.defaultSubagentOnlyExtensions.includes(router), `${name}: default router extension`);
+    for (const role of roles.filter((role) => role !== "parent")) {
+      const override = subagents.agentOverrides[role];
+      const label = `${name}: ${role}`;
+      assert.ok(override.tools.includes("jev_route"), `${label}: tool allowlist`);
+      // An explicit role extension list replaces, rather than augments, the default.
+      const extensions = override.subagentOnlyExtensions ?? subagents.defaultSubagentOnlyExtensions;
+      assert.ok(extensions.includes(router), `${label}: effective router extension`);
+    }
+  }
 });
 
 test("profile.sh preserves each tracked router config when applying profiles", () => {

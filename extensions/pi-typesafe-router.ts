@@ -16,6 +16,8 @@ type Target = { provider: string; id: string };
 const LANE_OPTIONS = ["local", "cheap", "frontier"] as const;
 type LaneOption = (typeof LANE_OPTIONS)[number];
 const LANE_FOR_OPTION: Record<LaneOption, Lane> = { local: "LOCAL", cheap: "CHEAP", frontier: "FRONTIER" };
+const EFFORT_OPTIONS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+type Effort = (typeof EFFORT_OPTIONS)[number];
 const BLAST_RADIUS_OPTIONS = ["contained", "cross_cutting", "critical"] as const;
 type BlastRadiusOption = (typeof BLAST_RADIUS_OPTIONS)[number];
 const ROLES = [
@@ -63,6 +65,25 @@ const QUESTIONS = {
       critical:
         "Touches security or authentication, data integrity or migrations, " +
         "concurrency, production paths, or irreversible actions.",
+    },
+  },
+} as const;
+
+// Classify task effort independently; Pi clamps the request to the current model.
+const EFFORT_QUESTIONS = {
+  effort: {
+    type: "choice",
+    instructions: "How much thinking effort does completing this task require? " +
+      "Choose the least deliberation sufficient for the reasoning needed, not a model " +
+      `lane or blast radius. ${DATA_GUARD}`,
+    criteria: {
+      off: "No extended reasoning: direct retrieval, copying, or a fully prescribed answer.",
+      minimal: "A brief check or trivial inference with an obvious answer.",
+      low: "A short, straightforward chain of reasoning with little ambiguity.",
+      medium: "Several reasoning steps, comparing plausible options, or a bounded diagnosis.",
+      high: "Sustained reasoning across interacting constraints, ambiguous evidence, or subtle edge cases.",
+      xhigh: "Very demanding reasoning: many interdependent hypotheses or difficult contradiction checking.",
+      max: "Exceptional reasoning depth: a difficult proof or unresolved, tightly coupled problem requiring exhaustive analysis.",
     },
   },
 } as const;
@@ -186,30 +207,34 @@ export default function(pi: ExtensionAPI) {
   // Register in the parent AND in children. No PI_SUBAGENT_CHILD early return.
   pi.registerTool({
     name: "jev_route",
-    label: "Jev model router",
+    label: "Jev model and effort router",
     description:
-      "Ask Jev to select a configured model for a task. " +
+      "Ask Jev to recommend a model or classify and apply thinking effort. " +
       "recommend returns a provider/model ID without changing any session; " +
-      "pass it as model when launching a subagent. switch_self changes only " +
-      "this calling session's model, not a parent or another child. " +
+      "pass it as model when launching a subagent. switch_effort makes a separate " +
+      "effort-specific Jev call and changes only this calling session's thinking level, " +
+      "never its model. Pi clamps effort to the current model's capabilities. " +
+      "Before substantive work, the parent and EVERY subagent role MUST call switch_effort " +
+      "for its own assignment, even if recommend was already called for delegation. " +
+      "If classification fails, report the failure rather than silently skipping it. " +
       "Provide the actual assignment, findings, constraints, and acceptance checks. " +
       "Pass role (the agent that will do the task) and files (relevant paths) when known. " +
       "Do not include secrets. Use again only when task evidence changes materially. " +
       "This tool does not grant permission or change an agent's role.",
     executionMode: "sequential",
     parameters: Type.Object({
-      action: Type.Union([Type.Literal("recommend"), Type.Literal("switch_self")]),
+      action: Type.Union([Type.Literal("recommend"), Type.Literal("switch_effort")]),
       task: Type.String({ minLength: 1, maxLength: 12_000 }),
       context: Type.Optional(Type.String({ maxLength: 20_000 })),
       role: Type.Optional(StringEnum(ROLES, {
-        description: "Agent role that will do the task: the child for recommend, yourself for switch_self.",
+        description: "Agent role that will do the task: the child for recommend, yourself for switch_effort.",
       })),
       files: Type.Optional(Type.Array(
         Type.String({ minLength: 1, maxLength: 1_000 }),
         { maxItems: 50, description: "Relevant file paths only, not file contents." },
       )),
       requiresImages: Type.Optional(Type.Boolean({
-        description: "The selected model must support image inputs.",
+        description: "For recommend: the selected model must support image inputs.",
       })),
     }, { additionalProperties: false }),
 
@@ -219,8 +244,16 @@ export default function(pi: ExtensionAPI) {
         action: string; lane: string; model: string; changed: boolean;
         laneAnswer?: ChoiceAnswer<LaneOption>; blastRadius?: ChoiceAnswer<BlastRadiusOption>;
         reason: EscalationReason | null;
+        requestedEffort?: Effort; actualEffort?: Effort;
       } | undefined;
       if (!d) return new Text(theme.fg("error", "Jev router: no decision"), 0, 0);
+      if (d.action === "switch_effort") {
+        return new Text(
+          theme.fg("success", `Jev effort: ${d.requestedEffort} → ${d.actualEffort}`) +
+          theme.fg("dim", ` (${d.changed ? "changed" : "unchanged"}; model unchanged: ${d.model})`),
+          0, 0,
+        );
+      }
       // Sessions saved before the Choice contract have no laneAnswer/blastRadius.
       const summary = d.laneAnswer && d.blastRadius
         ? `; ${decisionSummary(d.laneAnswer, d.blastRadius, d.reason)}` : "";
@@ -232,13 +265,21 @@ export default function(pi: ExtensionAPI) {
     },
 
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+      if (params.action !== "recommend" && params.action !== "switch_effort") {
+        throw new Error("Jev router: unsupported action.");
+      }
       const task = params.task.trim();
       if (!task) throw new Error("Jev router: task must not be blank.");
       const files = (params.files ?? []).map((file) => file.trim());
       if (files.some((file) => !file)) throw new Error("Jev router: files must not contain blank paths.");
       signal?.throwIfAborted();
       const sessionId = ctx.sessionManager.getSessionId();
-      const { models, minConfidence } = loadModels();
+      const initialModel = ctx.model;
+      const initialModelId = fullId(initialModel);
+      if (params.action === "switch_effort" && !initialModel) {
+        throw new Error("Jev router: no current model for effort selection.");
+      }
+      const routing = params.action === "recommend" ? loadModels() : undefined;
       const key = process.env.TYPESAFE_API_KEY;
       if (!key) throw new Error("Jev router: missing TYPESAFE_API_KEY.");
       const classifier = process.env.JEV_MODEL || "jev-latest";
@@ -254,7 +295,7 @@ export default function(pi: ExtensionAPI) {
         body: JSON.stringify({
           model: classifier,
           state: { role, task, context: params.context ?? "", files },
-          questions: QUESTIONS,
+          questions: params.action === "switch_effort" ? EFFORT_QUESTIONS : QUESTIONS,
         }),
       });
       if (!response.ok) {
@@ -264,6 +305,59 @@ export default function(pi: ExtensionAPI) {
       const data = object(await response.json(), "TypeSafe response");
       log(`${new Date().toISOString()} session=${sessionId} action=${params.action}`, JSON.stringify(data));
       const answers = object(data.answers, "TypeSafe answers");
+      const usage = data.usage && typeof data.usage === "object"
+        ? data.usage as Record<string, unknown> : {};
+      const classifierDetails = {
+        classifier: typeof data.model === "string" ? data.model : classifier,
+        // Recorded separately; these counts are not a Pi billing estimate.
+        jevUsage: {
+          inputTokens: tokenCount(usage.input_tokens),
+          outputTokens: tokenCount(usage.output_tokens),
+        },
+      };
+      if (params.action === "switch_effort") {
+        const effortAnswer = choiceAnswer(answers, "effort", EFFORT_OPTIONS);
+        requestSignal.throwIfAborted();
+        if (ctx.sessionManager.getSessionId() !== sessionId) {
+          throw new Error("Jev router: session changed while classifying; retry in the new session.");
+        }
+        if (ctx.model !== initialModel || fullId(ctx.model) !== initialModelId) {
+          throw new Error("Jev router: model changed while classifying; retry for the current model.");
+        }
+        const previousEffort = pi.getThinkingLevel();
+        const requestedEffort = effortAnswer.choice;
+        pi.setThinkingLevel(requestedEffort);
+        const actualEffort = pi.getThinkingLevel();
+        if (ctx.sessionManager.getSessionId() !== sessionId ||
+            ctx.model !== initialModel || fullId(ctx.model) !== initialModelId) {
+          throw new Error("Jev router: session or model changed while applying effort; inspect the session.");
+        }
+        const changed = actualEffort !== previousEffort;
+        const result = {
+          action: params.action,
+          model: initialModelId!,
+          previousModel: initialModelId,
+          currentModel: fullId(ctx.model),
+          previousEffort,
+          requestedEffort,
+          actualEffort,
+          changed,
+          effortAnswer,
+          ...classifierDetails,
+        };
+        log(JSON.stringify({ ...result, role }), task);
+        return {
+          content: [{
+            type: "text" as const,
+            text: `Jev effort: requested ${requestedEffort}, actual ${actualEffort} ` +
+              `(${changed ? "changed" : "unchanged"}; model unchanged: ${initialModelId})\n\n` +
+              JSON.stringify(result, null, 2),
+          }],
+          details: result,
+        };
+      }
+
+      const { models, minConfidence } = routing!;
       const laneAnswer = choiceAnswer(answers, "lane", LANE_OPTIONS);
       const blastRadius = choiceAnswer(answers, "blast_radius", BLAST_RADIUS_OPTIONS);
       const { lane, escalated, reason } = decideLane(laneAnswer, blastRadius, minConfidence);
@@ -284,29 +378,13 @@ export default function(pi: ExtensionAPI) {
       }
 
       const previousModel = fullId(ctx.model);
-      let changed = false;
-      if (params.action === "switch_self" && previousModel !== fullId(target)) {
-        // Refuse known context overflow rather than silently losing task context.
-        const tokens = ctx.getContextUsage()?.tokens;
-        if (tokens != null && tokens >= model.contextWindow) {
-          throw new Error("Jev router: current context is too large for the selected model.");
-        }
-        if (!(await pi.setModel(model))) {
-          throw new Error(`Jev router: Pi refused the switch to ${fullId(target)}.`);
-        }
-        if (fullId(ctx.model) !== fullId(target)) {
-          throw new Error("Jev router: Pi did not retain the selected model; inspect the session.");
-        }
-        changed = true;
-      }
+      const changed = false;
 
       log(
         JSON.stringify({ lane, ...target, action: params.action, changed, escalated, reason, role }),
         task,
       );
 
-      const usage = data.usage && typeof data.usage === "object"
-        ? data.usage as Record<string, unknown> : {};
       const result = {
         lane,
         model: fullId(target)!,
@@ -318,18 +396,13 @@ export default function(pi: ExtensionAPI) {
         blastRadius,
         escalated,
         reason,
-        classifier: typeof data.model === "string" ? data.model : classifier,
-        // Recorded separately; these counts are not a Pi billing estimate.
-        jevUsage: {
-          inputTokens: tokenCount(usage.input_tokens),
-          outputTokens: tokenCount(usage.output_tokens),
-        },
+        ...classifierDetails,
       };
       return {
         content: [{
           type: "text" as const,
           text: `Jev decision: ${lane} → ${fullId(target)} ` +
-            `(${decisionSummary(laneAnswer, blastRadius, reason)}${changed ? ", switched" : ""})\n\n` +
+            `(${decisionSummary(laneAnswer, blastRadius, reason)})\n\n` +
             JSON.stringify(result, null, 2),
         }],
         details: result,
