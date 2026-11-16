@@ -326,14 +326,7 @@ func invoke(ctx context.Context, parentJSON []byte, parentName string, fnName st
 					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg agentProfile", err))
 				}
 			}
-			var cacheDir *dagger.Directory
-			if inputArgs["cacheDir"] != nil {
-				err = json.Unmarshal([]byte(inputArgs["cacheDir"]), &cacheDir)
-				if err != nil {
-					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg cacheDir", err))
-				}
-			}
-			return (*Daggervals).Hello(&parent, ctx, auth, agentEnv, agentProfile, cacheDir)
+			return (*Daggervals).Hello(&parent, ctx, auth, agentEnv, agentProfile)
 		case "TestCacheWrite":
 			var parent Daggervals
 			err = json.Unmarshal(parentJSON, &parent)
@@ -395,12 +388,11 @@ func invoke(ctx context.Context, parentJSON []byte, parentName string, fnName st
 							WithArg("agentProfile", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 187, 57)})).
 					WithFunction(
 						dag.Function("Hello",
-							dag.TypeDef().WithListOf(dag.TypeDef().WithKind(dagger.TypeDefKindStringKind))).
+							dag.TypeDef().WithKind(dagger.TypeDefKindStringKind)).
 							WithSourceMap(dag.SourceMap("main.go", 52, 1)).
 							WithArg("auth", dag.TypeDef().WithObject("Secret"), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 52, 49)}).
 							WithArg("agentEnv", dag.TypeDef().WithObject("File"), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 52, 70)}).
-							WithArg("agentProfile", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 52, 93)}).
-							WithArg("cacheDir", dag.TypeDef().WithObject("Directory"), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 52, 114)})).
+							WithArg("agentProfile", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 52, 93)})).
 					WithFunction(
 						dag.Function("TestCacheWrite",
 							dag.TypeDef().WithObject("Directory")).

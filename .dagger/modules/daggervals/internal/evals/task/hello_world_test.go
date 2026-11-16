@@ -90,3 +90,11 @@ func TestRustTestEnvScript(t *testing.T) {
 		t.Fatalf("script %q err %v", s, err)
 	}
 }
+
+func TestHelloWorldTaskAsksForProbeAndKeepsOracleContract(t *testing.T) {
+	for _, want := range append([]string{"jev_route", `"recommend"`, "hello world"}, helloWorldProbeLines...) {
+		if !strings.Contains(HelloWorldTask.ProblemStatement, want) {
+			t.Errorf("problem statement lacks %q", want)
+		}
+	}
+}

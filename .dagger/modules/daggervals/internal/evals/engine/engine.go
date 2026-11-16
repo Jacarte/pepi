@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
+	"unicode/utf8"
 
 	"dagger/daggervals/internal/dagger"
 	"dagger/daggervals/internal/evals/network"
@@ -118,8 +120,27 @@ type TaskOutcome struct {
 	ValidationError string
 	GoldenPatch     string
 	FinalDiff       string
+	// Output is what the agent printed to stdout (the final answer), tail-truncated to
+	// MaxOutputBytes. Empty when it could not be read; see OutputError.
+	Output      string
+	OutputError string
 
 	Profile string
+}
+
+// MaxOutputBytes bounds TaskOutcome.Output so cached outcomes stay small.
+const MaxOutputBytes = 64 * 1024
+
+// tailBytes keeps the last max bytes of s, on a rune boundary, with a marker when cut.
+func tailBytes(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	cut := len(s) - max
+	for cut < len(s) && !utf8.RuneStart(s[cut]) {
+		cut++
+	}
+	return "[... truncated " + strconv.Itoa(cut) + " bytes ...]\n" + s[cut:]
 }
 
 func NewEngine(agent LLM, tasks []tasks.FixTask, cache Cache) *Engine {
@@ -228,6 +249,11 @@ func (e *Engine) runTask(ctx context.Context, preparedEnv *dagger.Container, tas
 	if validationErr != nil {
 		validationError = validationErr.Error()
 	}
+	output, outputErr := result.Stdout(ctx)
+	outputError := ""
+	if outputErr != nil {
+		outputError = outputErr.Error()
+	}
 	outcome := &TaskOutcome{
 		Task:             task.Env.GetRepo(),
 		ProblemStatement: task.ProblemStatement,
@@ -238,6 +264,8 @@ func (e *Engine) runTask(ctx context.Context, preparedEnv *dagger.Container, tas
 		ValidationError:  validationError,
 		GoldenPatch:      task.GoldenPatch,
 		FinalDiff:        task.Env.GetFinalDiff(ctx, result),
+		Output:           tailBytes(output, MaxOutputBytes),
+		OutputError:      outputError,
 		Profile:          profile,
 	}
 	if statsErr != nil {

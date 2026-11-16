@@ -16,7 +16,8 @@ type Daggervals struct { // daggervals (../../../../../../:0:0)
 	// field again.
 	refetchID bool
 
-	id *ID
+	hello *string
+	id    *ID
 }
 
 func (r *Daggervals) WithGraphQLQuery(q *querybuilder.Selection) *Daggervals {
@@ -95,17 +96,18 @@ func (r *Daggervals) GenerateImage(agentProfile string) *Container {
 	}
 }
 
-func (r *Daggervals) Hello(ctx context.Context, auth *Secret, agentEnv *File, agentProfile string, cacheDir *Directory) ([]string, error) {
+func (r *Daggervals) Hello(ctx context.Context, auth *Secret, agentEnv *File, agentProfile string) (string, error) {
 	assertNotNil("auth", auth)
 	assertNotNil("agentEnv", agentEnv)
-	assertNotNil("cacheDir", cacheDir)
+	if r.hello != nil {
+		return *r.hello, nil
+	}
 	q := r.query.Select("hello")
 	q = q.Arg("auth", auth)
 	q = q.Arg("agentEnv", agentEnv)
 	q = q.Arg("agentProfile", agentProfile)
-	q = q.Arg("cacheDir", cacheDir)
 
-	var response []string
+	var response string
 
 	q = q.Bind(&response)
 	return response, q.Execute(ctx)

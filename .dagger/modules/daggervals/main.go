@@ -49,11 +49,11 @@ type EvalResult struct {
 	Cache *dagger.Directory
 }
 
-func (m *Daggervals) Hello(ctx context.Context, auth *dagger.Secret, agentEnv *dagger.File, agentProfile string, cacheDir *dagger.Directory) ([]string, error) {
+func (m *Daggervals) Hello(ctx context.Context, auth *dagger.Secret, agentEnv *dagger.File, agentProfile string) (string, error) {
 	rootContainer, err := rootImage().Sync(ctx)
 
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 
 	evalEngine := engine.NewEngine(
@@ -63,9 +63,9 @@ func (m *Daggervals) Hello(ctx context.Context, auth *dagger.Secret, agentEnv *d
 	)
 	outcomes, err := evalEngine.Run(ctx, rootContainer, "noul", agentProfile)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
-	return serializeTaskOutcomes(outcomes)
+	return outcomes[0].Output, nil
 }
 
 func (m *Daggervals) Evals(
@@ -203,6 +203,7 @@ type taskResult struct {
 	ProcessStats    engine.ProcessStats `json:"processStats"`
 	Valid           bool                `json:"valid"`
 	ValidationError string              `json:"validationError,omitempty"`
+	Output          string              `json:"output,omitempty"`
 }
 
 type statsResult struct {
@@ -231,6 +232,7 @@ func serializeTaskOutcomes(outcomes []engine.TaskOutcome) ([]string, error) {
 				CostUSD:    outcome.AgentStats.CostUSD,
 			},
 		}
+		result.Output = outcome.Output
 		if outcome.ValidationError != "" {
 			result.ValidationError = outcome.ValidationError
 		}

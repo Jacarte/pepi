@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 type Agent interface {
@@ -36,7 +37,11 @@ type taskReport struct {
 	ToolUsage        toolSummary         `json:"toolUsage"`
 	PatchStats       patchStats          `json:"patchStats"`
 	Tokens           tokenSummary        `json:"tokens"`
+	// AgentOutput is the agent's final stdout, cut to the last maxJudgeOutput bytes.
+	AgentOutput string `json:"agentOutput"`
 }
+
+const maxJudgeOutput = 6000
 
 // patchStats is computed from finalDiff and goldenPatch so the judge does not count lines.
 // Test detection is by file path only; tests inside source files (for example Rust
@@ -127,6 +132,17 @@ func summarizePatch(finalDiff, goldenPatch string) patchStats {
 		OverlapFiles: sortedKeys(overlap), MissingFiles: sortedKeys(missing), ExtraFiles: sortedKeys(extra),
 		TestFilesEdited: sortedKeys(tests),
 	}
+}
+
+func tailOutput(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	cut := len(s) - max
+	for cut < len(s) && !utf8.RuneStart(s[cut]) {
+		cut++
+	}
+	return "[... truncated ...]\n" + s[cut:]
 }
 
 func summarizeTokens(a engine.AgentStats) tokenSummary {
@@ -260,6 +276,7 @@ func buildReports(results []engine.TaskOutcome) []taskReport {
 			ToolUsage:        summarizeTools(r.ProcessStats.ToolCalls),
 			PatchStats:       summarizePatch(r.FinalDiff, r.GoldenPatch),
 			Tokens:           summarizeTokens(r.AgentStats),
+			AgentOutput:      tailOutput(r.Output, maxJudgeOutput),
 		}
 		if r.ValidationError != "" {
 			report.OracleError = r.ValidationError
@@ -295,6 +312,8 @@ Each element describes one task:
   slowest agent, instancesWithoutTiming how many have no duration, and timingSources how
   the durations were obtained (state the precision of any claim accordingly). It covers
   agent execution only; environment setup and the oracle run are not included.
+- agentOutput: what the agent printed to stdout (its final answer), cut to the last part.
+  It is the agent's own claim; do not treat it as evidence that the fix works.
 - patchStats: precomputed from finalDiff and goldenPatch (do not recount): files,
   additions, deletions, changedFiles, the golden patch size (goldenFiles, goldenAdditions,
   goldenDeletions), overlapFiles, missingFiles (only in the golden patch), extraFiles

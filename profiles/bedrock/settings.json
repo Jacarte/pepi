@@ -49,7 +49,7 @@
           "/Users/javier.cabrera/.pi/agent/extensions/prompt-logger.ts",
           "/Users/javier.cabrera/.pi/agent/npm/node_modules/@amaster.ai/pi-memory-mem0/dist/index.js",
           "/Users/javier.cabrera/.pi/agent/extensions/subagent-only/mem0-fallback.ts",
-          "/Users/javcab/.pi/agent/npm/node_modules/@vndv/pi-codegraph/extensions/codegraph.ts"
+          "/Users/javier.cabrera/.pi/agent/npm/node_modules/@vndv/pi-codegraph/extensions/codegraph.ts"
         ]
       },
       "worker": {
@@ -79,7 +79,7 @@
           "/Users/javier.cabrera/.pi/agent/extensions/prompt-logger.ts",
           "/Users/javier.cabrera/.pi/agent/npm/node_modules/@amaster.ai/pi-memory-mem0/dist/index.js",
           "/Users/javier.cabrera/.pi/agent/extensions/subagent-only/mem0-fallback.ts",
-          "/Users/javcab/.pi/agent/npm/node_modules/@vndv/pi-codegraph/extensions/codegraph.ts"
+          "/Users/javier.cabrera/.pi/agent/npm/node_modules/@vndv/pi-codegraph/extensions/codegraph.ts"
         ]
       },
       "scout": {
@@ -108,7 +108,7 @@
           "/Users/javier.cabrera/.pi/agent/extensions/prompt-logger.ts",
           "/Users/javier.cabrera/.pi/agent/npm/node_modules/@amaster.ai/pi-memory-mem0/dist/index.js",
           "/Users/javier.cabrera/.pi/agent/extensions/subagent-only/mem0-fallback.ts",
-          "/Users/javcab/.pi/agent/npm/node_modules/@vndv/pi-codegraph/extensions/codegraph.ts"
+          "/Users/javier.cabrera/.pi/agent/npm/node_modules/@vndv/pi-codegraph/extensions/codegraph.ts"
         ]
       },
       "reviewer": {
@@ -136,7 +136,7 @@
           "/Users/javier.cabrera/.pi/agent/extensions/prompt-logger.ts",
           "/Users/javier.cabrera/.pi/agent/npm/node_modules/@amaster.ai/pi-memory-mem0/dist/index.js",
           "/Users/javier.cabrera/.pi/agent/extensions/subagent-only/mem0-fallback.ts",
-          "/Users/javcab/.pi/agent/npm/node_modules/@vndv/pi-codegraph/extensions/codegraph.ts"
+          "/Users/javier.cabrera/.pi/agent/npm/node_modules/@vndv/pi-codegraph/extensions/codegraph.ts"
         ]
       },
       "delegate": {
@@ -165,7 +165,7 @@
           "/Users/javier.cabrera/.pi/agent/extensions/prompt-logger.ts",
           "/Users/javier.cabrera/.pi/agent/npm/node_modules/@amaster.ai/pi-memory-mem0/dist/index.js",
           "/Users/javier.cabrera/.pi/agent/extensions/subagent-only/mem0-fallback.ts",
-          "/Users/javcab/.pi/agent/npm/node_modules/@vndv/pi-codegraph/extensions/codegraph.ts"
+          "/Users/javier.cabrera/.pi/agent/npm/node_modules/@vndv/pi-codegraph/extensions/codegraph.ts"
         ]
       },
       "researcher": {
