@@ -43,9 +43,9 @@ func (c *PiSetup) Setup() dagger.WithContainerFunc {
 		// FIXME
 		// remove the current /Users/<user/.pi in the settings.json fixed extension paths
 		// in favor of /root/.pi after copying settings.json to the root folder
-		container = container.WithExec([]string{"bash", "-c", `
-					sed -i 's|/Users/[^/]*/.pi|/root/.pi|g' /root/.pi/agent/settings.json
-			`})
+		//container = container.WithExec([]string{"bash", "-c", `
+		//			sed -i 's|/Users/[^/]*/.pi|/root/.pi|g' /root/.pi/agent/settings.json
+		//	`})
 
 		if c.Env != nil {
 			container = container.WithEnvFileVariables(c.Env)

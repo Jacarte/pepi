@@ -58,3 +58,48 @@ func TestSummarizeTools(t *testing.T) {
 		t.Fatalf("unexpected byTool: %+v", got.ByTool)
 	}
 }
+
+const sampleDiff = `diff --git a/src/lib.rs b/src/lib.rs
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1,2 +1,3 @@
+-old
++new
++more
+diff --git a/tests/it.rs b/tests/it.rs
+--- a/tests/it.rs
++++ b/tests/it.rs
+@@ -1 +1 @@
+-a
++b
+`
+
+func TestSummarizePatch(t *testing.T) {
+	golden := "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-x\n+y\ndiff --git a/src/other.rs b/src/other.rs\n--- a/src/other.rs\n+++ b/src/other.rs\n@@ -1 +1 @@\n-p\n+q\n"
+	got := summarizePatch(sampleDiff, golden)
+	if got.Files != 2 || got.Additions != 3 || got.Deletions != 2 {
+		t.Fatalf("size: %+v", got)
+	}
+	if got.GoldenFiles != 2 || len(got.OverlapFiles) != 1 || got.OverlapFiles[0] != "src/lib.rs" {
+		t.Fatalf("overlap: %+v", got)
+	}
+	if len(got.MissingFiles) != 1 || got.MissingFiles[0] != "src/other.rs" || len(got.ExtraFiles) != 1 || got.ExtraFiles[0] != "tests/it.rs" {
+		t.Fatalf("missing/extra: %+v", got)
+	}
+	if len(got.TestFilesEdited) != 1 || got.TestFilesEdited[0] != "tests/it.rs" {
+		t.Fatalf("tests: %+v", got.TestFilesEdited)
+	}
+	if empty := summarizePatch("", ""); empty.Files != 0 || empty.ChangedFiles == nil {
+		t.Fatalf("empty: %+v", empty)
+	}
+}
+
+func TestSummarizeTokens(t *testing.T) {
+	got := summarizeTokens(engine.AgentStats{Turns: 2, Input: 100, Output: 50, CacheRead: 300, CacheWrite: 100, CostUSD: 1})
+	if got.Total != 550 || got.CacheHitRatio == nil || *got.CacheHitRatio != 0.6 || *got.CostPerTurn != 0.5 {
+		t.Fatalf("tokens: %+v", got)
+	}
+	if z := summarizeTokens(engine.AgentStats{}); z.CacheHitRatio != nil || z.CostPerTurn != nil {
+		t.Fatalf("zero: %+v", z)
+	}
+}

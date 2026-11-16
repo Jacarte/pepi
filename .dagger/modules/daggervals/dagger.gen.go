@@ -277,7 +277,14 @@ func invoke(ctx context.Context, parentJSON []byte, parentName string, fnName st
 					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg cacheDir", err))
 				}
 			}
-			return (*Daggervals).Evals(&parent, ctx, auth, agentEnv, agentProfile, cacheDir)
+			var fixed string
+			if inputArgs["fixed"] != nil {
+				err = json.Unmarshal([]byte(inputArgs["fixed"]), &fixed)
+				if err != nil {
+					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg fixed", err))
+				}
+			}
+			return (*Daggervals).Evals(&parent, ctx, auth, agentEnv, agentProfile, cacheDir, fixed)
 		case "GenerateImage":
 			var parent Daggervals
 			err = json.Unmarshal(parentJSON, &parent)
@@ -361,54 +368,55 @@ func invoke(ctx context.Context, parentJSON []byte, parentName string, fnName st
 	case "":
 		return dag.Module().
 			WithObject(
-				dag.TypeDef().WithObject("Daggervals", dagger.TypeDefWithObjectOpts{SourceMap: dag.SourceMap("main.go", 17, 6)}).
+				dag.TypeDef().WithObject("Daggervals", dagger.TypeDefWithObjectOpts{SourceMap: dag.SourceMap("main.go", 18, 6)}).
 					WithFunction(
 						dag.Function("CompareEvals",
 							dag.TypeDef().WithListOf(dag.TypeDef().WithKind(dagger.TypeDefKindStringKind))).
-							WithSourceMap(dag.SourceMap("main.go", 134, 1)).
-							WithArg("auth", dag.TypeDef().WithObject("Secret"), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 134, 56)}).
-							WithArg("agentEnv", dag.TypeDef().WithObject("File"), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 134, 77)}).
-							WithArg("agentProfile", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 134, 100)}).
-							WithArg("before", dag.TypeDef().WithObject("File"), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 134, 121)}).
-							WithArg("after", dag.TypeDef().WithObject("File"), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 134, 142)})).
+							WithSourceMap(dag.SourceMap("main.go", 152, 1)).
+							WithArg("auth", dag.TypeDef().WithObject("Secret"), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 152, 56)}).
+							WithArg("agentEnv", dag.TypeDef().WithObject("File"), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 152, 77)}).
+							WithArg("agentProfile", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 152, 100)}).
+							WithArg("before", dag.TypeDef().WithObject("File"), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 152, 121)}).
+							WithArg("after", dag.TypeDef().WithObject("File"), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 152, 142)})).
 					WithFunction(
 						dag.Function("Evals",
 							dag.TypeDef().WithObject("EvalResult")).
-							WithSourceMap(dag.SourceMap("main.go", 70, 1)).
-							WithArg("auth", dag.TypeDef().WithObject("Secret"), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 70, 49)}).
-							WithArg("agentEnv", dag.TypeDef().WithObject("File"), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 70, 70)}).
-							WithArg("agentProfile", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 70, 93)}).
-							WithArg("cacheDir", dag.TypeDef().WithObject("Directory"), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 70, 114)})).
+							WithSourceMap(dag.SourceMap("main.go", 71, 1)).
+							WithArg("auth", dag.TypeDef().WithObject("Secret"), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 73, 2)}).
+							WithArg("agentEnv", dag.TypeDef().WithObject("File"), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 74, 2)}).
+							WithArg("agentProfile", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 75, 2)}).
+							WithArg("cacheDir", dag.TypeDef().WithObject("Directory"), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 76, 2)}).
+							WithArg("fixed", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind).WithOptional(true), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 78, 2)})).
 					WithFunction(
 						dag.Function("GenerateImage",
 							dag.TypeDef().WithObject("Container")).
 							WithDescription("GenerateImage returns a container with pi and the selected profile baked in.\nIt never receives auth.json: mount it at run time. Export it with\n`export --path image.tar` or push it with `publish --address ...`.").
-							WithSourceMap(dag.SourceMap("main.go", 169, 1)).
-							WithArg("agentProfile", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 169, 57)})).
+							WithSourceMap(dag.SourceMap("main.go", 187, 1)).
+							WithArg("agentProfile", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 187, 57)})).
 					WithFunction(
 						dag.Function("Hello",
 							dag.TypeDef().WithListOf(dag.TypeDef().WithKind(dagger.TypeDefKindStringKind))).
-							WithSourceMap(dag.SourceMap("main.go", 51, 1)).
-							WithArg("auth", dag.TypeDef().WithObject("Secret"), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 51, 49)}).
-							WithArg("agentEnv", dag.TypeDef().WithObject("File"), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 51, 70)}).
-							WithArg("agentProfile", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 51, 93)}).
-							WithArg("cacheDir", dag.TypeDef().WithObject("Directory"), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 51, 114)})).
+							WithSourceMap(dag.SourceMap("main.go", 52, 1)).
+							WithArg("auth", dag.TypeDef().WithObject("Secret"), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 52, 49)}).
+							WithArg("agentEnv", dag.TypeDef().WithObject("File"), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 52, 70)}).
+							WithArg("agentProfile", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 52, 93)}).
+							WithArg("cacheDir", dag.TypeDef().WithObject("Directory"), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 52, 114)})).
 					WithFunction(
 						dag.Function("TestCacheWrite",
 							dag.TypeDef().WithObject("Directory")).
-							WithSourceMap(dag.SourceMap("main.go", 110, 1)).
-							WithArg("cacheDir", dag.TypeDef().WithObject("Directory"), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 110, 58)})).
-					WithField("Source", dag.TypeDef().WithObject("Directory"), dagger.TypeDefWithFieldOpts{SourceMap: dag.SourceMap("main.go", 18, 2)}).
-					WithField("Auth", dag.TypeDef().WithObject("Secret"), dagger.TypeDefWithFieldOpts{SourceMap: dag.SourceMap("main.go", 19, 2)}).
+							WithSourceMap(dag.SourceMap("main.go", 128, 1)).
+							WithArg("cacheDir", dag.TypeDef().WithObject("Directory"), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 128, 58)})).
+					WithField("Source", dag.TypeDef().WithObject("Directory"), dagger.TypeDefWithFieldOpts{SourceMap: dag.SourceMap("main.go", 19, 2)}).
+					WithField("Auth", dag.TypeDef().WithObject("Secret"), dagger.TypeDefWithFieldOpts{SourceMap: dag.SourceMap("main.go", 20, 2)}).
 					WithConstructor(
 						dag.Function("New",
 							dag.TypeDef().WithObject("Daggervals")).
-							WithSourceMap(dag.SourceMap("main.go", 22, 1)).
-							WithArg("ws", dag.TypeDef().WithObject("Workspace"), dagger.FunctionWithArgOpts{Description: "The current workspace, auto-populated by Dagger.", SourceMap: dag.SourceMap("main.go", 24, 2)}))).
+							WithSourceMap(dag.SourceMap("main.go", 23, 1)).
+							WithArg("ws", dag.TypeDef().WithObject("Workspace"), dagger.FunctionWithArgOpts{Description: "The current workspace, auto-populated by Dagger.", SourceMap: dag.SourceMap("main.go", 25, 2)}))).
 			WithObject(
-				dag.TypeDef().WithObject("EvalResult", dagger.TypeDefWithObjectOpts{SourceMap: dag.SourceMap("main.go", 46, 6)}).
-					WithField("Log", dag.TypeDef().WithListOf(dag.TypeDef().WithKind(dagger.TypeDefKindStringKind)), dagger.TypeDefWithFieldOpts{SourceMap: dag.SourceMap("main.go", 47, 2)}).
-					WithField("Cache", dag.TypeDef().WithObject("Directory"), dagger.TypeDefWithFieldOpts{SourceMap: dag.SourceMap("main.go", 48, 2)})), nil
+				dag.TypeDef().WithObject("EvalResult", dagger.TypeDefWithObjectOpts{SourceMap: dag.SourceMap("main.go", 47, 6)}).
+					WithField("Log", dag.TypeDef().WithListOf(dag.TypeDef().WithKind(dagger.TypeDefKindStringKind)), dagger.TypeDefWithFieldOpts{SourceMap: dag.SourceMap("main.go", 48, 2)}).
+					WithField("Cache", dag.TypeDef().WithObject("Directory"), dagger.TypeDefWithFieldOpts{SourceMap: dag.SourceMap("main.go", 49, 2)})), nil
 	default:
 		return nil, fmt.Errorf("unknown object %s", parentName)
 	}

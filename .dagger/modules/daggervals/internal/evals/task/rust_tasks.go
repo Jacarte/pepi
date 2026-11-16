@@ -114,30 +114,26 @@ func checkRustTests(stdout string) (bool, error) {
 
 // An array of tasks
 var RustTasks = []FixTask{
-	{
-		ProblemStatement: readOrError("rust/r1/problem.md"),
-		EvalTest:         readOrError("rust/r1/eval.sh"),
-		GoldenPatch:      readOrError("rust/r1/golden.patch"),
-		Env: RustTask{
-			Repo:   "https://github.com/tokio-rs/axum.git",
-			Commit: "23808f72a2c00c314cedea40a75b73954402a148",
-		},
-		TestEnv: RustTestEnv{TestPatch: readOrError("rust/r1/test.patch")},
-		Oracle:  RustTaskOracle{EvalTest: readOrError("rust/r1/eval.sh")},
-	},
-	{
-		ProblemStatement: readOrError("rust/r2/problem.md"),
-		EvalTest:         readOrError("rust/r2/eval.sh"),
-		GoldenPatch:      readOrError("rust/r2/golden.patch"),
-		/*nushell/nushell
-		cc9f41e553333b1ad0aa4185a912f7a52355a238*/
-		Env: RustTask{
-			Repo:   "https://github.com/nushell/nushell.git",
-			Commit: "cc9f41e553333b1ad0aa4185a912f7a52355a238",
-		},
-		TestEnv: RustTestEnv{TestPatch: readOrError("rust/r2/test.patch")},
-		Oracle:  RustTaskOracle{EvalTest: readOrError("rust/r2/eval.sh")},
-	},
+	rustFixture("r1", "https://github.com/tokio-rs/axum.git", "23808f72a2c00c314cedea40a75b73954402a148"),      // axum-1119
+	rustFixture("r2", "https://github.com/nushell/nushell.git", "cc9f41e553333b1ad0aa4185a912f7a52355a238"),    // nushell-12901
+	rustFixture("r3", "https://github.com/tokio-rs/tokio.git", "ab53bf0c4727ae63c6a3a3d772b7bd837d2f49c3"),     // tokio-6752 DelayQueue waker
+	rustFixture("r4", "https://github.com/tokio-rs/tokio.git", "873cb8ae2fc291eaffbd71e3c83d17b2f0ed7abf"),     // tokio-6603 mpsc is_empty
+	rustFixture("r5", "https://github.com/tokio-rs/tokio.git", "d6213594ca3767f182e8981fde7a119575e94c65"),     // tokio-6838 abstract UDS path
+	rustFixture("r6", "https://github.com/sharkdp/bat.git", "e2bf85e749d87459e3fced697af5cd9cc96eeb8c"),        // bat-2650 map-syntax case
+	rustFixture("r7", "https://github.com/BurntSushi/ripgrep.git", "fed4fea217abbc502f2e823465de903c8f2b623d"), // ripgrep-2576 --word-regexp
+}
+
+// rustFixture builds a FixTask from rust/<dir>/{problem.md,eval.sh,golden.patch,test.patch}.
+func rustFixture(dir, repo, commit string) FixTask {
+	base := "rust/" + dir + "/"
+	return FixTask{
+		ProblemStatement: readOrError(base + "problem.md"),
+		EvalTest:         readOrError(base + "eval.sh"),
+		GoldenPatch:      readOrError(base + "golden.patch"),
+		Env:              RustTask{Repo: repo, Commit: commit},
+		TestEnv:          RustTestEnv{TestPatch: readOrError(base + "test.patch")},
+		Oracle:           RustTaskOracle{EvalTest: readOrError(base + "eval.sh")},
+	}
 }
 
 //go:embed rust

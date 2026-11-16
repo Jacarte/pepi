@@ -1,0 +1,2 @@
+burntsushi/ripgrep
+fed4fea217abbc502f2e823465de903c8f2b623d

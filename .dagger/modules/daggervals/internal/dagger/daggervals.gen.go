@@ -8,4 +8,7 @@ import (
 
 type Daggervals = core.Daggervals
 
+// DaggervalsEvalsOpts contains options for Daggervals.Evals
+type DaggervalsEvalsOpts = core.DaggervalsEvalsOpts
+
 type DaggervalsEvalResult = core.DaggervalsEvalResult

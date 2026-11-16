@@ -55,11 +55,22 @@ func (r *Daggervals) CompareEvals(ctx context.Context, auth *Secret, agentEnv *F
 	return response, q.Execute(ctx)
 }
 
-func (r *Daggervals) Evals(auth *Secret, agentEnv *File, agentProfile string, cacheDir *Directory) *DaggervalsEvalResult {
+// DaggervalsEvalsOpts contains options for Daggervals.Evals
+type DaggervalsEvalsOpts struct {
+	Fixed string
+}
+
+func (r *Daggervals) Evals(auth *Secret, agentEnv *File, agentProfile string, cacheDir *Directory, opts ...DaggervalsEvalsOpts) *DaggervalsEvalResult {
 	assertNotNil("auth", auth)
 	assertNotNil("agentEnv", agentEnv)
 	assertNotNil("cacheDir", cacheDir)
 	q := r.query.Select("evals")
+	for i := len(opts) - 1; i >= 0; i-- {
+		// `fixed` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Fixed) {
+			q = q.Arg("fixed", opts[i].Fixed)
+		}
+	}
 	q = q.Arg("auth", auth)
 	q = q.Arg("agentEnv", agentEnv)
 	q = q.Arg("agentProfile", agentProfile)

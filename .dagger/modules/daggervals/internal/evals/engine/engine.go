@@ -8,6 +8,8 @@ import (
 	"dagger/daggervals/internal/dagger"
 	"dagger/daggervals/internal/evals/network"
 	tasks "dagger/daggervals/internal/evals/task"
+
+	"golang.org/x/sync/errgroup"
 )
 
 // Receives a container
@@ -116,6 +118,8 @@ type TaskOutcome struct {
 	ValidationError string
 	GoldenPatch     string
 	FinalDiff       string
+
+	Profile string
 }
 
 func NewEngine(agent LLM, tasks []tasks.FixTask, cache Cache) *Engine {
@@ -126,7 +130,7 @@ func NewEngine(agent LLM, tasks []tasks.FixTask, cache Cache) *Engine {
 	}
 }
 
-func (e *Engine) Run(ctx context.Context, container *dagger.Container, runId string) ([]TaskOutcome, error) {
+func (e *Engine) Run(ctx context.Context, container *dagger.Container, runId string, profile string) ([]TaskOutcome, error) {
 
 	if e.Cache != nil {
 		if runId != "" {
@@ -138,84 +142,108 @@ func (e *Engine) Run(ctx context.Context, container *dagger.Container, runId str
 		}
 	}
 
-	outcomes := make([]TaskOutcome, 0, len(e.Tasks))
+	if len(e.Tasks) == 0 {
+		return []TaskOutcome{}, nil
+	}
 	// Pi provisioning and toolchains are outside the capture window.
 	setupFunc, err := e.Agent.Setup()(container).Sync(ctx)
 	if err != nil {
+		return nil, err
+	}
+	// All tasks share the toolchain image prepared for the first task, built once
+	// before the fan-out so parallel tasks do not each rebuild it.
+	preparedEnv, err := e.Tasks[0].Env.PrepareEnv(ctx)(setupFunc).Sync(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	// Tasks run in parallel, at most MaxParallelTasks at a time. Each goroutine writes
+	// only its own slot, so results keep the task order. A failed verification is data
+	// and does not stop the other tasks; any other error cancels the remaining ones.
+	results := make([]*TaskOutcome, len(e.Tasks))
+	eg, egCtx := errgroup.WithContext(ctx)
+	eg.SetLimit(MaxParallelTasks)
+	for i, task := range e.Tasks {
+		eg.Go(func() error {
+			outcome, err := e.runTask(egCtx, preparedEnv, task, profile)
+			results[i] = outcome
+			return err
+		})
+	}
+	err = eg.Wait()
+
+	outcomes := make([]TaskOutcome, 0, len(e.Tasks))
+	for _, outcome := range results {
+		if outcome != nil {
+			outcomes = append(outcomes, *outcome)
+		}
+	}
+	if err != nil {
 		return outcomes, err
 	}
-
-	var preparedEnv *dagger.Container
-
-	for _, task := range e.Tasks {
-		setupFunc = task.Env.PrepareEnv(ctx)(setupFunc)
-		if preparedEnv == nil {
-			preparedEnv, err = setupFunc.Sync(ctx)
-			if err != nil {
-				return outcomes, err
-			}
-		}
-
-		prepared := task.Env.PrepareEnvForTesting(ctx)(preparedEnv)
-
-		var testEnvScript string
-		if task.TestEnv != nil {
-			testEnvScript, err = task.TestEnv.Script(ctx)
-			if err != nil {
-				return outcomes, fmt.Errorf("prepare test environment script: %w", err)
-			}
-		}
-		result, err := network.Measure(prepared, testEnvScript, e.Agent.TaskCommand(task))
-		if err != nil {
-			return outcomes, err
-		}
-		// Force execution even when the oracle does not query the container.
-		result, err = result.Sync(ctx)
-		if err != nil {
-			return outcomes, err
-		}
-		// The measured exec has stopped capture, parsed it, and removed raw data.
-		networkStats, networkErr := network.ReadStats(ctx, result)
-		// Extract and print stats before verification, even if verification fails.
-		agentStats, processStats, agentErr := e.Agent.GetStats(ctx, result)
-		statsErr := errors.Join(agentErr, networkErr)
-		if agentErr == nil {
-			fmt.Printf("Task %s stats: %+v\n", task.Env.GetRepo(), agentStats)
-		}
-		// Verify the final answer even if stats extraction failed.
-		valid, validationErr := task.Oracle.ValidateFinalAnswer(ctx, result)
-		if validationErr != nil {
-			validationErr = fmt.Errorf("task %s validation: %w", task.Env.GetRepo(), validationErr)
-		} else if !valid {
-			validationErr = fmt.Errorf("task %s failed validation", task.Env.GetRepo())
-		}
-		// get the final diff
-		finalDiff := task.Env.GetFinalDiff(ctx, result)
-		validationError := ""
-		if validationErr != nil {
-			validationError = validationErr.Error()
-		}
-		outcomes = append(outcomes, TaskOutcome{
-			Task:             task.Env.GetRepo(),
-			ProblemStatement: task.ProblemStatement,
-			AgentStats:       agentStats,
-			ProcessStats:     processStats,
-			NetworkStats:     networkStats,
-			Valid:            valid && validationErr == nil,
-			ValidationError:  validationError,
-			GoldenPatch:      task.GoldenPatch,
-			FinalDiff:        finalDiff,
-		})
-		if statsErr != nil {
-			return outcomes, errors.Join(statsErr, validationErr)
-		}
-		// Preserve fail-fast execution, but let callers serialize failed verification.
-		if validationErr != nil {
-			return outcomes, e.saveCache(runId, outcomes)
-		}
-	}
-
 	return outcomes, e.saveCache(runId, outcomes)
+}
+
+// MaxParallelTasks bounds how many tasks run at the same time.
+const MaxParallelTasks = 10
+
+// runTask runs one task in its own container. It returns the outcome even when stats
+// extraction failed, together with that error. A failed verification is not an error.
+func (e *Engine) runTask(ctx context.Context, preparedEnv *dagger.Container, task tasks.FixTask, profile string) (*TaskOutcome, error) {
+	prepared := task.Env.PrepareEnvForTesting(ctx)(preparedEnv)
+
+	var testEnvScript string
+	if task.TestEnv != nil {
+		script, err := task.TestEnv.Script(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("prepare test environment script: %w", err)
+		}
+		testEnvScript = script
+	}
+	result, err := network.Measure(prepared, testEnvScript, e.Agent.TaskCommand(task))
+	if err != nil {
+		return nil, err
+	}
+	// Force execution even when the oracle does not query the container.
+	result, err = result.Sync(ctx)
+	if err != nil {
+		return nil, err
+	}
+	// The measured exec has stopped capture, parsed it, and removed raw data.
+	networkStats, networkErr := network.ReadStats(ctx, result)
+	// Extract and print stats before verification, even if verification fails.
+	agentStats, processStats, agentErr := e.Agent.GetStats(ctx, result)
+	statsErr := errors.Join(agentErr, networkErr)
+	if agentErr == nil {
+		fmt.Printf("Task %s stats: %+v\n", task.Env.GetRepo(), agentStats)
+	}
+	// Verify the final answer even if stats extraction failed.
+	valid, validationErr := task.Oracle.ValidateFinalAnswer(ctx, result)
+	if validationErr != nil {
+		validationErr = fmt.Errorf("task %s validation: %w", task.Env.GetRepo(), validationErr)
+	} else if !valid {
+		validationErr = fmt.Errorf("task %s failed validation", task.Env.GetRepo())
+	}
+	validationError := ""
+	if validationErr != nil {
+		validationError = validationErr.Error()
+	}
+	outcome := &TaskOutcome{
+		Task:             task.Env.GetRepo(),
+		ProblemStatement: task.ProblemStatement,
+		AgentStats:       agentStats,
+		ProcessStats:     processStats,
+		NetworkStats:     networkStats,
+		Valid:            valid && validationErr == nil,
+		ValidationError:  validationError,
+		GoldenPatch:      task.GoldenPatch,
+		FinalDiff:        task.Env.GetFinalDiff(ctx, result),
+		Profile:          profile,
+	}
+	if statsErr != nil {
+		return outcome, errors.Join(statsErr, validationErr)
+	}
+	return outcome, nil
 }
 
 // saveCache stores a completed run (including failed validation) so it can be exported.

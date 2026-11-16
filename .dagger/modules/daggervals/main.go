@@ -61,14 +61,22 @@ func (m *Daggervals) Hello(ctx context.Context, auth *dagger.Secret, agentEnv *d
 		[]task.FixTask{task.HelloWorldTask},
 		nil, // no cache
 	)
-	outcomes, err := evalEngine.Run(ctx, rootContainer, "noul")
+	outcomes, err := evalEngine.Run(ctx, rootContainer, "noul", agentProfile)
 	if err != nil {
 		return nil, err
 	}
 	return serializeTaskOutcomes(outcomes)
 }
 
-func (m *Daggervals) Evals(ctx context.Context, auth *dagger.Secret, agentEnv *dagger.File, agentProfile string, cacheDir *dagger.Directory) (*EvalResult, error) {
+func (m *Daggervals) Evals(
+	ctx context.Context,
+	auth *dagger.Secret,
+	agentEnv *dagger.File,
+	agentProfile string,
+	cacheDir *dagger.Directory,
+	// +optional
+	fixed string,
+) (*EvalResult, error) {
 	rootContainer, err := rootImage().Sync(ctx)
 
 	if err != nil {
@@ -84,13 +92,19 @@ func (m *Daggervals) Evals(ctx context.Context, auth *dagger.Secret, agentEnv *d
 		task.RustTasks,
 		cach,
 	)
-	// return the Sha
-	runId, err := piSetup.GetSetupId(ctx, rootContainer)
-	if err != nil {
-		return nil, err
+	var runId string
+	if fixed != "" {
+		runId = fixed
+	} else {
+		// Get the setup id, which is a hash of the files in the workspace and the profile.
+		// return the Sha
+		runId, err = piSetup.GetSetupId(ctx, rootContainer)
+		if err != nil {
+			return nil, err
+		}
 	}
 
-	outcomes, err := evalEngine.Run(ctx, rootContainer, runId)
+	outcomes, err := evalEngine.Run(ctx, rootContainer, runId, agentProfile)
 	if err != nil {
 		return nil, err
 	}

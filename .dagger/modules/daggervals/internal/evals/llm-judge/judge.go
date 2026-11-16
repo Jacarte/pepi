@@ -5,6 +5,8 @@ import (
 	"dagger/daggervals/internal/dagger"
 	"dagger/daggervals/internal/evals/engine"
 	"encoding/json"
+	"regexp"
+	"sort"
 	"strings"
 	"time"
 )
@@ -32,6 +34,113 @@ type taskReport struct {
 	NetworkStats     engine.NetworkStats `json:"networkStats"`
 	Timing           timingSummary       `json:"timing"`
 	ToolUsage        toolSummary         `json:"toolUsage"`
+	PatchStats       patchStats          `json:"patchStats"`
+	Tokens           tokenSummary        `json:"tokens"`
+}
+
+// patchStats is computed from finalDiff and goldenPatch so the judge does not count lines.
+// Test detection is by file path only; tests inside source files (for example Rust
+// #[cfg(test)] modules) are not detected.
+type patchStats struct {
+	Files     int `json:"files"`
+	Additions int `json:"additions"`
+	Deletions int `json:"deletions"`
+	// ChangedFiles lists the files finalDiff touches.
+	ChangedFiles []string `json:"changedFiles"`
+	GoldenFiles  int      `json:"goldenFiles"`
+	// GoldenAdditions and GoldenDeletions size the reference patch for comparison.
+	GoldenAdditions int `json:"goldenAdditions"`
+	GoldenDeletions int `json:"goldenDeletions"`
+	// OverlapFiles are files touched by both patches; MissingFiles only by the golden
+	// patch; ExtraFiles only by the agent.
+	OverlapFiles []string `json:"overlapFiles"`
+	MissingFiles []string `json:"missingFiles"`
+	ExtraFiles   []string `json:"extraFiles"`
+	// TestFilesEdited are files in finalDiff whose path looks like a test.
+	TestFilesEdited []string `json:"testFilesEdited"`
+}
+
+// tokenSummary adds derived ratios to agentStats. Null means not computable, never zero.
+type tokenSummary struct {
+	Total int64 `json:"total"`
+	// CacheHitRatio is cacheRead / (input + cacheRead + cacheWrite).
+	CacheHitRatio *float64 `json:"cacheHitRatio"`
+	CostPerTurn   *float64 `json:"costPerTurnUsd"`
+	TokensPerTurn *float64 `json:"tokensPerTurn"`
+}
+
+var testPathRe = regexp.MustCompile(`(?i)(^|/)(tests?|__tests__|spec)(/|$)|_test\.|\.test\.|\.spec\.|(^|/)test_|(^|/)conftest\.py$`)
+
+// diffFiles returns per-file added/removed line counts from a unified git diff.
+func diffFiles(diff string) (files map[string]bool, additions, deletions int) {
+	files = map[string]bool{}
+	inHunk := false
+	for _, line := range strings.Split(diff, "\n") {
+		switch {
+		case strings.HasPrefix(line, "diff --git "):
+			inHunk = false
+			if i := strings.LastIndex(line, " b/"); i >= 0 {
+				files[line[i+3:]] = true
+			}
+		case strings.HasPrefix(line, "@@"):
+			inHunk = true
+		case inHunk && strings.HasPrefix(line, "+"):
+			additions++
+		case inHunk && strings.HasPrefix(line, "-"):
+			deletions++
+		}
+	}
+	return files, additions, deletions
+}
+
+func sortedKeys(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func summarizePatch(finalDiff, goldenPatch string) patchStats {
+	agent, add, del := diffFiles(finalDiff)
+	golden, gAdd, gDel := diffFiles(goldenPatch)
+	overlap, missing, extra, tests := map[string]bool{}, map[string]bool{}, map[string]bool{}, map[string]bool{}
+	for f := range agent {
+		if golden[f] {
+			overlap[f] = true
+		} else {
+			extra[f] = true
+		}
+		if testPathRe.MatchString(f) {
+			tests[f] = true
+		}
+	}
+	for f := range golden {
+		if !agent[f] {
+			missing[f] = true
+		}
+	}
+	return patchStats{
+		Files: len(agent), Additions: add, Deletions: del, ChangedFiles: sortedKeys(agent),
+		GoldenFiles: len(golden), GoldenAdditions: gAdd, GoldenDeletions: gDel,
+		OverlapFiles: sortedKeys(overlap), MissingFiles: sortedKeys(missing), ExtraFiles: sortedKeys(extra),
+		TestFilesEdited: sortedKeys(tests),
+	}
+}
+
+func summarizeTokens(a engine.AgentStats) tokenSummary {
+	t := tokenSummary{Total: a.Input + a.Output + a.CacheRead + a.CacheWrite}
+	if in := a.Input + a.CacheRead + a.CacheWrite; in > 0 {
+		r := float64(a.CacheRead) / float64(in)
+		t.CacheHitRatio = &r
+	}
+	if a.Turns > 0 {
+		c := a.CostUSD / float64(a.Turns)
+		p := float64(t.Total) / float64(a.Turns)
+		t.CostPerTurn, t.TokensPerTurn = &c, &p
+	}
+	return t
 }
 
 // toolSummary aggregates processStats.toolCalls so the judge does not count them.
@@ -149,6 +258,8 @@ func buildReports(results []engine.TaskOutcome) []taskReport {
 			NetworkStats:     r.NetworkStats,
 			Timing:           summarizeTiming(r.ProcessStats),
 			ToolUsage:        summarizeTools(r.ProcessStats.ToolCalls),
+			PatchStats:       summarizePatch(r.FinalDiff, r.GoldenPatch),
+			Tokens:           summarizeTokens(r.AgentStats),
 		}
 		if r.ValidationError != "" {
 			report.OracleError = r.ValidationError
@@ -184,6 +295,12 @@ Each element describes one task:
   slowest agent, instancesWithoutTiming how many have no duration, and timingSources how
   the durations were obtained (state the precision of any claim accordingly). It covers
   agent execution only; environment setup and the oracle run are not included.
+- patchStats: precomputed from finalDiff and goldenPatch (do not recount): files,
+  additions, deletions, changedFiles, the golden patch size (goldenFiles, goldenAdditions,
+  goldenDeletions), overlapFiles, missingFiles (only in the golden patch), extraFiles
+  (only in the agent's patch) and testFilesEdited. Test detection is by path only.
+- tokens: precomputed from agentStats: total tokens, cacheHitRatio (cacheRead over all
+  input), costPerTurnUsd and tokensPerTurn. Null means not computable.
 - toolUsage: precomputed counts of the parent session's tool calls (total, errors,
   nested, and byTool with calls and errors); the individual calls are in
   processStats.toolCalls without arguments or results. Calls made inside subagent
@@ -270,7 +387,9 @@ oracle's verdict and failure reason), goldenPatch (the reference fix, never seen
 agent), finalDiff (what the agent changed; empty means nothing; it excludes the failing
 tests the harness applied, so test edits in it were made by the agent), agentStats
 (turns, tokens, cost_usd), toolUsage (counts of the parent's tool calls by tool, with
-errors), processStats (agents by role, model, status, duration, usage;
+errors), patchStats (precomputed files, additions, deletions, overlap with the golden
+patch's files, missing and extra files, and test files edited), tokens (precomputed total,
+cache hit ratio, cost per turn, tokens per turn), processStats (agents by role, model, status, duration, usage;
 null means unavailable, never zero), timing (precomputed from processStats: wallClockMs,
 busyMs, parallelism, byRoleMs, longestInstance, instancesWithoutTiming, timingSources;
 agent execution only) and networkStats (passive packet accounting).
@@ -288,6 +407,11 @@ Method:
    - Integrity: flag editing, deleting or weakening tests, special-casing inputs,
      hard-coding outputs, or touching build or CI config. An integrity problem makes
      that side NOT FIXED regardless of the oracle.
+   - Patch: from patchStats, files and lines changed against the golden patch, files
+     missing and extra, and any testFilesEdited (an integrity concern when AFTER edits
+     tests that BEFORE did not).
+   - Tokens: total tokens, cache hit ratio, and cost and tokens per turn, with the change
+     AFTER vs BEFORE. A drop in cacheHitRatio explains a cost increase at the same turns.
    - Cost and speed: agentStats.cost_usd, turns, and timing.wallClockMs, with numbers
      in seconds and dollars, and the absolute and percentage change AFTER vs BEFORE.
      Mention models or roles only when they changed, and tools only when the mix or the
@@ -332,8 +456,8 @@ One or two sentences stating the overall verdict and the main reason.
 One Markdown table, one row per shared task, with BEFORE and AFTER side by side and
 a final row for the totals. Use exactly these columns:
 
-| Task | Before | After | Change | Cost USD (before -> after) | Turns (before -> after) | Wall clock s (before -> after) |
-|---|---|---|---|---|---|---|
+| Task | Before | After | Change | Cost USD (before -> after) | Turns (before -> after) | Wall clock s (before -> after) | Tokens (before -> after) | Cache hit % (before -> after) | Patch files / +lines / -lines (before -> after) | Test files edited (before -> after) |
+|---|---|---|---|---|---|---|---|---|---|---|
 
 - Before and After cells hold FIXED, PARTIAL or NOT FIXED plus the oracle result, for
   example "FIXED (oracle pass)".
@@ -341,8 +465,11 @@ a final row for the totals. Use exactly these columns:
   example "SAME, cheaper").
 - Show numbers as "before -> after (+/-percent)". Write "n/a" for unavailable data,
   never 0.
-- The last row, "TOTAL", sums cost, turns and wall clock over the shared tasks and
-  states the improved / regressed / same counts in its Change cell.
+- Patch cells read "files / +additions / -deletions", for example "2 / +14 / -3 -> 3 / +20 / -5".
+  Test files edited are counts, with the file names listed in the task's Evidence.
+- The last row, "TOTAL", sums cost, turns, wall clock, tokens and patch size over the
+  shared tasks, averages the cache hit rate weighted by input, and states the improved /
+  regressed / same counts in its Change cell.
 - Add a second small table for the overall result:
 
 | Metric | Before | After | Delta |
@@ -352,6 +479,12 @@ a final row for the totals. Use exactly these columns:
 | Tasks NOT FIXED | | | |
 | Total cost USD | | | |
 | Total wall clock s | | | |
+| Total tokens | | | |
+| Cache hit % (weighted) | | | |
+| Cost per fixed task USD | | | |
+| Files changed in patches | | | |
+| Lines changed in patches (+/-) | | | |
+| Test files edited | | | |
 
 ## Per task
 For each shared task:
