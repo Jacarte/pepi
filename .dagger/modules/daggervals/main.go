@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"strings"
 
 	"dagger/daggervals/internal/dagger"
 	cache "dagger/daggervals/internal/evals/cache"
@@ -100,9 +101,12 @@ func (m *Daggervals) Evals(ctx context.Context, auth *dagger.Secret, agentEnv *d
 		return nil, err
 	}
 
+	joinedEvals := strings.Join(judgedEvals, "\n")
+	finalEvalsDir := cach.GetDirectory().WithNewFile(runId+".eval.md", joinedEvals)
+
 	// return the cache folder
 	return &EvalResult{
-		Cache: cach.GetDirectory(),
+		Cache: finalEvalsDir,
 		Log:   judgedEvals,
 	}, nil
 }

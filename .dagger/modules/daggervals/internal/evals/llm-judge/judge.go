@@ -284,6 +284,31 @@ Output, in Markdown:
 ## Summary
 One or two sentences stating the overall verdict and the main reason.
 
+## Comparison table
+One Markdown table, one row per shared task, with BEFORE and AFTER side by side and
+a final row for the totals. Use exactly these columns:
+
+| Task | Before | After | Change | Cost USD (before -> after) | Turns (before -> after) | Wall clock s (before -> after) |
+|---|---|---|---|---|---|---|
+
+- Before and After cells hold FIXED, PARTIAL or NOT FIXED plus the oracle result, for
+  example "FIXED (oracle pass)".
+- Change is IMPROVED, REGRESSED or SAME, optionally with a cost or time marker (for
+  example "SAME, cheaper").
+- Show numbers as "before -> after (+/-percent)". Write "n/a" for unavailable data,
+  never 0.
+- The last row, "TOTAL", sums cost, turns and wall clock over the shared tasks and
+  states the improved / regressed / same counts in its Change cell.
+- Add a second small table for the overall result:
+
+| Metric | Before | After | Delta |
+|---|---|---|---|
+| Tasks FIXED | | | |
+| Tasks PARTIAL | | | |
+| Tasks NOT FIXED | | | |
+| Total cost USD | | | |
+| Total wall clock s | | | |
+
 ## Per task
 For each shared task:
 ### <task>
@@ -294,8 +319,8 @@ For each shared task:
 **Evidence:** short bullets on the diffs, oracle errors and integrity concerns
 
 ## Totals
-Shared tasks, improved, regressed, same, only before, only after. Total cost and total
-wall clock before -> after.
+Shared tasks, improved, regressed, same, only before, only after. The numbers must
+match the comparison table.
 
 ## Confidence and caveats
 high | medium | low, and why.
