@@ -26,6 +26,15 @@ func (HelloWorldEnvironment) PrepareEnv(ctx context.Context) dagger.WithContaine
 	}
 }
 
+func (HelloWorldEnvironment) PrepareEnvForTesting(ctx context.Context) dagger.WithContainerFunc {
+	return func(container *dagger.Container) *dagger.Container {
+		return container
+	}
+}
+
+func (HelloWorldEnvironment) GetRepo() string   { return "hello-world" }
+func (HelloWorldEnvironment) GetCommit() string { return "" }
+
 // HelloWorldTestEnv runs inside the measured exec before the agent (see TestEnvironment).
 type HelloWorldTestEnv struct{}
 
@@ -37,6 +46,10 @@ ln -s %[1]s %[2]s
 }
 
 type HelloWorldOracle struct{}
+
+func (HelloWorldEnvironment) GetFinalDiff(ctx context.Context, container *dagger.Container) string {
+	return "" // no diff to check for hello world
+}
 
 func (HelloWorldOracle) ValidateFinalAnswer(ctx context.Context, container *dagger.Container) (bool, error) {
 	// Get the stdout and log it
@@ -134,9 +147,22 @@ func checkJevDecision(lane, provider, id string, changed, escalated *bool, rawRe
 	return nil
 }
 
+// helloWorldProbeLines are the report lines the task asks the agent to print, so a run
+// shows what the container really offers. They are only read by people (the oracle logs
+// stdout); the oracle itself checks "hello world" and the Jev router log.
+var helloWorldProbeLines = []string{"TOOLS:", "SUBAGENT_TOOL:", "SUBAGENTS:", "SCOUT_CALL:", "PACKAGES:", "EXTENSIONS:", "AGENTS_MD:"}
+
 var HelloWorldTask = FixTask{
-	ProblemStatement: "Call the jev_route tool with action \"recommend\" and task \"Rename one variable in one file\" (role \"worker\" is optional). " +
-		"Then reply with the exact words hello world on the final line.",
+	ProblemStatement: "Do these steps in order and do not skip any, even when a step fails; report a failure instead of stopping.\n" +
+		"1. Call the jev_route tool with action \"recommend\" and task \"Rename one variable in one file\" (role \"worker\" is optional).\n" +
+		"2. Print one line starting with \"TOOLS:\" listing the name of every tool you can call.\n" +
+		"3. Print one line starting with \"SUBAGENT_TOOL:\" with \"available\" or \"missing\", depending on whether you have a tool named subagent.\n" +
+		"4. If it is available, call it with action \"list\" and print one line starting with \"SUBAGENTS:\" with the agent names it returns. Otherwise print \"SUBAGENTS: none\".\n" +
+		"5. If it is available, call it once with agent \"scout\" and the task \"Reply with the single word ready\", then print one line starting with \"SCOUT_CALL:\" saying ok or failed and why. Otherwise print \"SCOUT_CALL: skipped\".\n" +
+		"6. Run bash: ls /root/.pi/agent/npm/node_modules 2>&1 | head -40. Print one line starting with \"PACKAGES:\" with the names, or the error.\n" +
+		"7. Print one line starting with \"EXTENSIONS:\" with the file names in /root/.pi/agent/extensions (use bash ls).\n" +
+		"8. Print one line starting with \"AGENTS_MD:\" with yes if your context contains the global AGENTS.md rules (for example the rule about calling jev_route before substantive work), otherwise no.\n" +
+		"Finally reply with the exact words hello world on the final line.",
 	Env:     HelloWorldEnvironment{},
 	TestEnv: HelloWorldTestEnv{},
 	Oracle:  HelloWorldOracle{},

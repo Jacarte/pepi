@@ -69,3 +69,15 @@ var WasmtimeTasks = []FixTask{
 		Oracle:           WasmtimeTaskOracle{},
 	},
 }
+
+func (c WasmtimeTask) GetRepo() string { return c.Repo }
+
+func (c WasmtimeTask) GetFinalDiff(ctx context.Context, container *dagger.Container) string {
+	diff, err := container.WithWorkdir("/tmp/repo").
+		WithExec([]string{"bash", "-c", "git add -A && git diff --cached"}).
+		Stdout(ctx)
+	if err != nil {
+		return fmt.Sprintf("Error getting final diff: %v", err)
+	}
+	return diff
+}

@@ -30,22 +30,22 @@ Brevity applies to prose, never to correctness or to admitting failure.
 This file is standing operator authorization to use specialist subagents,
 including `worker`, and subagent workflows.
 
+
+
 ### Rule of thumb (mandatory routing)
 
 - `scout` before you understand the code.
 - `researcher` before you trust external facts.
 - `evidence-auditor` before you rely on important research.
-- `worker` to implement routine slices; `deep-worker` for complex, coupled, or
-  high-risk slices.
+- `worker` to implement; see "Escalating a risky `worker` slice".
 - `reviewer` to check.
 - `oracle` when the decision itself feels risky.
 
 The parent owns triage, orchestration, briefs, integration, and reporting.
-Implementation is done by `worker` subagents for routine slices and by
-`deep-worker` subagents for complex, coupled, or high-risk slices, in parallel
-when the work splits into independent slices. Trivial tasks (see Parent triage) may be done by the
+Implementation is done by `worker` subagents, in parallel when the work splits
+into independent slices. Trivial tasks (see Parent triage) may be done by the
 parent. For every nontrivial task the parent MUST: spawn `scout` before
-implementation, spawn `worker` or `deep-worker` for the change, spawn `reviewer` to check the
+implementation, spawn `worker` for the change, spawn `reviewer` to check the
 result, and add `oracle` whenever a decision is risky or consequential. Spawn
 `researcher` / `evidence-auditor` whenever external facts or research drive the
 outcome.
@@ -53,8 +53,8 @@ outcome.
 Default flow:
 
 ```text
-scout -> [researcher -> evidence-auditor] -> worker / deep-worker (parallel if independent)
-      -> parent integrates + runs checks -> reviewer -> (oracle if risky) -> worker / deep-worker fixes
+scout -> [researcher -> evidence-auditor] -> worker (parallel if independent)
+      -> parent integrates + runs checks -> reviewer -> (oracle if risky) -> worker fixes
 ```
 
 For non-code tasks, a worker or `delegate` produces the outcome when it is
@@ -75,13 +75,12 @@ orchestrates and integrates.
 - Treat open-ended discovery, coupled components, uncertain requirements,
   difficult verification, and significant security, data-loss, production, or
   architectural risk as nontrivial. Follow the rule of thumb: `scout`, then
-  `worker`/`deep-worker` slices, then `reviewer`, plus `oracle` when the
+  `worker` slices, then `reviewer`, plus `oracle` when the
   decision is risky.
 - File count and tool-call count are signals, not automatic triggers. A few
   mechanical edits can be direct; a subtle one-line fix may need a specialist.
 - If a small direct task becomes nontrivial, pause, give `scout` the existing
-  findings and partial changes, hand implementation to `worker` or
-  `deep-worker`, then obtain
+  findings and partial changes, hand implementation to `worker`, then obtain
   `reviewer` review. Do not restart discovery in the child.
 - Keep triage brief. Do not launch a workflow just to decide whether a workflow
   is needed, or narrate routine routing decisions to the user. Bounded factual
@@ -150,7 +149,7 @@ orchestrates and integrates.
   use separate calls when the parent must integrate or decide between them.
 - Spawn independent tasks concurrently within the same phase. Do not start
   result review before the workers' outcome and check evidence are ready.
-- Parallelize workers (`worker` or `deep-worker`) across independent slices using separate managed
+- Parallelize `worker` subagents across independent slices using separate managed
   worktrees; never let mutating workers edit the parent's checkout or
   overlapping files concurrently. Sequence slices that share files or contracts.
 - Never redo a child's investigation. If a child's result is insufficient,
@@ -172,8 +171,7 @@ The parent works directly only for:
 - A child or the delegation infrastructure stuck after retries. See
   "Stuck children: parent takeover" below.
 
-Everything else, including any nontrivial code change, goes to a `worker` or
-`deep-worker`.
+Everything else, including any nontrivial code change, goes to a `worker`.
 
 ## Stuck children: parent takeover
 
@@ -336,7 +334,7 @@ first.
   Do not pre-route a Herdr scout with `jev_route recommend` or pass a recommended
   model: an explicit `model` overrides the pin. Other roles' routing is unchanged.
 - The parent never edits code. It merges mechanically; conflicts go to one
-  `deep-worker` fixer pane in the integration workspace. Merged panes stay alive;
+  routed `worker` fixer pane in the integration workspace. Merged panes stay alive;
   `herdr_cleanup` removes workspaces. A lone writer's main-checkout output is never
   merged by `herdr_merge`.
 - Run-owned workspaces get a best-effort `codegraph init` before pi starts there.
@@ -350,16 +348,16 @@ first.
 
 ## Default routing
 
-Apply parent triage first. Nontrivial tasks require `scout`, a worker (`worker` or `deep-worker`), and `reviewer`; add `oracle` for risky decisions.
+Apply parent triage first. Nontrivial tasks require `scout`, `worker`, and `reviewer`; add `oracle` for risky decisions.
 Spawn additional specialists whenever their expertise is needed for a material
 gap; do not substitute them for the mandatory roles. Implementation goes to
-`worker` or `deep-worker`, in parallel when slices are independent.
+`worker`, in parallel when slices are independent.
 
 | Work | Agent |
 | --- | --- |
 | Find code, files, symbols, call paths, "where is X" | `scout` (CodeGraph-first when indexed) |
 | Routine code change, run the checks for that change | `worker` (parallel when independent) |
-| Complex, coupled, security-sensitive, or high-risk code change | `deep-worker` (parallel when independent) |
+| Complex, coupled, security-sensitive, or high-risk code change | `worker` (see "Escalating a risky `worker` slice") |
 | Check a nontrivial result, diff, plan, or solution | `reviewer` (mandatory) |
 | External docs, web, version or API questions (before trusting external facts) | `researcher` |
 | Risky decision, contradiction, decision drift, consequential trade-off | `oracle` |
@@ -371,9 +369,6 @@ pi-subagents roles:
 
 - `scout`: focused local code discovery and a compact implementation handoff.
 - `worker`: routine implementation and appropriate executable checks for its slice.
-- `deep-worker`: high-capability implementation for complex, coupled, or
-  high-risk slices: root-cause diagnosis, invariant-preserving changes,
-  regression tests, and broader verification. Same contract as `worker`.
 - `reviewer`: read-only review of a diff, plan, or proposed solution. Supply the
   exact review target and check results; the parent or worker runs commands.
 - `oracle`: read-only review for risky or consequential decisions, focused on
@@ -388,9 +383,10 @@ pi-subagents roles:
   research claims, not routine code verification.
 - `delegate`: a focused general task that does not need a specialist.
 
-### Choosing `worker` vs `deep-worker`
+### Escalating a risky `worker` slice
 
-Default to `worker`. Use `deep-worker` when any trigger applies to the slice:
+Every `worker` launch is routed per the model quality guardrail. A slice is
+risky when any trigger applies:
 
 - Touches concurrency, auth/security, data integrity or migrations, or
   production-critical paths.
@@ -401,11 +397,16 @@ Default to `worker`. Use `deep-worker` when any trigger applies to the slice:
   verification are harder to bound.
 - A prior `worker` attempt on the slice failed or was rejected by `reviewer`.
 
-When in doubt between the two for a risky slice, choose `deep-worker`. Briefs
-for out-of-cwd work must name every external path explicitly as owned scope.
+For a risky slice, put the triggers and blast-radius evidence in the
+`jev_route recommend` context. After a failed or rejected attempt, call
+`recommend` again with the failure or review evidence (a material change) and
+launch a fresh `worker`; if the returned model equals the failed attempt's,
+pass a stronger configured one (e.g. the `FRONTIER` lane in
+`models-router.json`) instead of retrying the same model. Briefs for out-of-cwd
+work must name every external path explicitly as owned scope.
 
 Do not assume `explore` exists. The nontrivial-task baseline is mandatory:
-`scout` discovery, `worker`/`deep-worker` implementation, then `reviewer` check. `oracle`,
+`scout` discovery, `worker` implementation, then `reviewer` check. `oracle`,
 `researcher`, and `evidence-auditor` are added per the rule of thumb. Reuse
 established context and keep each handoff bounded.
 
@@ -433,7 +434,7 @@ this rule; the discovery owner checks once if its status is unknown.
 ## Delegate ownership, not duplicate work
 
 - Delegate coherent discovery, advisory, or review outcomes rather than tiny
-  fragments; coupled changes go to a single `worker` or `deep-worker`.
+  fragments; coupled changes go to a single `worker`.
   Specialists other than workers are read-only. Parallelize workers only for
   genuinely independent work with non-overlapping write ownership. Assign shared
   interfaces, fixtures, generated files, and reports to one executor, or finish

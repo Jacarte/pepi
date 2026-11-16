@@ -21,7 +21,7 @@ type Effort = (typeof EFFORT_OPTIONS)[number];
 const BLAST_RADIUS_OPTIONS = ["contained", "cross_cutting", "critical"] as const;
 type BlastRadiusOption = (typeof BLAST_RADIUS_OPTIONS)[number];
 const ROLES = [
-  "parent", "scout", "worker", "deep-worker", "reviewer", "oracle",
+  "parent", "scout", "worker", "reviewer", "oracle",
   "researcher", "evidence-auditor", "delegate",
 ] as const;
 type ChoiceAnswer<Option extends string> = {

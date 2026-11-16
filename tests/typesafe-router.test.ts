@@ -22,7 +22,7 @@ const lanes = ["LOCAL", "CHEAP", "FRONTIER"];
 const laneOptions = ["local", "cheap", "frontier"];
 const blastRadiusOptions = ["contained", "cross_cutting", "critical"];
 const effortOptions = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
-const roles = ["parent", "scout", "worker", "deep-worker", "reviewer", "oracle",
+const roles = ["parent", "scout", "worker", "reviewer", "oracle",
   "researcher", "evidence-auditor", "delegate"];
 const js = stripTypeScriptTypes(source)
   .replace(/^import .* from ".*";\s*$/gm, "")
@@ -432,7 +432,7 @@ test("result details, content text and rendering use the Choice contract", async
 
 test("router.log keeps the header, raw response and decision line contract", async () => {
   const h = setup({ answers: answersFor("local", "critical") });
-  await h.run({ role: "deep-worker" });
+  await h.run({ role: "worker" });
   assert.equal(h.logs.length, 2);
   for (const entry of h.logs) assert.equal(entry.path, join(root, "logs", "router.log"));
   const [header, raw] = h.logs[0].data.split("\n").filter((line) => line && !/^=+$/.test(line));
@@ -441,7 +441,7 @@ test("router.log keeps the header, raw response and decision line contract", asy
   const [decisionLine, task] = h.logs[1].data.split("\n").filter((line) => line && !/^=+$/.test(line));
   assert.deepEqual(JSON.parse(decisionLine), {
     lane: "FRONTIER", ...profiles.codex.FRONTIER, action: "recommend", changed: false,
-    escalated: true, reason: "critical", role: "deep-worker",
+    escalated: true, reason: "critical", role: "worker",
   });
   assert.equal(task, "diagnose a failure");
   // Logging is best-effort and never breaks routing.

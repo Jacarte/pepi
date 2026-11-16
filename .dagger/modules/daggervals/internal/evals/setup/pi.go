@@ -1,6 +1,12 @@
 package setup
 
-import "dagger/daggervals/internal/dagger"
+import (
+	"context"
+	"crypto/sha256"
+	"dagger/daggervals/internal/dagger"
+	"encoding/hex"
+	"strings"
+)
 
 type PiSetup struct {
 	Workspace *dagger.Directory
@@ -30,9 +36,17 @@ func (c *PiSetup) Setup() dagger.WithContainerFunc {
 			// Copy the workspace to the container
 			container = container.WithMountedDirectory("/root/.pi/agent", c.Workspace).
 				WithMountedSecret("/root/.pi/agent/auth.json", c.Auth).
-				// TODO read the profile from an ENV passed here
 				WithExec([]string{"/root/.pi/agent/profile.sh", c.Profile})
+			// TODO install ketch
+			// TODO install herdr
 		}
+		// FIXME
+		// remove the current /Users/<user/.pi in the settings.json fixed extension paths
+		// in favor of /root/.pi after copying settings.json to the root folder
+		container = container.WithExec([]string{"bash", "-c", `
+					sed -i 's|/Users/[^/]*/.pi|/root/.pi|g' /root/.pi/agent/settings.json
+			`})
+
 		if c.Env != nil {
 			container = container.WithEnvFileVariables(c.Env)
 		}
@@ -42,4 +56,34 @@ func (c *PiSetup) Setup() dagger.WithContainerFunc {
 		// Return the container with the setup done
 		return container
 	}
+}
+
+func (c *PiSetup) GetSetupId(ctx context.Context, container *dagger.Container) (string, error) {
+
+	withFilesContainer := container.WithDirectory("/root/.pi/agent", c.Workspace)
+
+	// Hash only the files that define the agent setup. Volatile workspace files
+	// (budget history, caches, run history, ...) must not change the run ID.
+	// Root settings.json/mcp.json/models-router.json are overlaid by the profile,
+	// so the profile directory is hashed instead.
+	shaFolder, err := withFilesContainer.WithExec([]string{"bash", "-c", `
+cd /root/.pi/agent || exit 1
+paths=()
+for p in AGENTS.md profile.sh extensions skills prompts workflows "profiles/$1" .dagger; do
+  [ -e "$p" ] && paths+=("$p")
+done
+find "${paths[@]}" -type f -not -path '*/node_modules/*' -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1
+`, "_", c.Profile}).Stdout(ctx)
+	if err != nil {
+		return "", err
+	}
+
+	envContent, err := c.Env.AsFile().Contents(ctx)
+	if err != nil {
+		return "", err
+	}
+	// The final id is sha256(workspace sha + env content + profile name), hex, no newline.
+	sum := sha256.Sum256([]byte(strings.TrimSpace(shaFolder) + envContent + c.Profile))
+	return hex.EncodeToString(sum[:]), nil
+
 }

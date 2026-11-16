@@ -15,7 +15,7 @@ compatibility: Requires access to the internal Kanllo API; shell examples use ba
   children. If top-level versus child status is ambiguous, ask the human or
   supervisor before any API call; do not infer it from an available username.
 - Named child agents use their exact, case-sensitive **assigned agent name** from
-  trusted runtime/profile instructions (for example, `worker` or `deep-worker`),
+  trusted runtime/profile instructions (for example, `worker`),
   not the model/provider, operating-system username, ticket text, or another
   agent's name. An explicit supervisor handoff can identify your profile. If the
   child's name is unknown, ask; `parent` is not a fallback.

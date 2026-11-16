@@ -14,13 +14,24 @@ import (
 
 type PiAgent struct {
 	command []string
+	Setter  Setup
+}
+
+// Receives a container,
+// it writes files to corresponding folders
+// Notice this is not the same as the Environment,
+// this is just for the agent to write its files
+// where it feels it is the right place
+type Setup interface {
+	Setup() dagger.WithContainerFunc
 }
 
 const processReportPath = "/tmp/daggervals-process.jsonl"
 
-func NewPiAgent() *PiAgent {
+func NewPiAgent(setter Setup) *PiAgent {
 	return &PiAgent{
 		command: []string{"pi"},
+		Setter:  setter,
 	}
 }
 
@@ -31,6 +42,10 @@ func (agent *PiAgent) CallPrompt(container *dagger.Container, prompt string) *da
 	concatCommand := append(append([]string{}, agent.command...), "-p", prompt)
 	return container.
 		WithExec(concatCommand)
+}
+
+func (agent *PiAgent) Setup() dagger.WithContainerFunc {
+	return agent.Setter.Setup()
 }
 
 // Run a task and return the container with the
@@ -58,7 +73,7 @@ func (agent *PiAgent) GetStats(ctx context.Context, container *dagger.Container)
 // Pi transcripts or pi-subagents internals. A completion marker rejects partial logs.
 func parsePiStats(contents string) (engine.AgentStats, engine.ProcessStats, error) {
 	var stats engine.AgentStats
-	processes := engine.ProcessStats{Groups: []engine.ProcessGroup{}, BackgroundProcesses: []engine.ProcessResource{}, Warnings: []string{}}
+	processes := engine.ProcessStats{Groups: []engine.ProcessGroup{}, BackgroundProcesses: []engine.ProcessResource{}, Warnings: []string{}, ToolCalls: []engine.ToolCall{}}
 	groups := make(map[string]int)
 	complete, parentSeen := false, false
 	decoder := json.NewDecoder(strings.NewReader(contents))
@@ -70,6 +85,7 @@ func parsePiStats(contents string) (engine.AgentStats, engine.ProcessStats, erro
 			AgentStats engine.AgentStats      `json:"agentStats"`
 			Instance   engine.ProcessInstance `json:"instance"`
 			Process    engine.ProcessResource `json:"process"`
+			ToolCall   engine.ToolCall        `json:"toolCall"`
 			Message    string                 `json:"message"`
 		}
 		err := decoder.Decode(&record)
@@ -105,6 +121,11 @@ func parsePiStats(contents string) (engine.AgentStats, engine.ProcessStats, erro
 			processes.Groups[index].Instances = append(processes.Groups[index].Instances, record.Instance)
 		case "background_process":
 			processes.BackgroundProcesses = append(processes.BackgroundProcesses, record.Process)
+		case "tool_call":
+			if record.ToolCall.Tool == "" {
+				return stats, processes, fmt.Errorf("Pi process stats invalid tool call")
+			}
+			processes.ToolCalls = append(processes.ToolCalls, record.ToolCall)
 		case "warning":
 			processes.Warnings = append(processes.Warnings, record.Message)
 		case "complete":

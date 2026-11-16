@@ -9,7 +9,7 @@ import * as path from "node:path";
 // Constants and shared types
 
 export const ROLE_NAMES = [
-  "scout", "worker", "deep-worker", "reviewer", "oracle", "researcher", "evidence-auditor", "delegate",
+  "scout", "worker", "reviewer", "oracle", "researcher", "evidence-auditor", "delegate",
 ] as const;
 export type RoleName = (typeof ROLE_NAMES)[number];
 
@@ -1620,12 +1620,12 @@ export function createHerdrCollab(deps: CollabDeps) {
     let run = readRun(deps.wsRoot, runId);
     const open = run.panes.find((pane) => pane.kind === "fixer" && isOpen(pane));
     if (open) return open;
-    const role = resolveRole("deep-worker", deps);
+    const role = resolveRole("worker", deps);
     const choice = await chooseModel({ model, task: brief }, role, ctx);
     let name = "fixer";
     for (let n = 2; run.panes.some((pane) => pane.name === name); n++) name = `fixer-${n}`;
     const pane: PaneRecord = {
-      name, kind: "fixer", role: "deep-worker", agentName: `${run.runId}-${name}`,
+      name, kind: "fixer", role: "worker", agentName: `${run.runId}-${name}`,
       model: choice.model, routed: choice.routed, lane: choice.lane, modelSource: choice.source, modelNote: choice.note,
       cwd: subdirOf(run, run.integration!.path), placement: "integration", readOnly: false, messaging: !role.readOnly,
       status: "starting", task: brief, createdAt: new Date().toISOString(),
@@ -1672,7 +1672,20 @@ export function createHerdrCollab(deps: CollabDeps) {
         const inMerge = (await deps.exec("git", ["rev-parse", "-q", "--verify", "MERGE_HEAD"], { cwd: ws, signal })).code === 0;
         if (!conflicts.length && inMerge) await vcs("git", ["commit", "--no-edit", "-q"], ws, signal);
       }
-      if (conflicts.length) return { runId, status: "conflict" as const, files: conflicts, workers: pending.workers, fixer: run.panes.find((p) => p.kind === "fixer" && isOpen(p))?.name };
+      if (conflicts.length) {
+        let fixer = run.panes.find((p) => p.kind === "fixer" && isOpen(p));
+        let fixerError: string | undefined;
+        // A routing failure on the first merge leaves no fixer; retry it here so the run cannot stay stuck.
+        if (!fixer && params.spawnFixer !== false) {
+          try {
+            const sides = await pendingSides(run, pending.workers, signal);
+            fixer = await spawnFixer(runId, fixerBrief(run, conflicts, sides), params.fixerModel, ctx);
+          } catch (error) {
+            fixerError = errorText(error);
+          }
+        }
+        return { runId, status: "conflict" as const, files: conflicts, workers: pending.workers, fixer: fixer?.name, fixerError };
+      }
       const head = await sealIntegration(run, pending.workers, signal);
       await updateRun(deps, runId, (record) => {
         for (const name of pending.workers) {
@@ -1792,6 +1805,22 @@ export function createHerdrCollab(deps: CollabDeps) {
       }
     }
     return { runId, status: "conflict" as const, files: conflicts, workers: conflicted, remaining, unchanged, fixer: fixer?.name, fixerError };
+  }
+
+  // Changed files of each conflicted worker, from its base to the head that herdr_merge integrated.
+  async function pendingSides(run: RunRecord, workers: string[], signal?: AbortSignal): Promise<Array<{ pane: PaneRecord; files: string[]; stat: string }>> {
+    const sides: Array<{ pane: PaneRecord; files: string[]; stat: string }> = [];
+    for (const name of workers) {
+      const pane = run.panes.find((candidate) => candidate.name === name);
+      const ws = pane?.workspace;
+      if (!pane || !ws?.mergedHead) continue;
+      const out = ws.vcs === "jj"
+        ? await vcs("jj", ["--ignore-working-copy", "diff", "--name-only", "--from", ws.base, "--to", ws.mergedHead], run.repoRoot!, signal)
+        : await vcs("git", ["diff", "--name-only", ws.base, ws.mergedHead], run.integration!.path, signal);
+      const files = out.split("\n").filter(Boolean);
+      sides.push({ pane, files, stat: files.join("\n") });
+    }
+    return sides;
   }
 
   async function jjEditedAfterSeal(integrationPath: string, signal?: AbortSignal): Promise<boolean> {

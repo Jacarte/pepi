@@ -16,7 +16,8 @@ type Daggervals struct { // daggervals (../../../../../../:0:0)
 	// field again.
 	refetchID bool
 
-	id *ID
+	hello *string
+	id    *ID
 }
 
 func (r *Daggervals) WithGraphQLQuery(q *querybuilder.Selection) *Daggervals {
@@ -37,18 +38,49 @@ func (r *Daggervals) Auth() *Secret {
 	}
 }
 
-func (r *Daggervals) Evals(ctx context.Context, auth *Secret, agentEnv *File, agentProfile string) ([]string, error) {
+func (r *Daggervals) CompareEvals(ctx context.Context, auth *Secret, agentEnv *File, agentProfile string, before *File, after *File) ([]string, error) {
 	assertNotNil("auth", auth)
 	assertNotNil("agentEnv", agentEnv)
-	q := r.query.Select("evals")
+	assertNotNil("before", before)
+	assertNotNil("after", after)
+	q := r.query.Select("compareEvals")
 	q = q.Arg("auth", auth)
 	q = q.Arg("agentEnv", agentEnv)
 	q = q.Arg("agentProfile", agentProfile)
+	q = q.Arg("before", before)
+	q = q.Arg("after", after)
 
 	var response []string
 
 	q = q.Bind(&response)
 	return response, q.Execute(ctx)
+}
+
+// DaggervalsEvalsOpts contains options for Daggervals.Evals
+type DaggervalsEvalsOpts struct {
+	Fixed string
+}
+
+func (r *Daggervals) Evals(auth *Secret, agentEnv *File, agentProfile string, cacheDir *Directory, opts ...DaggervalsEvalsOpts) *DaggervalsEvalResult {
+	assertNotNil("auth", auth)
+	assertNotNil("agentEnv", agentEnv)
+	assertNotNil("cacheDir", cacheDir)
+	q := r.query.Select("evals")
+	for i := len(opts) - 1; i >= 0; i-- {
+		// `fixed` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Fixed) {
+			q = q.Arg("fixed", opts[i].Fixed)
+		}
+	}
+	q = q.Arg("auth", auth)
+	q = q.Arg("agentEnv", agentEnv)
+	q = q.Arg("agentProfile", agentProfile)
+	q = q.Arg("cacheDir", cacheDir)
+
+	return &DaggervalsEvalResult{
+		query:     q,
+		refetchID: r.refetchID,
+	}
 }
 
 // GenerateImage returns a container with pi and the selected profile baked in.
@@ -64,15 +96,18 @@ func (r *Daggervals) GenerateImage(agentProfile string) *Container {
 	}
 }
 
-func (r *Daggervals) Hello(ctx context.Context, auth *Secret, agentEnv *File, agentProfile string) ([]string, error) {
+func (r *Daggervals) Hello(ctx context.Context, auth *Secret, agentEnv *File, agentProfile string) (string, error) {
 	assertNotNil("auth", auth)
 	assertNotNil("agentEnv", agentEnv)
+	if r.hello != nil {
+		return *r.hello, nil
+	}
 	q := r.query.Select("hello")
 	q = q.Arg("auth", auth)
 	q = q.Arg("agentEnv", agentEnv)
 	q = q.Arg("agentProfile", agentProfile)
 
-	var response []string
+	var response string
 
 	q = q.Bind(&response)
 	return response, q.Execute(ctx)
@@ -140,6 +175,109 @@ func (r *Daggervals) Source() *Directory {
 		query:     q,
 		refetchID: r.refetchID,
 	}
+}
+
+func (r *Daggervals) TestCacheWrite(cacheDir *Directory) *Directory {
+	assertNotNil("cacheDir", cacheDir)
+	q := r.query.Select("testCacheWrite")
+	q = q.Arg("cacheDir", cacheDir)
+
+	return &Directory{
+		query:     q,
+		refetchID: r.refetchID,
+	}
+}
+
+type DaggervalsEvalResult struct { // daggervals (../../../../../../:0:0)
+	query *querybuilder.Selection
+	// refetchID is set when this object is built through a field marked
+	// @reevaluate: it fetches its ID on every use, so each use evaluates that
+	// field again.
+	refetchID bool
+
+	id *ID
+}
+
+func (r *DaggervalsEvalResult) WithGraphQLQuery(q *querybuilder.Selection) *DaggervalsEvalResult {
+	return &DaggervalsEvalResult{
+		query: q,
+		// The query's origin is unknown: it may go through a field that
+		// must be reevaluated.
+		refetchID: true,
+	}
+}
+
+func (r *DaggervalsEvalResult) Cache() *Directory {
+	q := r.query.Select("cache")
+
+	return &Directory{
+		query:     q,
+		refetchID: r.refetchID,
+	}
+}
+
+// A unique identifier for this DaggervalsEvalResult.
+func (r *DaggervalsEvalResult) ID(ctx context.Context) (ID, error) {
+	if r.id != nil {
+		return *r.id, nil
+	}
+	q := r.query.Select("id")
+
+	var response ID
+
+	q = q.Bind(&response)
+	if r.refetchID {
+		return response, q.Execute(ctx)
+	}
+	return memoizedID(ctx, r.query, func() (ID, error) {
+		err := q.Execute(ctx)
+		return response, err
+	})
+}
+
+// XXX_GraphQLType is an internal function. It returns the native GraphQL type name
+func (r *DaggervalsEvalResult) XXX_GraphQLType() string {
+	return "DaggervalsEvalResult"
+}
+
+// XXX_GraphQLIDType is an internal function. It returns the native GraphQL type name for the ID of this object
+func (r *DaggervalsEvalResult) XXX_GraphQLIDType() string {
+	return "ID"
+}
+
+// XXX_GraphQLID is an internal function. It returns the underlying type ID
+func (r *DaggervalsEvalResult) XXX_GraphQLID(ctx context.Context) (string, error) {
+	id, err := r.ID(ctx)
+	if err != nil {
+		return "", err
+	}
+	return string(id), nil
+}
+
+func (r *DaggervalsEvalResult) MarshalJSON() ([]byte, error) {
+	id, err := r.ID(marshalCtx)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(id)
+}
+func (r *DaggervalsEvalResult) UnmarshalJSON(bs []byte) error {
+	var id string
+	err := json.Unmarshal(bs, &id)
+	if err != nil {
+		return err
+	}
+	*r = DaggervalsEvalResult{query: selectNode(dag.QueryBuilder(), id, "DaggervalsEvalResult")}
+	return nil
+}
+
+func (r *DaggervalsEvalResult) Log(ctx context.Context) ([]string, error) {
+	q := r.query.Select("log")
+
+	var response []string
+
+	q = q.Bind(&response)
+	return response, q.Execute(ctx)
 }
 
 func (r *Query) Daggervals(ws *Workspace) *Daggervals { // daggervals (../../../../../../:0:0)
