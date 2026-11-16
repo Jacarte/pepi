@@ -10,27 +10,25 @@ import (
 	tasks "dagger/daggervals/internal/evals/task"
 )
 
-// Receives a container,
-// it writes files to corresponding folders
-// Notice this is not the same as the Environment,
-// this is just for the agent to write its files
-// where it feels it is the right place
-type Setup interface {
-	Setup() dagger.WithContainerFunc
-}
-
 // Receives a container
 // Calls the LLM to generate code
 type LLM interface {
 	CallPrompt(container *dagger.Container, prompt string) *dagger.Container
 	TaskCommand(task tasks.FixTask) []string
 	GetStats(ctx context.Context, container *dagger.Container) (AgentStats, ProcessStats, error)
+	Setup() dagger.WithContainerFunc
+}
+
+type Cache interface {
+	// Empty means nothing from the cache
+	Get(id string) ([]TaskOutcome, error)
+	Set(id string, outcomes []TaskOutcome) error
 }
 
 type Engine struct {
-	Agent  LLM
-	Setter Setup
-	Tasks  []tasks.FixTask
+	Agent LLM
+	Cache Cache
+	Tasks []tasks.FixTask
 }
 
 type AgentStats struct {
@@ -96,36 +94,58 @@ type NetworkStats = network.Stats
 
 // TaskOutcome keeps verification failures as data so callers can still report stats.
 type TaskOutcome struct {
-	Task string
+	Task             string
+	ProblemStatement string
 
 	AgentStats      AgentStats
 	ProcessStats    ProcessStats
 	NetworkStats    NetworkStats
 	Valid           bool
-	ValidationError error
+	ValidationError string
+	GoldenPatch     string
+	FinalDiff       string
 }
 
-func NewEngine(agent LLM, setter Setup, tasks []tasks.FixTask) *Engine {
+func NewEngine(agent LLM, tasks []tasks.FixTask, cache Cache) *Engine {
 	return &Engine{
-		Agent:  agent,
-		Setter: setter,
-		Tasks:  tasks,
+		Agent: agent,
+		Tasks: tasks,
+		Cache: cache,
 	}
 }
 
-func (e *Engine) Run(ctx context.Context, container *dagger.Container) ([]TaskOutcome, error) {
+func (e *Engine) Run(ctx context.Context, container *dagger.Container, runId string) ([]TaskOutcome, error) {
+
+	if e.Cache != nil {
+		if runId != "" {
+			if cached, err := e.Cache.Get(runId); err == nil && len(cached) > 0 {
+				return cached, nil
+			} else if err != nil {
+				return nil, fmt.Errorf("read cache for run %s: %w", runId, err)
+			}
+		}
+	}
+
 	outcomes := make([]TaskOutcome, 0, len(e.Tasks))
 	// Pi provisioning and toolchains are outside the capture window.
-	setupFunc, err := e.Setter.Setup()(container).Sync(ctx)
+	setupFunc, err := e.Agent.Setup()(container).Sync(ctx)
 	if err != nil {
 		return outcomes, err
 	}
+
+	var preparedEnv *dagger.Container
+
 	for _, task := range e.Tasks {
 		setupFunc = task.Env.PrepareEnv(ctx)(setupFunc)
-		prepared, err := setupFunc.Sync(ctx)
-		if err != nil {
-			return outcomes, err
+		if preparedEnv == nil {
+			preparedEnv, err = setupFunc.Sync(ctx)
+			if err != nil {
+				return outcomes, err
+			}
 		}
+
+		prepared := task.Env.PrepareEnvForTesting(ctx)(preparedEnv)
+
 		var testEnvScript string
 		if task.TestEnv != nil {
 			testEnvScript, err = task.TestEnv.Script(ctx)
@@ -148,31 +168,51 @@ func (e *Engine) Run(ctx context.Context, container *dagger.Container) ([]TaskOu
 		agentStats, processStats, agentErr := e.Agent.GetStats(ctx, result)
 		statsErr := errors.Join(agentErr, networkErr)
 		if agentErr == nil {
-			fmt.Printf("Task %s stats: %+v\n", task.Baseline.Repo, agentStats)
+			fmt.Printf("Task %s stats: %+v\n", task.Env.GetRepo(), agentStats)
 		}
 		// Verify the final answer even if stats extraction failed.
 		valid, validationErr := task.Oracle.ValidateFinalAnswer(ctx, result)
 		if validationErr != nil {
-			validationErr = fmt.Errorf("task %s validation: %w", task.Baseline.Repo, validationErr)
+			validationErr = fmt.Errorf("task %s validation: %w", task.Env.GetRepo(), validationErr)
 		} else if !valid {
-			validationErr = fmt.Errorf("task %s failed validation", task.Baseline.Repo)
+			validationErr = fmt.Errorf("task %s failed validation", task.Env.GetRepo())
+		}
+		// get the final diff
+		finalDiff := task.Env.GetFinalDiff(ctx, result)
+		validationError := ""
+		if validationErr != nil {
+			validationError = validationErr.Error()
 		}
 		outcomes = append(outcomes, TaskOutcome{
-			Task:            task.Baseline.Repo,
-			AgentStats:      agentStats,
-			ProcessStats:    processStats,
-			NetworkStats:    networkStats,
-			Valid:           valid && validationErr == nil,
-			ValidationError: validationErr,
+			Task:             task.Env.GetRepo(),
+			ProblemStatement: task.ProblemStatement,
+			AgentStats:       agentStats,
+			ProcessStats:     processStats,
+			NetworkStats:     networkStats,
+			Valid:            valid && validationErr == nil,
+			ValidationError:  validationError,
+			GoldenPatch:      task.GoldenPatch,
+			FinalDiff:        finalDiff,
 		})
 		if statsErr != nil {
 			return outcomes, errors.Join(statsErr, validationErr)
 		}
 		// Preserve fail-fast execution, but let callers serialize failed verification.
 		if validationErr != nil {
-			return outcomes, nil
+			return outcomes, e.saveCache(runId, outcomes)
 		}
 	}
 
-	return outcomes, nil
+	return outcomes, e.saveCache(runId, outcomes)
+}
+
+// saveCache stores a completed run (including failed validation) so it can be exported.
+func (e *Engine) saveCache(runId string, outcomes []TaskOutcome) error {
+	if e.Cache == nil || runId == "" {
+		return nil
+	}
+	if err := e.Cache.Set(runId, outcomes); err != nil {
+		return fmt.Errorf("write cache for run %s: %w", runId, err)
+	}
+	return nil
 }

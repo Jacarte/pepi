@@ -5,17 +5,14 @@ import (
 	"dagger/daggervals/internal/dagger"
 )
 
-type Baseline struct {
-	Repo       string
-	BaseCommit string
-	Version    string
-}
-
 // This preinstall all that is needed
 // for the repo of the task to be in its home
 // cargo, etc
 type Environment interface {
 	PrepareEnv(ctx context.Context) dagger.WithContainerFunc
+	PrepareEnvForTesting(ctx context.Context) dagger.WithContainerFunc
+	GetRepo() string
+	GetFinalDiff(ctx context.Context, container *dagger.Container) string
 }
 
 // TestEnvironment supplies bash setup (checkout, patch, failing tests) to run
@@ -40,15 +37,12 @@ type Oracle interface {
 // 5. Run the original tests with the fix (this is the oracle) to validate the fix is correct
 
 type FixTask struct {
-	// Expected patch
-	GoldPatch string
+	GoldenPatch string
 
 	ProblemStatement string
 	// The command the agent needs to execute to
 	// test the fix is correct
-	HowToTest string
-
-	Baseline Baseline
+	EvalTest string
 
 	Env Environment
 

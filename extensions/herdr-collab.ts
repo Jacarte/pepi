@@ -200,7 +200,7 @@ export default function (pi: ExtensionAPI) {
     description:
       `${optIn} Mechanically integrate finished worker workspaces: jj new w1 w2 ... in ~/.herdr-ws/<run>/integration ` +
       "(git: sequential merges). Clean: seal the change and mark panes merged (panes and workspaces stay alive). Conflict: " +
-      "spawn one deep-worker fixer in the integration workspace; after it finishes, call herdr_merge with no workers to re-check.",
+      "spawn one worker fixer (model routed like a normal worker unless fixerModel is given) in the integration workspace; after it finishes, call herdr_merge with no workers to re-check.",
     executionMode: "sequential",
     parameters: Type.Object({
       runId,

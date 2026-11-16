@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 
 	"dagger/daggervals/internal/dagger"
+	cache "dagger/daggervals/internal/evals/cache"
 	"dagger/daggervals/internal/evals/engine"
 	"dagger/daggervals/internal/evals/llm"
+	judge "dagger/daggervals/internal/evals/llm-judge"
+
 	"dagger/daggervals/internal/evals/setup"
 	"dagger/daggervals/internal/evals/task"
 )
@@ -34,83 +37,137 @@ func New(
 				"web-search-cache",
 				"bin",
 				"auth.json",
+				"evals_cache",
 			},
 		}),
 	}
 }
 
-func (m *Daggervals) Hello(ctx context.Context, auth *dagger.Secret, agentEnv *dagger.File, agentProfile string) ([]string, error) {
-	rootContainer, err := dag.Container().
-		From("ubuntu:24.04").
-		// install nodejs, npm, and git
-		WithExec([]string{"apt-get", "update"}).
-		WithExec([]string{"env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "install", "-y", "git", "curl", "tcpdump", "tshark"}).
-		WithExec([]string{"curl", "-fsSL", "https://deb.nodesource.com/setup_24.x", "-o", "nodesource_setup.sh"}).
-		WithExec([]string{"bash", "nodesource_setup.sh"}).
-		WithExec([]string{"apt-get", "install", "-y", "nodejs"}).
-		// check npm version
-		WithExec([]string{"npm", "--version"}).
-		// TODO, install ketch
-		Sync(ctx)
+type EvalResult struct {
+	Log   []string
+	Cache *dagger.Directory
+}
+
+func (m *Daggervals) Hello(ctx context.Context, auth *dagger.Secret, agentEnv *dagger.File, agentProfile string, cacheDir *dagger.Directory) ([]string, error) {
+	rootContainer, err := rootImage().Sync(ctx)
 
 	if err != nil {
 		return nil, err
 	}
 
 	evalEngine := engine.NewEngine(
-		llm.NewPiAgent(),
-		&setup.PiSetup{Workspace: m.Source, Auth: auth, Env: agentEnv.AsEnvFile(), Profile: agentProfile},
+		llm.NewPiAgent(&setup.PiSetup{Workspace: m.Source, Auth: auth, Env: agentEnv.AsEnvFile(), Profile: agentProfile}),
 		[]task.FixTask{task.HelloWorldTask},
+		nil, // no cache
 	)
-	outcomes, err := evalEngine.Run(ctx, rootContainer)
+	outcomes, err := evalEngine.Run(ctx, rootContainer, "noul")
 	if err != nil {
 		return nil, err
 	}
 	return serializeTaskOutcomes(outcomes)
 }
 
-func (m *Daggervals) Evals(ctx context.Context, auth *dagger.Secret, agentEnv *dagger.File, agentProfile string) ([]string, error) {
-	rootContainer, err := dag.Container().
-		From("ubuntu:24.04").
-		// install nodejs, npm, and git
-		WithExec([]string{"apt-get", "update"}).
-		WithExec([]string{"env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "install", "-y", "git", "curl", "tcpdump", "tshark"}).
-		WithExec([]string{"curl", "-fsSL", "https://deb.nodesource.com/setup_24.x", "-o", "nodesource_setup.sh"}).
-		WithExec([]string{"bash", "nodesource_setup.sh"}).
-		WithExec([]string{"apt-get", "install", "-y", "nodejs"}).
-		// check npm version
-		WithExec([]string{"npm", "--version"}).
-		// TODO, install ketch
-		Sync(ctx)
+func (m *Daggervals) Evals(ctx context.Context, auth *dagger.Secret, agentEnv *dagger.File, agentProfile string, cacheDir *dagger.Directory) (*EvalResult, error) {
+	rootContainer, err := rootImage().Sync(ctx)
 
 	if err != nil {
 		return nil, err
 	}
+	piSetup := setup.PiSetup{Workspace: m.Source, Auth: auth, Env: agentEnv.AsEnvFile(), Profile: agentProfile}
+	piAgent := llm.NewPiAgent(&piSetup)
+
+	cach := cache.NewGHCache(cacheDir, ctx)
 
 	evalEngine := engine.NewEngine(
-		llm.NewPiAgent(),
-		&setup.PiSetup{Workspace: m.Source, Auth: auth, Env: agentEnv.AsEnvFile(), Profile: agentProfile},
-		[]task.FixTask{task.HelloWorldTask},
+		piAgent,
+		task.RustTasks,
+		cach,
 	)
-	outcomes, err := evalEngine.Run(ctx, rootContainer)
+	// return the Sha
+	runId, err := piSetup.GetSetupId(ctx, rootContainer)
 	if err != nil {
 		return nil, err
 	}
-	return serializeTaskOutcomes(outcomes)
+
+	outcomes, err := evalEngine.Run(ctx, rootContainer, runId)
+	if err != nil {
+		return nil, err
+	}
+	// llm judge
+	judge := &judge.Judge{Agent: piAgent}
+	judgedEvals, err := judge.Judge(ctx, outcomes, rootContainer)
+	if err != nil {
+		return nil, err
+	}
+
+	// return the cache folder
+	return &EvalResult{
+		Cache: cach.GetDirectory(),
+		Log:   judgedEvals,
+	}, nil
+}
+
+func (m *Daggervals) TestCacheWrite(ctx context.Context, cacheDir *dagger.Directory) *dagger.Directory {
+	cache := cache.NewGHCache(cacheDir, ctx)
+	// Test the cache by writing and reading a sample outcome
+	sampleOutcome := []engine.TaskOutcome{
+		{
+			Task:             "test-task",
+			ProblemStatement: "Test problem statement",
+			Valid:            true,
+			ValidationError:  "",
+			GoldenPatch:      "Sample golden patch",
+			FinalDiff:        "Sample final diff",
+		},
+	}
+
+	runId := "test-run-id"
+
+	err := cache.Set(runId, sampleOutcome)
+	if err != nil {
+		return nil
+	}
+
+	return cache.GetDirectory()
+}
+
+func (m *Daggervals) CompareEvals(ctx context.Context, auth *dagger.Secret, agentEnv *dagger.File, agentProfile string, before *dagger.File, after *dagger.File) ([]string, error) {
+	rootImage, err := rootImage().Sync(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	judge := &judge.Judge{Agent: llm.NewPiAgent(&setup.PiSetup{Workspace: m.Source, Auth: auth, Env: agentEnv.AsEnvFile(), Profile: agentProfile})}
+
+	// Read contents and try to unmarshal them into []engine.TaskOutcome
+	var beforeOutcomes []engine.TaskOutcome
+	beforeContents, err := before.Contents(ctx)
+	if err != nil {
+		return nil, err
+	}
+	err = json.Unmarshal([]byte(beforeContents), &beforeOutcomes)
+	if err != nil {
+		return nil, err
+	}
+
+	var afterOutcomes []engine.TaskOutcome
+	afterContents, err := after.Contents(ctx)
+	if err != nil {
+		return nil, err
+	}
+	err = json.Unmarshal([]byte(afterContents), &afterOutcomes)
+	if err != nil {
+		return nil, err
+	}
+
+	return judge.Compare2Evals(ctx, beforeOutcomes, afterOutcomes, rootImage)
 }
 
 // GenerateImage returns a container with pi and the selected profile baked in.
 // It never receives auth.json: mount it at run time. Export it with
 // `export --path image.tar` or push it with `publish --address ...`.
 func (m *Daggervals) GenerateImage(ctx context.Context, agentProfile string) (*dagger.Container, error) {
-	rootContainer, err := dag.Container().
-		From("ubuntu:24.04").
-		WithExec([]string{"apt-get", "update"}).
-		WithExec([]string{"env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "install", "-y", "git", "curl", "tcpdump", "tshark", "gh"}).
-		WithExec([]string{"curl", "-fsSL", "https://deb.nodesource.com/setup_24.x", "-o", "nodesource_setup.sh"}).
-		WithExec([]string{"bash", "nodesource_setup.sh"}).
-		WithExec([]string{"apt-get", "install", "-y", "nodejs"}).
-		Sync(ctx)
+	rootContainer, err := rootImage("gh").Sync(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -156,8 +213,8 @@ func serializeTaskOutcomes(outcomes []engine.TaskOutcome) ([]string, error) {
 				CostUSD:    outcome.AgentStats.CostUSD,
 			},
 		}
-		if outcome.ValidationError != nil {
-			result.ValidationError = outcome.ValidationError.Error()
+		if outcome.ValidationError != "" {
+			result.ValidationError = outcome.ValidationError
 		}
 		encoded, err := json.Marshal(result)
 		if err != nil {
@@ -166,4 +223,20 @@ func serializeTaskOutcomes(outcomes []engine.TaskOutcome) ([]string, error) {
 		results = append(results, string(encoded))
 	}
 	return results, nil
+}
+
+// rootImage is the base image shared by every function: ubuntu with git, curl,
+// the network capture tools, extraPackages and Node.js 24.
+func rootImage(extraPackages ...string) *dagger.Container {
+	packages := append([]string{"git", "curl", "tcpdump", "tshark"}, extraPackages...)
+	return dag.Container().
+		From("ubuntu:24.04").
+		WithExec([]string{"apt-get", "update", "--fix-missing"}).
+		WithExec(append([]string{"env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "install", "-y"}, packages...)).
+		WithExec([]string{"curl", "-fsSL", "https://deb.nodesource.com/setup_24.x", "-o", "nodesource_setup.sh"}).
+		WithExec([]string{"bash", "nodesource_setup.sh"}).
+		WithExec([]string{"apt-get", "install", "-y", "nodejs"}).
+		// check npm version
+		WithExec([]string{"npm", "--version"})
+	// TODO, install ketch
 }

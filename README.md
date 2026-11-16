@@ -51,8 +51,8 @@ selected profile before starting pi:
   tools and paths, or disable the servers you do not use.
 - Review the memory endpoint below. Codex points to a private LAN address;
   Bedrock points to localhost. Neither backend is included in this repository.
-- `reviewer` and `deep-worker` reference a `go-reviewer` skill that is **not tracked
-  here**. Supply it separately or adjust those profile settings.
+- `reviewer` references a `go-reviewer` skill that is **not tracked
+  here**. Supply it separately or adjust that profile setting.
 
 After editing a profile, apply it again. Do not commit credentials in profile files.
 
@@ -144,7 +144,7 @@ Both profiles set thinking level `high` and subagent project-root resolution
 |---|---|---|
 | Main default | `gpt-6-luna` | `bedrock-claude-sonnet-5-5` |
 | Subagent default | `gpt-6.1-sol` | `bedrock-claude-sonnet-5-5` |
-| `oracle`, `reviewer`, `deep-worker` | `gpt-6-astra` | `bedrock-claude-opus-5-5` |
+| `oracle`, `reviewer` | `gpt-6-astra` | `bedrock-claude-opus-5-5` |
 | `worker`, `scout` | `gpt-6-luna` | `bedrock-claude-haiku-4-5` |
 | `delegate` | `gpt-6-luna` | inherits subagent default |
 | `researcher` | `gpt-6.1-sol` | inherits subagent default |

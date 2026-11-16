@@ -181,36 +181,6 @@
           "/Users/javcab/.pi/agent/npm/node_modules/@vndv/pi-codegraph/extensions/codegraph.ts"
         ]
       },
-      "deep-worker": {
-        "model": "gpt-6-astra",
-        "tools": [
-          "read",
-          "grep",
-          "find",
-          "ls",
-          "bash",
-          "edit",
-          "write",
-          "contact_supervisor",
-          "jev_route",
-          "mem0_memory",
-          "codegraph_search",
-          "codegraph_node",
-          "codegraph_files",
-          "codegraph_callers",
-          "codegraph_callees",
-          "codegraph_impact",
-          "codegraph_explore",
-          "codegraph_status"
-        ],
-        "subagentOnlyExtensions": [
-          "/Users/javcab/.pi/agent/extensions/pi-typesafe-router.ts",
-          "/Users/javcab/.pi/agent/extensions/prompt-logger.ts",
-          "/Users/javcab/.pi/agent/npm/node_modules/@amaster.ai/pi-memory-mem0/dist/index.js",
-          "/Users/javcab/.pi/agent/extensions/subagent-only/mem0-fallback.ts",
-          "/Users/javcab/.pi/agent/npm/node_modules/@vndv/pi-codegraph/extensions/codegraph.ts"
-        ]
-      },
       "evidence-auditor": {
         "tools": [
           "jev_route",

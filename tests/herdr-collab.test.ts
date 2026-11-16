@@ -172,10 +172,10 @@ function setup(options: { repo?: "jj" | "git" | "none"; answers?: unknown; fetch
   const defaultOnly = ext("subagent-only/default-only.ts");
   ext("herdr-agent-state.ts");
   fs.writeFileSync(path.join(agentDir, "skills", "fixture-skill", "SKILL.md"), "---\nname: fixture-skill\n---\nbody\n");
-  fs.writeFileSync(path.join(agentDir, "agents", "deep-worker.md"), [
-    "---", "name: deep-worker", "description: fixture", "thinking: xhigh", "systemPromptMode: replace",
+  fs.writeFileSync(path.join(agentDir, "agents", "evidence-auditor.md"), [
+    "---", "name: evidence-auditor", "description: fixture", "thinking: xhigh", "systemPromptMode: replace",
     "inheritProjectContext: true", "inheritSkills: true", "tools: read, bash, edit, write, contact_supervisor", "---", "",
-    "You are the fixture deep-worker.",
+    "You are the fixture evidence-auditor.",
   ].join("\n"));
   fs.writeFileSync(path.join(agentDir, "settings.json"), JSON.stringify({
     subagents: {
@@ -183,7 +183,7 @@ function setup(options: { repo?: "jj" | "git" | "none"; answers?: unknown; fetch
       defaultSubagentOnlyExtensions: [defaultOnly],
       agentOverrides: {
         worker: { model: "model-local", tools: ["read", "bash", "edit", "write", "contact_supervisor", "jev_route"], subagentOnlyExtensions: [routerExt] },
-        "deep-worker": { model: "model-frontier", skills: ["fixture-skill"], subagentOnlyExtensions: [routerExt] },
+        "evidence-auditor": { model: "model-frontier", skills: ["fixture-skill"], subagentOnlyExtensions: [routerExt] },
         reviewer: { model: "litellm/model-frontier", skills: ["fixture-skill"], tools: ["read", "grep", "watchdog_diff", "contact_supervisor"] },
         oracle: { disabled: true },
         researcher: { thinking: false },
@@ -287,8 +287,8 @@ test("real pi-subagents definitions and settings resolve for every herdr role", 
     assert.ok(definition.systemPrompt.length > 100, `${role} has a role prompt`);
     assert.ok(definition.tools?.length, `${role} has a tool allowlist`);
   }
-  const deep = core.resolveRole("deep-worker", { agentDir: root, builtinAgentsDir: realBuiltinAgents });
-  assert.equal(deep.source, path.join(root, "agents", "deep-worker.md"));
+  assert.equal(core.resolveRole("worker", { agentDir: root, builtinAgentsDir: realBuiltinAgents }).source, path.join(realBuiltinAgents, "worker.md"));
+  assert.throws(() => core.resolveRole("deep-worker", { agentDir: root, builtinAgentsDir: realBuiltinAgents }), /unknown role "deep-worker"/, "the removed deep-worker role is rejected");
   assert.equal(core.resolveRole("reviewer", { agentDir: root, builtinAgentsDir: realBuiltinAgents }).readOnly, true);
   assert.equal(core.resolveRole("worker", { agentDir: root, builtinAgentsDir: realBuiltinAgents }).readOnly, false);
 });
@@ -302,10 +302,13 @@ test("role resolution applies user agents, defaults, overrides, and fails loudly
   assert.deepEqual(workerRole.tools, ["read", "bash", "edit", "write", "contact_supervisor", "jev_route"]);
   assert.deepEqual(workerRole.subagentOnlyExtensions, [h.routerExt]);
   assert.equal(workerRole.systemPromptMode, "replace");
-  const deep = core.resolveRole("deep-worker", opts);
-  assert.match(deep.systemPrompt, /fixture deep-worker/);
-  assert.equal(deep.inheritSkills, true);
-  assert.deepEqual(deep.skills, ["fixture-skill"]);
+  const auditor = core.resolveRole("evidence-auditor", opts);
+  assert.equal(auditor.source, path.join(h.agentDir, "agents", "evidence-auditor.md"), "a user agent file wins over the builtin");
+  assert.match(auditor.systemPrompt, /fixture evidence-auditor/);
+  assert.equal(auditor.inheritSkills, true);
+  assert.deepEqual(auditor.skills, ["fixture-skill"]);
+  assert.equal(auditor.configuredModel, "litellm/model-frontier");
+  assert.deepEqual(auditor.subagentOnlyExtensions, [h.routerExt]);
   const scout = core.resolveRole("scout", opts);
   assert.deepEqual(scout.subagentOnlyExtensions, [h.defaultOnly], "default subagent-only extensions apply when a role has none");
   assert.equal(scout.configuredModel, undefined);
@@ -680,11 +683,12 @@ test("jj: conflicting workers keep workspaces, spawn one fixer, then merge after
   assert.equal(conflict.fixer, "fixer");
   const run = h.run(runId);
   const fixer = run.panes.find((p) => p.name === "fixer")!;
-  assert.equal(fixer.role, "deep-worker");
+  assert.equal(fixer.role, "worker");
   assert.equal(fixer.kind, "fixer");
   assert.equal(fixer.cwd, run.integration!.path);
-  assert.deepEqual([fixer.model, fixer.modelSource], ["litellm/model-frontier", "pinned"], "fixer keeps the pinned deep-worker model");
-  assert.equal(h.fetches(), 0);
+  assert.deepEqual([fixer.model, fixer.modelSource], ["litellm/model-frontier", "routed"], "fixer is routed like a normal worker");
+  assert.equal(h.fetches(), 1);
+  assert.equal(h.routerRequests[0]!.body.state.role, "worker");
   const brief = h.state().prompts.find((p: any) => p.target === `${runId}-fixer`).text;
   assert.match(brief, /f\.txt \(touched by w1, w2\)/);
   assert.match(brief, /### w1 \(worker\)[\s\S]*task for w1[\s\S]*### w2 \(worker\)/);
@@ -703,6 +707,50 @@ test("jj: conflicting workers keep workspaces, spawn one fixer, then merge after
   assert.ok(after.panes.filter((p) => p.kind === "worker").every((p) => p.merge === "merged" && !p.workspace!.removed));
   const conflicted = h.jj(["--ignore-working-copy", "log", "-r", after.integration!.head!, "--no-graph", "-T", 'if(conflict, "yes", "no")']);
   assert.equal(conflicted.trim(), "no");
+});
+
+test("jj: a fixer routing failure is retried on re-check; an explicit fixerModel skips the router", { skip: !hasJj }, async (t) => {
+  const h = setup({ repo: "jj", fetchFails: true });
+  t.after(h.done);
+  const { runId, panes } = await h.collab.spawn({ workers: [worker("w1"), worker("w2")] }, h.ctx);
+  fs.writeFileSync(path.join(panes[0]!.workspace!.path, "f.txt"), "ONE-w1\ntwo\nthree\n");
+  fs.writeFileSync(path.join(panes[1]!.workspace!.path, "f.txt"), "ONE-w2\ntwo\nthree\n");
+  const first = await h.collab.merge({ runId }, h.ctx) as any;
+  assert.equal(first.status, "conflict");
+  assert.equal(first.fixer, undefined);
+  assert.match(first.fixerError, /model routing failed/);
+  assert.equal(h.fetches(), 1);
+  const routedAgain = await h.collab.merge({ runId }, h.ctx) as any;
+  assert.equal(routedAgain.status, "conflict");
+  assert.match(routedAgain.fixerError, /model routing failed/, "a re-check retries the fixer");
+  assert.equal(h.fetches(), 2);
+  const noFixer = await h.collab.merge({ runId, spawnFixer: false }, h.ctx) as any;
+  assert.deepEqual([noFixer.fixer, noFixer.fixerError, h.fetches()], [undefined, undefined, 2]);
+  const retried = await h.collab.merge({ runId, fixerModel: "litellm/model-frontier" }, h.ctx) as any;
+  assert.equal(retried.status, "conflict");
+  assert.equal(retried.fixer, "fixer");
+  assert.equal(retried.fixerError, undefined);
+  assert.equal(h.fetches(), 2, "explicit fixerModel skips the router");
+  const fixer = h.run(runId).panes.find((p) => p.name === "fixer")!;
+  assert.deepEqual([fixer.role, fixer.kind, fixer.model, fixer.modelSource], ["worker", "fixer", "litellm/model-frontier", "explicit"]);
+  const brief = h.state().prompts.find((p: any) => p.target === `${runId}-fixer`).text;
+  assert.match(brief, /f\.txt \(touched by w1, w2\)/);
+  const open = await h.collab.merge({ runId }, h.ctx) as any;
+  assert.deepEqual([open.fixer, open.fixerError, h.fetches()], ["fixer", undefined, 2], "an open fixer is reused");
+  assert.equal(h.run(runId).panes.filter((p) => p.kind === "fixer").length, 1);
+});
+
+test("jj: an explicit fixerModel on the conflicting merge skips the router", { skip: !hasJj }, async (t) => {
+  const h = setup({ repo: "jj", answers: routerAnswers("frontier") });
+  t.after(h.done);
+  const { runId, panes } = await h.collab.spawn({ workers: [worker("w1"), worker("w2")] }, h.ctx);
+  fs.writeFileSync(path.join(panes[0]!.workspace!.path, "f.txt"), "ONE-w1\ntwo\nthree\n");
+  fs.writeFileSync(path.join(panes[1]!.workspace!.path, "f.txt"), "ONE-w2\ntwo\nthree\n");
+  const conflict = await h.collab.merge({ runId, fixerModel: M }, h.ctx) as any;
+  assert.equal(conflict.fixer, "fixer");
+  const fixer = h.run(runId).panes.find((p) => p.name === "fixer")!;
+  assert.deepEqual([fixer.role, fixer.model, fixer.modelSource], ["worker", M, "explicit"]);
+  assert.equal(h.fetches(), 0);
 });
 
 test("jj: an edit after the merge snapshot keeps the workspace; queued messages block merge", { skip: !hasJj }, async (t) => {

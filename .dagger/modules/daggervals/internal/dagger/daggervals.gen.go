@@ -7,3 +7,5 @@ import (
 )
 
 type Daggervals = core.Daggervals
+
+type DaggervalsEvalResult = core.DaggervalsEvalResult

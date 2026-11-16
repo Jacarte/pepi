@@ -14,13 +14,24 @@ import (
 
 type PiAgent struct {
 	command []string
+	Setter  Setup
+}
+
+// Receives a container,
+// it writes files to corresponding folders
+// Notice this is not the same as the Environment,
+// this is just for the agent to write its files
+// where it feels it is the right place
+type Setup interface {
+	Setup() dagger.WithContainerFunc
 }
 
 const processReportPath = "/tmp/daggervals-process.jsonl"
 
-func NewPiAgent() *PiAgent {
+func NewPiAgent(setter Setup) *PiAgent {
 	return &PiAgent{
 		command: []string{"pi"},
+		Setter:  setter,
 	}
 }
 
@@ -31,6 +42,10 @@ func (agent *PiAgent) CallPrompt(container *dagger.Container, prompt string) *da
 	concatCommand := append(append([]string{}, agent.command...), "-p", prompt)
 	return container.
 		WithExec(concatCommand)
+}
+
+func (agent *PiAgent) Setup() dagger.WithContainerFunc {
+	return agent.Setter.Setup()
 }
 
 // Run a task and return the container with the

@@ -26,6 +26,15 @@ func (HelloWorldEnvironment) PrepareEnv(ctx context.Context) dagger.WithContaine
 	}
 }
 
+func (HelloWorldEnvironment) PrepareEnvForTesting(ctx context.Context) dagger.WithContainerFunc {
+	return func(container *dagger.Container) *dagger.Container {
+		return container
+	}
+}
+
+func (HelloWorldEnvironment) GetRepo() string   { return "hello-world" }
+func (HelloWorldEnvironment) GetCommit() string { return "" }
+
 // HelloWorldTestEnv runs inside the measured exec before the agent (see TestEnvironment).
 type HelloWorldTestEnv struct{}
 
@@ -37,6 +46,10 @@ ln -s %[1]s %[2]s
 }
 
 type HelloWorldOracle struct{}
+
+func (HelloWorldEnvironment) GetFinalDiff(ctx context.Context, container *dagger.Container) string {
+	return "" // no diff to check for hello world
+}
 
 func (HelloWorldOracle) ValidateFinalAnswer(ctx context.Context, container *dagger.Container) (bool, error) {
 	// Get the stdout and log it

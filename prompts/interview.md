@@ -67,7 +67,7 @@ After the last question:
 1. Show a decision log: a table `# | decision | choice | why/consequence`, followed by
    the "remaining defaults" list, and any open risks or assumptions.
 2. State the planned process in 3–5 lines (who does what, which checks, what is not
-   committed or pushed). Follow AGENTS.md routing: `scout` -> `worker`/`deep-worker`
+   committed or pushed). Follow AGENTS.md routing: `scout` -> `worker`
    -> `reviewer`, plus `oracle` when the decision is risky.
 3. Ask for a single "go" to start implementing, and wait for it.
 

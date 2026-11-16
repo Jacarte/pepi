@@ -1,0 +1,2 @@
+nushell/nushell
+cc9f41e553333b1ad0aa4185a912f7a52355a238

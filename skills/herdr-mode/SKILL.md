@@ -12,10 +12,10 @@ for herdr mode, use pi-subagents as usual. The tools come from
 ## Tools, in order
 
 1. `herdr_spawn` — a wave of 1–4 panes: `{name, role, task, context?, model?}`.
-   Roles are the pi-subagents roles (scout, worker, deep-worker, reviewer, oracle,
+   Roles are the pi-subagents roles (scout, worker, reviewer, oracle,
    researcher, evidence-auditor, delegate) with the same prompts, tools, skills, and
    extensions. Without `model`, `worker` and `delegate` are routed in-process like
-   `jev_route recommend`; every other role (deep-worker, reviewer, oracle, the fixer…)
+   `jev_route recommend`; every other role (reviewer, oracle, …)
    keeps its pinned settings model, and is routed only when none is configured (the
    result says so). Routing failure fails the spawn and nothing is created.
    For `scout`, omit `model` in `herdr_spawn` so its configured pin is used.
@@ -55,9 +55,11 @@ when the target is idle (never mid-turn).
   - Clean: the merge is sealed and panes are marked merged. Panes stay alive and
     workspaces stay on disk until `herdr_cleanup`. Merge refuses a pane with a
     queued message for it.
-  - Conflict: all wave workspaces are kept and one `deep-worker` fixer pane starts in
+  - Conflict: all wave workspaces are kept and one routed `worker` fixer pane starts in
     the integration workspace with the conflicted files and both sides' tasks. Wait
     for it, collect, then call `herdr_merge` with no workers to re-check and seal.
+    If the fixer could not start (`fixerError`, e.g. routing failed), the re-check
+    retries it; pass `fixerModel` to skip routing.
   - jj: merge refuses while the integration working copy has edits after the
     sealed head (e.g. a late fixer turn); `jj squash` them in there, then merge again.
 - Merging creates a new, empty working-copy commit in each merged worker's workspace
