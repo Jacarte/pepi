@@ -73,7 +73,7 @@ func (agent *PiAgent) GetStats(ctx context.Context, container *dagger.Container)
 // Pi transcripts or pi-subagents internals. A completion marker rejects partial logs.
 func parsePiStats(contents string) (engine.AgentStats, engine.ProcessStats, error) {
 	var stats engine.AgentStats
-	processes := engine.ProcessStats{Groups: []engine.ProcessGroup{}, BackgroundProcesses: []engine.ProcessResource{}, Warnings: []string{}}
+	processes := engine.ProcessStats{Groups: []engine.ProcessGroup{}, BackgroundProcesses: []engine.ProcessResource{}, Warnings: []string{}, ToolCalls: []engine.ToolCall{}}
 	groups := make(map[string]int)
 	complete, parentSeen := false, false
 	decoder := json.NewDecoder(strings.NewReader(contents))
@@ -85,6 +85,7 @@ func parsePiStats(contents string) (engine.AgentStats, engine.ProcessStats, erro
 			AgentStats engine.AgentStats      `json:"agentStats"`
 			Instance   engine.ProcessInstance `json:"instance"`
 			Process    engine.ProcessResource `json:"process"`
+			ToolCall   engine.ToolCall        `json:"toolCall"`
 			Message    string                 `json:"message"`
 		}
 		err := decoder.Decode(&record)
@@ -120,6 +121,11 @@ func parsePiStats(contents string) (engine.AgentStats, engine.ProcessStats, erro
 			processes.Groups[index].Instances = append(processes.Groups[index].Instances, record.Instance)
 		case "background_process":
 			processes.BackgroundProcesses = append(processes.BackgroundProcesses, record.Process)
+		case "tool_call":
+			if record.ToolCall.Tool == "" {
+				return stats, processes, fmt.Errorf("Pi process stats invalid tool call")
+			}
+			processes.ToolCalls = append(processes.ToolCalls, record.ToolCall)
 		case "warning":
 			processes.Warnings = append(processes.Warnings, record.Message)
 		case "complete":

@@ -46,6 +46,18 @@ type ProcessStats struct {
 	Groups              []ProcessGroup    `json:"groups"`
 	BackgroundProcesses []ProcessResource `json:"backgroundProcesses"`
 	Warnings            []string          `json:"warnings"`
+	// ToolCalls are the parent session's tool executions, in completion order.
+	ToolCalls []ToolCall `json:"toolCalls"`
+}
+
+// ToolCall is metadata only: no arguments and no results.
+type ToolCall struct {
+	ID         string   `json:"id"`
+	Tool       string   `json:"tool"`
+	Status     string   `json:"status"`
+	DurationMs *float64 `json:"durationMs"`
+	// Nested means another tool (for example a codemode script) made the call.
+	Nested bool `json:"nested"`
 }
 
 type ProcessGroup struct {

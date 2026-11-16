@@ -46,3 +46,15 @@ func TestSummarizeTiming(t *testing.T) {
 		t.Fatalf("empty input must stay unavailable: %+v", empty)
 	}
 }
+
+func TestSummarizeTools(t *testing.T) {
+	got := summarizeTools([]engine.ToolCall{
+		{Tool: "bash", Status: "ok"}, {Tool: "bash", Status: "error"}, {Tool: "read", Status: "ok", Nested: true},
+	})
+	if got.Total != 3 || got.Errors != 1 || got.Nested != 1 {
+		t.Fatalf("unexpected totals: %+v", got)
+	}
+	if got.ByTool["bash"] != (toolCount{Calls: 2, Errors: 1}) || got.ByTool["read"].Calls != 1 {
+		t.Fatalf("unexpected byTool: %+v", got.ByTool)
+	}
+}

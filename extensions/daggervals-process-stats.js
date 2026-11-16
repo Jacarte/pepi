@@ -8,6 +8,7 @@ const identity = value => typeof value === 'string' && value.length > 0 && value
 const iso = value => number(value) !== null && value <= 8640000000000000 ? new Date(value).toISOString() : null;
 const terminal = status => ['complete', 'completed', 'failed', 'stopped', 'rejected', 'partial'].includes(status);
 const model = value => typeof value === 'string' && value.length > 0 && value.length <= 256 ? value : null;
+const MAX_TOOL_CALLS = 2000;
 const emptyUsage = () => ({ turns: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost_usd: 0 });
 
 function sessionUsage(entries) {
@@ -58,6 +59,17 @@ class Collector {
     this.children = new Map();
     this.background = new Map();
     this.warnings = new Set();
+    this.toolCalls = [];
+  }
+
+  // Metadata only: never arguments or results. Capped so a runaway loop cannot bloat the log.
+  toolCall(event) {
+    if (!identity(event?.toolName) || !identity(event?.toolCallId)) return;
+    if (this.toolCalls.length >= MAX_TOOL_CALLS) { this.warnings.add(`Tool calls beyond ${MAX_TOOL_CALLS} were not recorded.`); return; }
+    this.toolCalls.push({
+      id: event.toolCallId, tool: event.toolName, status: event.isError ? 'error' : 'ok',
+      durationMs: number(event.durationMs), nested: identity(event.parentToolCallId) !== null,
+    });
   }
 
   child(runId, index, agent, mode) {
@@ -216,7 +228,9 @@ class Collector {
     for (const run of this.background.values()) {
       if (run.resource.pid !== this.pid) records.push({ type: 'background_process', process: run.resource });
     }
+    for (const call of this.toolCalls) records.push({ type: 'tool_call', toolCall: call });
     for (const message of [
+      'Tool calls are the parent session only; calls made inside subagent children are not captured.',
       'Foreground CPU/memory is included in the parent process, not attributable per child.',
       'Foreground start/end may be derived from observed progress and reported duration, not OS lifecycle timestamps.',
       'Null fields are unavailable; unfinished children have no end timestamp. Async cache usage is not recorded by status.json.',
@@ -248,7 +262,10 @@ export default function processStats(pi) {
     fs.appendFileSync(logPath, JSON.stringify({ type: 'parent_start', startedAt: iso(startedAt), resources: parentResources() }) + '\n', { mode: 0o600 });
   });
   pi.on('tool_execution_update', event => collector.details(event.partialResult?.details));
-  pi.on('tool_execution_end', event => collector.details(event.result?.details));
+  pi.on('tool_execution_end', event => {
+    collector.toolCall(event);
+    collector.details(event.result?.details);
+  });
   pi.events.on('subagent:foreground-complete', event => collector.foregroundComplete(event));
   pi.events.on('subagent:async-started', event => collector.asyncStart(event));
   pi.events.on('subagent:async-complete', () => collector.poll());

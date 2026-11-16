@@ -31,6 +31,41 @@ type taskReport struct {
 	ProcessStats     engine.ProcessStats `json:"processStats"`
 	NetworkStats     engine.NetworkStats `json:"networkStats"`
 	Timing           timingSummary       `json:"timing"`
+	ToolUsage        toolSummary         `json:"toolUsage"`
+}
+
+// toolSummary aggregates processStats.toolCalls so the judge does not count them.
+// It covers the parent session only; tools used inside subagent children are not recorded.
+type toolSummary struct {
+	Total  int `json:"total"`
+	Errors int `json:"errors"`
+	// Nested counts calls made by another tool (for example a codemode script).
+	Nested int `json:"nested"`
+	// ByTool maps tool name to {calls, errors}.
+	ByTool map[string]toolCount `json:"byTool"`
+}
+
+type toolCount struct {
+	Calls  int `json:"calls"`
+	Errors int `json:"errors"`
+}
+
+func summarizeTools(calls []engine.ToolCall) toolSummary {
+	t := toolSummary{ByTool: map[string]toolCount{}}
+	for _, c := range calls {
+		t.Total++
+		n := t.ByTool[c.Tool]
+		n.Calls++
+		if c.Status == "error" {
+			t.Errors++
+			n.Errors++
+		}
+		if c.Nested {
+			t.Nested++
+		}
+		t.ByTool[c.Tool] = n
+	}
+	return t
 }
 
 // timingSummary is computed here so the judge does not do date arithmetic.
@@ -113,6 +148,7 @@ func buildReports(results []engine.TaskOutcome) []taskReport {
 			ProcessStats:     r.ProcessStats,
 			NetworkStats:     r.NetworkStats,
 			Timing:           summarizeTiming(r.ProcessStats),
+			ToolUsage:        summarizeTools(r.ProcessStats.ToolCalls),
 		}
 		if r.ValidationError != "" {
 			report.OracleError = r.ValidationError
@@ -148,6 +184,11 @@ Each element describes one task:
   slowest agent, instancesWithoutTiming how many have no duration, and timingSources how
   the durations were obtained (state the precision of any claim accordingly). It covers
   agent execution only; environment setup and the oracle run are not included.
+- toolUsage: precomputed counts of the parent session's tool calls (total, errors,
+  nested, and byTool with calls and errors); the individual calls are in
+  processStats.toolCalls without arguments or results. Calls made inside subagent
+  children are not recorded, so an absent tool does not prove a child did not use it.
+  Use it to say which tools the agent relied on and whether tool errors explain a failure.
 - networkStats: passive packet accounting for the whole run, not a request log.
 
 Analyze every task in this order and support each claim with evidence from the data
@@ -177,6 +218,7 @@ Analyze every task in this order and support each claim with evidence from the d
    and whether any agent errored, was cut short, or emitted warnings. Mention network
    volume only if it is unusual. Only state that an extension or a router such as Jev
    was used if the data shows it; otherwise say it cannot be told.
+   Tools: name the tools used most and any with errors, from toolUsage.
    Timing, always with numbers in seconds:
    - total wall clock and the share spent in each role (byRoleMs);
    - the slowest instance and whether it dominated (the critical path);
@@ -227,7 +269,8 @@ Each element has: task, problemStatement, oracleValid / oracleError (the automat
 oracle's verdict and failure reason), goldenPatch (the reference fix, never seen by the
 agent), finalDiff (what the agent changed; empty means nothing; it excludes the failing
 tests the harness applied, so test edits in it were made by the agent), agentStats
-(turns, tokens, cost_usd), processStats (agents by role, model, status, duration, usage;
+(turns, tokens, cost_usd), toolUsage (counts of the parent's tool calls by tool, with
+errors), processStats (agents by role, model, status, duration, usage;
 null means unavailable, never zero), timing (precomputed from processStats: wallClockMs,
 busyMs, parallelism, byRoleMs, longestInstance, instancesWithoutTiming, timingSources;
 agent execution only) and networkStats (passive packet accounting).
@@ -247,7 +290,8 @@ Method:
      that side NOT FIXED regardless of the oracle.
    - Cost and speed: agentStats.cost_usd, turns, and timing.wallClockMs, with numbers
      in seconds and dollars, and the absolute and percentage change AFTER vs BEFORE.
-     Mention models or roles only when they changed.
+     Mention models or roles only when they changed, and tools only when the mix or the
+     error count in toolUsage changed in a way that helps explain the result.
 3. Assign each shared task a change:
    - IMPROVED: correctness went up (for example NOT FIXED to FIXED, or PARTIAL to FIXED).
    - REGRESSED: correctness went down, or AFTER introduced an integrity problem.
