@@ -30,6 +30,8 @@ Brevity applies to prose, never to correctness or to admitting failure.
 This file is standing operator authorization to use specialist subagents,
 including `worker`, and subagent workflows.
 
+
+
 ### Rule of thumb (mandatory routing)
 
 - `scout` before you understand the code.

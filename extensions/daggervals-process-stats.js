@@ -269,12 +269,28 @@ export default function processStats(pi) {
   pi.events.on('subagent:foreground-complete', event => collector.foregroundComplete(event));
   pi.events.on('subagent:async-started', event => collector.asyncStart(event));
   pi.events.on('subagent:async-complete', () => collector.poll());
+  // Progress goes to stderr, which the Dagger trace shows live, so a hung run reveals its
+  // last tool call. Metadata only: tool names and ids, never arguments or results.
+  let last = 'session started';
+  let lastAt = Date.now();
+  const progress = text => {
+    last = text; lastAt = Date.now();
+    process.stderr.write(`[daggervals] ${new Date(lastAt).toISOString()} ${text}\n`);
+  };
+  pi.on('tool_execution_start', event => progress(`tool start ${event.toolName} ${event.toolCallId}`));
+  pi.on('tool_execution_end', event => progress(`tool end ${event.toolName} ${event.isError ? 'error' : 'ok'} ${event.durationMs ?? '?'}ms`));
+  const heartbeat = setInterval(() => {
+    const idle = Math.round((Date.now() - lastAt) / 1000);
+    if (idle >= 30) process.stderr.write(`[daggervals] idle ${idle}s after: ${last}\n`);
+  }, 30000);
+  heartbeat.unref();
   const timer = setInterval(() => collector.poll(), 100);
   timer.unref();
   // session_shutdown precedes final cleanup; exit captures the complete parent
   // CPU lifetime and OS high-water RSS, including all in-process foreground work.
   process.once('exit', exitCode => {
     clearInterval(timer);
+    clearInterval(heartbeat);
     if (!manager) collector.warnings.add('Parent session unavailable; Pi exited before session_start.');
     const usage = manager ? sessionUsage(manager.getEntries()) : null;
     // Prefer the model that actually answered; fall back to the session model.
