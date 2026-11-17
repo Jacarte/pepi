@@ -121,6 +121,7 @@ var RustTasks = []FixTask{
 	rustFixture("r5", "https://github.com/tokio-rs/tokio.git", "d6213594ca3767f182e8981fde7a119575e94c65"),     // tokio-6838 abstract UDS path
 	rustFixture("r6", "https://github.com/sharkdp/bat.git", "e2bf85e749d87459e3fced697af5cd9cc96eeb8c"),        // bat-2650 map-syntax case
 	rustFixture("r7", "https://github.com/BurntSushi/ripgrep.git", "fed4fea217abbc502f2e823465de903c8f2b623d"), // ripgrep-2576 --word-regexp
+	rustFixture("r8", "https://github.com/sharkdp/bat.git", "59d4cfb75c1a17a26b2b38956ee08d8c53f04e04"),        // bat-1892 --ignored-suffix
 }
 
 // rustFixture builds a FixTask from rust/<dir>/{problem.md,eval.sh,golden.patch,test.patch}.

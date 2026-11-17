@@ -429,6 +429,11 @@ Method:
    - Patch: from patchStats, files and lines changed against the golden patch, files
      missing and extra, and any testFilesEdited (an integrity concern when AFTER edits
      tests that BEFORE did not).
+   - Tool calls: from toolUsage, the total, errors, calls per turn and the per-tool mix,
+     with the change AFTER vs BEFORE. Say which tools grew or shrank, especially bash,
+     read, edit, write, subagent and jev_route, and whether new tool errors explain a
+     regression. Remember the counts are parent-only: if subagent calls rose while the
+     other parent tool calls fell, work moved into children whose tool calls are not recorded.
    - Tokens: total tokens, cache hit ratio, and cost and tokens per turn, with the change
      AFTER vs BEFORE. A drop in cacheHitRatio explains a cost increase at the same turns.
    - Cost and speed: agentStats.cost_usd, turns, and timing.wallClockMs, with numbers
@@ -475,8 +480,8 @@ One or two sentences stating the overall verdict and the main reason.
 One Markdown table, one row per shared task, with BEFORE and AFTER side by side and
 a final row for the totals. Use exactly these columns:
 
-| Task | Before | After | Change | Cost USD (before -> after) | Turns (before -> after) | Wall clock s (before -> after) | Tokens (before -> after) | Cache hit % (before -> after) | Patch files / +lines / -lines (before -> after) | Test files edited (before -> after) |
-|---|---|---|---|---|---|---|---|---|---|---|
+| Task | Before | After | Change | Cost USD (before -> after) | Turns (before -> after) | Wall clock s (before -> after) | Tokens (before -> after) | Cache hit % (before -> after) | Patch files / +lines / -lines (before -> after) | Test files edited (before -> after) | Tool calls / errors (before -> after) | Subagent calls (before -> after) |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
 
 - Before and After cells hold FIXED, PARTIAL or NOT FIXED plus the oracle result, for
   example "FIXED (oracle pass)".
@@ -486,7 +491,11 @@ a final row for the totals. Use exactly these columns:
   never 0.
 - Patch cells read "files / +additions / -deletions", for example "2 / +14 / -3 -> 3 / +20 / -5".
   Test files edited are counts, with the file names listed in the task's Evidence.
-- The last row, "TOTAL", sums cost, turns, wall clock, tokens and patch size over the
+- Tool cells come from toolUsage: "total / errors", for example "11 / 0 -> 24 / 1". The
+  subagent calls cell is toolUsage.byTool.subagent.calls (0 when absent). toolUsage covers
+  the parent session only, so work done inside subagent children is not counted: a drop
+  in parent tool calls can mean the work moved to children, not that less work was done.
+- The last row, "TOTAL", sums cost, turns, wall clock, tokens, patch size and tool calls over the
   shared tasks, averages the cache hit rate weighted by input, and states the improved /
   regressed / same counts in its Change cell.
 - Add a second small table for the overall result:
@@ -504,6 +513,17 @@ a final row for the totals. Use exactly these columns:
 | Files changed in patches | | | |
 | Lines changed in patches (+/-) | | | |
 | Test files edited | | | |
+| Tool calls (parent) | | | |
+| Tool errors | | | |
+| Tool calls per turn | | | |
+| Subagent calls | | | |
+| jev_route calls | | | |
+
+- Then add a third small table with the tool mix, summing toolUsage.byTool over the
+  shared tasks. Include every tool that appears in either file, most used first:
+
+| Tool | Before calls | After calls | Delta | Before errors | After errors |
+|---|---|---|---|---|---|
 
 ## Per task
 For each shared task:

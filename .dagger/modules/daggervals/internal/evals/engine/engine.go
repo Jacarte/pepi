@@ -206,7 +206,7 @@ func (e *Engine) Run(ctx context.Context, container *dagger.Container, runId str
 }
 
 // MaxParallelTasks bounds how many tasks run at the same time.
-const MaxParallelTasks = 10
+const MaxParallelTasks = 3
 
 // runTask runs one task in its own container. It returns the outcome even when stats
 // extraction failed, together with that error. A failed verification is not an error.

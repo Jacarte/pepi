@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 
 	"dagger/daggervals/internal/dagger"
@@ -76,7 +77,14 @@ func (m *Daggervals) Evals(
 	cacheDir *dagger.Directory,
 	// +optional
 	fixed string,
+	// Task suite to run: rust (default), go or all.
+	// +optional
+	suite string,
 ) (*EvalResult, error) {
+	tasks, err := evalSuiteTasks(suite)
+	if err != nil {
+		return nil, err
+	}
 	rootContainer, err := rootImage().Sync(ctx)
 
 	if err != nil {
@@ -89,7 +97,7 @@ func (m *Daggervals) Evals(
 
 	evalEngine := engine.NewEngine(
 		piAgent,
-		task.RustTasks,
+		tasks,
 		cach,
 	)
 	var runId string
@@ -102,6 +110,12 @@ func (m *Daggervals) Evals(
 		if err != nil {
 			return nil, err
 		}
+	}
+
+	if suite != "" && suite != "rust" {
+		// Keeps the Go runs out of the Rust cache file. '@' is not in a hash and
+		// unlikely in a fixed id, so no other run id can equal this one.
+		runId += "@" + suite
 	}
 
 	outcomes, err := evalEngine.Run(ctx, rootContainer, runId, agentProfile)
@@ -123,6 +137,20 @@ func (m *Daggervals) Evals(
 		Cache: finalEvalsDir,
 		Log:   judgedEvals,
 	}, nil
+}
+
+// evalSuiteTasks maps the suite argument of Evals to its tasks. Empty means rust.
+func evalSuiteTasks(suite string) ([]task.FixTask, error) {
+	switch suite {
+	case "", "rust":
+		return task.RustTasks, nil
+	case "go":
+		return task.GoTasks, nil
+	case "all":
+		return append(append([]task.FixTask{}, task.RustTasks...), task.GoTasks...), nil
+	default:
+		return nil, fmt.Errorf("unknown suite %q: want rust, go or all", suite)
+	}
 }
 
 func (m *Daggervals) TestCacheWrite(ctx context.Context, cacheDir *dagger.Directory) *dagger.Directory {
