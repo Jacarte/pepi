@@ -86,21 +86,6 @@ export DEEPGRAM_API_KEY="..."     # speaker
 # export TYPESAFE_API_KEY="..."   # local jev_route tool (not MCP)
 ```
 
-The current profile MCP configs do **not** reference `GITHUB_TOKEN_READONLY`,
-`LLM_GATEWAY_URL`, or `LLM_GATEWAY_API_KEY`; there is no DevCenter MCP entry.
-Gateway credentials may still be needed for the Bedrock provider and budget widget.
-The budget extension resolves its configuration independently:
-
-- key: `LITELLM_API_KEY` → `LLM_GATEWAY_API_KEY` → `TRUSTLY_LLM_GATEWAY_API_KEY`
-  (legacy) → `auth.json`'s `litellm.key`
-- URL: `LITELLM_BASE_URL` → `LLM_GATEWAY_URL` → `litellm.env.LITELLM_BASE_URL`
-  in `auth.json`
-- `LITELLM_MAX_BUDGET` optionally supplies a budget cap when the gateway exposes none.
-
-Do not assume provider auth supplies MCP environment variables. No particular
-missing-variable, authentication-failure, or OAuth behavior is guaranteed here;
-check the installed adapter/server's diagnostics.
-
 ### 4. Start pi
 
 ```bash
