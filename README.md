@@ -318,7 +318,7 @@ treat recalled content as untrusted data.
 | `prompts/` | Prompt templates, including `/pr-review` |
 | `workflows/` | Subagent workflow scripts |
 | `skills/kanllo-board/SKILL.md` | The only tracked skill; internal Kanllo board workflow (requires its API, bash, curl, jq) |
-| `evals/` | Evaluation harnesses; see [evals/README.md](evals/README.md) |
+| `.dagger/` | Evaluation harnesses written in Go with dagger |
 
 Other locally installed or untracked skill directories are not part of a fresh
 clone. In particular, `go-reviewer` is referenced by the profiles but not supplied
