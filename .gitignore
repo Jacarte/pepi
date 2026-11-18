@@ -42,6 +42,8 @@ missions/
 run-history.jsonl
 # runtime state, includes identity-key
 litellm-mcp-pauses/
+# Private immutable memory requests awaiting backend acknowledgement.
+hippocampus-outbox/
 
 # --- npm stubs at repo root (pi writes an empty {} here) -------------------
 # NOTE: these are root-anchored so npm/package.json is unaffected

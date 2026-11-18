@@ -111,7 +111,6 @@ versions:
 | `npm:pi-subagents@0.78.0` | yes | yes |
 | `npm:pi-mcp-adapter` | yes | yes |
 | `npm:@vndv/pi-codegraph` | yes | yes |
-| `npm:@amaster.ai/pi-memory-mem0` | yes | yes |
 | `npm:@dietrichgebert/ponytail` | yes | yes |
 | `npm:pi-ketch` | yes | — |
 | `npm:pi-provider-litellm` | — | yes |
@@ -237,12 +236,13 @@ entry and the `@vndv/pi-codegraph` package are separate configuration entries.
 
 ## Local extensions
 
-Five TypeScript extension entry points are tracked under `extensions/`:
+Local TypeScript extension entry points are tracked under `extensions/`:
 
 | Extension | What it adds |
 |---|---|
 | `extensions/codex-usage-bar.ts` | Codex usage-window status via `codex app-server`; requires the Codex CLI for that status query |
 | `extensions/litellm-budget.ts` | LiteLLM spend status and `/budget` |
+| `extensions/hippocampus.ts` | Project-scoped recall and durable completed-work capture through `mem0_memory`; children load `extensions/subagent-only/hippocampus-readonly.ts` |
 | `extensions/pi-typesafe-router.ts` | `jev_route`: model recommendation using `models-router.json`, or separate thinking-effort classification/application without changing models; calls `https://api.typesafe.ai/v1/systemone` with `TYPESAFE_API_KEY` (`JEV_MODEL` optionally selects classifier) |
 | `extensions/prompt-logger.ts` | Provider-request JSONL logging, including prompts/messages/tools; defaults to `logs/prompts.jsonl`. Disable with `PROMPT_LOG=0`, override with `PROMPT_LOG_FILE` |
 | `extensions/top-status.ts` | Status widget above the editor and `/topbar` layout toggle |
@@ -253,40 +253,140 @@ logger/router into selected children via the machine-specific paths noted above.
 
 ## Semantic memory
 
-Both profiles include `@amaster.ai/pi-memory-mem0` in `self-hosted` mode. These are
-the actual tracked settings:
+Codex, Bedrock, and Cloud use the local Hippocampus adapter and retain the
+`mem0_memory` tool name. The parent entry point loads automatically from
+`extensions/hippocampus.ts`. Every child extension list loads the explicit
+read-only entry point before `mem0-fallback.ts`; children can recall memory but
+cannot add, delete, capture, or replay writes.
 
-| Field | Codex | Bedrock |
-|---|---|---|
-| `mode` | `self-hosted` | `self-hosted` |
-| `baseUrl` | `http://192.168.0.160:18000` | `http://localhost:8000` |
-| `userId` | `default-user` | `default-user` |
-| `userIdScope` | `userIdScope` | `userIdScope` |
+The adapter requires the receipt and selection contract from
+[Hippocampus PR #13](https://github.com/Jacarte/hippocampus/pull/13). Deploy that
+backend before enabling capture; merging the PR does not update a running
+service. Automatic capture requires Pi **1.1.0 or later** and checks the runtime
+version. On older runtimes it is disabled with a warning; manual tools and recall
+remain available. Integration checks use Pi 1.5.2.
 
-For example, the Codex profile contains:
+The tracked endpoints are personal defaults, not bundled services:
+
+| Profile | `hippocampus.baseUrl` |
+|---|---|
+| Codex | `http://192.168.0.160:18000` |
+| Bedrock | `http://localhost:8000` |
+| Cloud | `http://192.168.0.160:18000` |
+
+All three profiles explicitly set the same behavior. For example, Codex contains:
 
 ```json
 {
-  "pi-memory-mem0": {
-    "mode": "self-hosted",
+  "hippocampus": {
+    "enabled": true,
     "baseUrl": "http://192.168.0.160:18000",
     "userId": "default-user",
-    "userIdScope": "userIdScope"
+    "autoCapture": true,
+    "autoRecall": true,
+    "requestTimeoutMs": 10000,
+    "recallLimit": 5,
+    "legacyUserIds": [],
+    "recallLegacyCwd": true
   }
 }
 ```
 
-`userIdScope` is literally `"userIdScope"` in both files, not `"exact"`. Validate
-that value against your installed extension before relying on memory isolation.
-`memoryMode`, `topK`, `recallFrequency`, and `requestTimeoutMs` are not explicitly
-set; this repository does not pin their behavior through a package version.
+### Capture and recall
 
-The memory backend (previously described here as hippocampus) is external to this
-repo. Its deployment, API compatibility, authentication, extraction keys, and
-failure behavior must be checked in that backend and the installed extension;
-the old localhost-only examples and backend version claims are not portable setup
-instructions. Set a reachable, trusted endpoint before enabling memory use, and
-treat recalled content as untrusted data.
+After work has finished and Pi has settled, the parent sends bounded, redacted
+evidence from the user request, assistant responses, and tool results with
+`infer: true`. Hippocampus decides which facts deserve durable memory. Aborted or
+failed activities are not automatically captured. Compaction summaries are not
+stored or used as capture triggers. Explicit `mem0_memory` adds use `infer: false`
+for text already selected for memory, through the same durable write path.
+
+Automatic and explicit recall use the same project scope. The adapter derives it
+from `userId` and the normalized Git `origin`, so worktrees and clones with the
+same remote share memory. Set an explicit `hippocampus.projectId` for a repository
+without a usable origin, or to choose an identity shared across different remotes.
+Without either identifier, memory is disabled rather than using an unscoped
+`default-user`. Session and source details are provenance metadata. Recalled
+content is untrusted data, not instructions.
+
+`mem0_memory` with `action: "get_all"` returns a bounded eligible listing. The
+backend returns at most 20 raw memories per scope, and eligibility exclusions can
+make the returned list shorter; this is not an exhaustive memory export.
+
+For older memory, `recallLegacyCwd: true` also searches the previous extension's
+scope for the current absolute working directory. `legacyUserIds` can list
+additional exact old user IDs for this project. Other machines' path hashes are
+not discoverable automatically; only add IDs whose project you have verified.
+New writes always use the stable scope. This adapter does not import the previous
+extension's outbox.
+
+### Durable writes and rollout
+
+Before sending, the adapter saves the complete request in the private
+`<agentDir>/hippocampus-outbox/` directory. Restarting Pi or starting another session
+can replay eligible pending requests with their original capture ID, body, scope,
+observation time, and destination. A configuration change never retargets them.
+Only explicit `saved` or `skipped` receipts acknowledge a write; HTTP success alone
+does not. Transport failures and retryable backend failures remain pending with
+bounded backoff. Ambiguous outcomes remain held; capture conflicts remain failed
+for investigation.
+An HTTP-success response with an invalid or missing receipt pauses writes to that
+exact destination across sessions until its compatibility pause is released below.
+An ordinary `capture_pending` or unknown-outcome receipt holds only that capture.
+
+Use `mem0_memory` with `action: "status"` to inspect pending, held, and failed
+writes. `action: "retry"` retries eligible pending requests; it does not override
+an ambiguous backend outcome or create a replacement capture ID. Redaction is
+best effort: treat local outbox data and the configured backend as private.
+
+Concurrent delivery uses per-request locks. Another live writer gets a grace
+period of the request's `timeoutMs` plus 5 seconds, reported as
+`waiting_for_active_writer`. If ownership remains unverifiable, status shows a
+dynamic `held` state with `automaticRetry: false`, `lockFile`, and `lockRecovery`.
+A matching PID with a different or missing process-instance marker pauses
+immediately. This does not persist a capture-level hold: legitimate owner cleanup
+releases it, and elapsed time never authorizes taking over an uncertain lock.
+
+For a stuck lock, stop all Pepi writers sharing the outbox, inspect the reported
+`lockFile`, and verify that its owner has ended and the lock is stale. Only then
+remove that `<captureId>.json.lock` and its `<captureId>.json.lock.recovery` marker
+if present. Preserve the `<captureId>.json` request, ID, destination, body, and
+timeout unchanged. Restarting can retry that original request. This lock recovery
+is separate from the incompatible-receipt recovery below, which leaves the
+original capture held.
+
+To release a compatibility pause after upgrading the backend:
+
+1. Use `mem0_memory` with `action: "status"` to identify captures held for
+   `missing_or_invalid_write_receipt` at the affected destination. Stop all Pepi
+   sessions sharing this `agentDir` before editing their outbox records.
+2. Verify the upgraded endpoint independently in a separate test user/project
+   scope with a fresh `capture_id`: `POST /memories` must return `write_status`
+   `saved` or `skipped` and the matching capture ID. This confirms compatibility;
+   it does not establish whether the original uncertain write was saved.
+3. For that verified destination's blocking records in
+   `<agentDir>/hippocampus-outbox/<captureId>.json`, change only the mutable
+   `reason` from `missing_or_invalid_write_receipt` to
+   `contract_verified_capture_unresolved`. Preserve `state: "held"`, `captureId`,
+   `destination`, `body`, `timeoutMs`, and every other field unchanged.
+4. Restart Pepi and inspect status. New independent captures can proceed; the old
+   capture remains held and `retry` cannot send it. Reconcile that original write
+   separately before any further recovery action. Do not delete its record,
+   replace its capture ID, or mark it pending to bypass the uncertainty.
+
+When upgrading an existing installation:
+
+1. Pull the repository, including the new extension files. Adapt the selected
+   profile's absolute child paths and backend endpoint to this machine.
+2. Reapply that profile with `./profile.sh <name>`; root `settings.json` is an
+   ignored overlay. The script copies settings but does not install extension
+   files or uninstall packages.
+3. Remove any remaining `@amaster.ai/pi-memory-mem0` package registration or
+   explicit extension path from project/local settings so it cannot load a second
+   writer. Restart Pi.
+4. In an isolated test project scope, complete a small activity, inspect
+   `mem0_memory` status, and verify recall in a new session before relying on the
+   integration. Confirm the backend is reachable and returns the new receipts.
 
 ---
 
@@ -334,8 +434,9 @@ pi list            # inspect packages resolved from the selected settings
 pi -p "say OK"    # smoke-test provider auth/model access
 ```
 
-Inside an interactive pi session, inspect `/mcp` connection status and `/mem0 status`
-if the corresponding extensions loaded. Use `/budget` only when a LiteLLM gateway
+Inside an interactive pi session, inspect `/mcp` connection status and call
+`mem0_memory` with `action: "status"` if the corresponding extensions loaded.
+Use `/budget` only when a LiteLLM gateway
 is configured. Check failures against the selected root config, installed package
 versions, service availability, and credentials; a loaded client does not prove a
 backend is healthy.
