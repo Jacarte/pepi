@@ -2,6 +2,7 @@ package task
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -96,6 +97,37 @@ func TestLoadRepoTaskValid(t *testing.T) {
 	}
 }
 
+func TestLoadRepoTaskMemoryFixture(t *testing.T) {
+	taskYAML := strings.Replace(validTaskYAML, "kind: parallel", "kind: memory", 1)
+	src := fakeTask("demo", taskYAML, validMilestonesYAML, "p")
+	spec, err := LoadRepoTask(src, "demo")
+	if err != nil || spec.Kind != "memory" || spec.MemoryFixture != nil {
+		t.Fatalf("kind memory without fixture: %+v, %v", spec, err)
+	}
+	src["tasks/demo/memory/fixture.json"] = `{"memories":[{"text":"The API uses snake_case."},{"text":"Run make check."}]}`
+	spec, err = LoadRepoTask(src, "demo")
+	if err != nil || !slices.Equal(spec.MemoryFixture, []string{"The API uses snake_case.", "Run make check."}) {
+		t.Fatalf("fixture: %+v, %v", spec.MemoryFixture, err)
+	}
+	for data, want := range map[string]string{
+		`{"memories":[]}`:                   "no memories",
+		`{"memories":[{"text":" "}]}`:       "text missing",
+		`{"memories":[{"txt":"x"}]}`:        "unknown field",
+		`{"memories":[{"text":"x"}],"x":1}`: "unknown field",
+		`[]`:                                "cannot unmarshal",
+	} {
+		src["tasks/demo/memory/fixture.json"] = data
+		if _, err := LoadRepoTask(src, "demo"); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s: want error containing %q, got %v", data, want, err)
+		}
+	}
+	delete(src, "tasks/demo/memory/fixture.json")
+	src["tasks/demo/memory/notes.md"] = "x"
+	if _, err := LoadRepoTask(src, "demo"); err == nil || !strings.Contains(err.Error(), "fixture.json") {
+		t.Fatalf("memory/ without fixture.json: %v", err)
+	}
+}
+
 func TestLoadRepoTaskNullDeadline(t *testing.T) {
 	taskYAML := strings.NewReplacer("kind: parallel", "kind: long", "deadline_minutes: 15", "deadline_minutes: null",
 		"owned_dirs: [acceptance]\n", "", "restore_seed_tests: true\n", "").Replace(validTaskYAML)
@@ -163,7 +195,7 @@ func TestParseMilestonesRejectsBad(t *testing.T) {
 	}
 }
 
-func TestLoadRepoTasksSkipsMultiSession(t *testing.T) {
+func TestLoadRepoTasksLoadsMultiSession(t *testing.T) {
 	src := fakeTask("demo", validTaskYAML, validMilestonesYAML, "p")
 	long := strings.NewReplacer("name: demo", "name: long-one", "kind: parallel", "kind: long", "sessions: 1", "sessions: 3", "deadline_minutes: 15", "deadline_minutes: null").Replace(validTaskYAML)
 	for path, text := range fakeTask("long-one", long, validMilestonesYAML, "a", "b", "c") {
@@ -171,31 +203,25 @@ func TestLoadRepoTasksSkipsMultiSession(t *testing.T) {
 	}
 	src["tasks/.gitkeep"] = ""
 
-	runnable, skipped, err := LoadRepoTasks(src, nil)
+	specs, err := LoadRepoTasks(src, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(runnable) != 1 || runnable[0].Name != "demo" {
-		t.Fatalf("runnable: %+v", runnable)
+	if len(specs) != 2 || specs[0].Name != "demo" || specs[1].Name != "long-one" || !slices.Equal(specs[1].Prompts, []string{"a", "b", "c"}) {
+		t.Fatalf("specs: %+v", specs)
 	}
-	if len(skipped) != 1 || skipped[0].Name != "long-one" || skipped[0].Reason != "multi-session not supported yet" {
-		t.Fatalf("skipped: %+v", skipped)
-	}
-
-	// Naming a multi-session task still skips it instead of failing.
-	runnable, skipped, err = LoadRepoTasks(src, []string{"long-one"})
-	if err != nil || len(runnable) != 0 || len(skipped) != 1 {
-		t.Fatalf("named multi-session task: runnable %v skipped %v err %v", runnable, skipped, err)
+	if got := specs[1].ProblemStatement(); got != "Session 1 prompt:\na\n\nSession 2 prompt:\nb\n\nSession 3 prompt:\nc" {
+		t.Fatalf("multi-session problem statement: %q", got)
 	}
 
-	if _, _, err := LoadRepoTasks(src, []string{"nope"}); err == nil || !strings.Contains(err.Error(), `unknown task "nope"`) {
+	if _, err := LoadRepoTasks(src, []string{"nope"}); err == nil || !strings.Contains(err.Error(), `unknown task "nope"`) {
 		t.Fatalf("unknown task: %v", err)
 	}
 }
 
 func TestLoadRepoTasksMalformedTaskIsAnError(t *testing.T) {
 	src := fakeTask("demo", strings.Replace(validTaskYAML, "kind: parallel", "kind: nope", 1), validMilestonesYAML, "p")
-	if _, _, err := LoadRepoTasks(src, nil); err == nil || !strings.Contains(err.Error(), "task demo") {
+	if _, err := LoadRepoTasks(src, nil); err == nil || !strings.Contains(err.Error(), "task demo") {
 		t.Fatalf("want error naming the task, got %v", err)
 	}
 }

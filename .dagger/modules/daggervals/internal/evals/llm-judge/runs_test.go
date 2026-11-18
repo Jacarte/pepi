@@ -71,15 +71,19 @@ type fake struct {
 	children  int
 	subagent  int
 	timedOut  bool
+	agentExit int
 	profile   string
 	additions int
 	editTests int
+	memory    *engine.MemoryStats
+	mem0Calls int
+	sessions  []engine.SessionOutcome
 }
 
 func (f fake) outcome() engine.TaskOutcome {
 	o := engine.TaskOutcome{
 		Task: f.task, Score: f.score, MaxScore: f.maxScore, Scoring: "count",
-		Valid: f.score == f.maxScore, TimedOut: f.timedOut, Profile: f.profile,
+		Valid: f.score == f.maxScore, TimedOut: f.timedOut, AgentExitCode: f.agentExit, Profile: f.profile,
 		AgentStats: engine.AgentStats{Turns: f.turns, CostUSD: f.cost, Input: 100},
 	}
 	if f.children > 0 {
@@ -92,7 +96,12 @@ func (f fake) outcome() engine.TaskOutcome {
 	for i := 0; i < f.subagent; i++ {
 		o.ProcessStats.ToolCalls = append(o.ProcessStats.ToolCalls, engine.ToolCall{ID: "s", Tool: "subagent", Status: "ok"})
 	}
+	for i := 0; i < f.mem0Calls; i++ {
+		o.ProcessStats.ToolCalls = append(o.ProcessStats.ToolCalls, engine.ToolCall{ID: "m", Tool: "mem0_memory", Status: "ok"})
+	}
 	o.ProcessStats.ToolCalls = append(o.ProcessStats.ToolCalls, engine.ToolCall{ID: "b", Tool: "bash", Status: "ok"})
+	o.Memory = f.memory
+	o.Sessions = f.sessions
 	if f.additions > 0 {
 		o.FinalDiff = "diff --git a/x.go b/x.go\n@@ -1 +1 @@\n"
 		for i := 0; i < f.additions; i++ {
@@ -190,6 +199,49 @@ func TestAggregateArms(t *testing.T) {
 	}
 }
 
+// Agent failures are counted like timed out runs: next to them, still graded, still in validRuns.
+func TestAggregateAgentFailures(t *testing.T) {
+	const task = "tasks/memory-key"
+	report := aggregateArms([]RunInput{
+		run("off", fake{task: task, score: 0, maxScore: 1, agentExit: 1}),
+		run("off", fake{task: task, score: 1, maxScore: 1}),
+		run("off", fake{task: task, score: 0, maxScore: 1, timedOut: true}),
+	})
+	off := findArm(t, report, "off")
+	got := findTask(t, off, task)
+	if got.AgentFailedRuns != 1 || got.TimedOutRuns != 1 || got.ValidRuns != 1 || got.Runs != 3 {
+		t.Fatalf("task: %+v", got)
+	}
+	if off.Total.AgentFailedRuns != 1 || off.Total.TimedOutRuns != 1 {
+		t.Fatalf("total: %+v", off.Total)
+	}
+}
+
+// Multi-session tasks get per-session summaries; other tasks keep their JSON unchanged.
+func TestAggregateSessions(t *testing.T) {
+	wall := func(v float64) *float64 { return &v }
+	twoSessions := func(s2Tools int, s2Cost float64) []engine.SessionOutcome {
+		return []engine.SessionOutcome{
+			{Index: 1, WallClockSec: wall(60), ToolCalls: 10, Tokens: 1000, CostUSD: 1},
+			{Index: 2, WallClockSec: wall(30), ToolCalls: s2Tools, Tokens: 500, CostUSD: s2Cost},
+		}
+	}
+	report := aggregateArms([]RunInput{
+		run("on", fake{task: "carry", score: 1, maxScore: 1, sessions: twoSessions(2, 0.2)}, fake{task: "single", score: 1, maxScore: 1}),
+		run("on", fake{task: "carry", score: 1, maxScore: 1, sessions: twoSessions(4, 0.4)}, fake{task: "single", score: 1, maxScore: 1}),
+	})
+	on := findArm(t, report, "on")
+	carry := findTask(t, on, "carry")
+	if len(carry.Sessions) != 2 || carry.Sessions[0].Index != 1 || *carry.Sessions[0].WallClockSec.Median != 60 ||
+		*carry.Sessions[1].ToolCalls.Median != 3 || *carry.Sessions[1].CostUSD.Max != 0.4 || *carry.Sessions[1].Tokens.Median != 500 {
+		t.Fatalf("sessions: %+v", carry.Sessions)
+	}
+	single, _ := json.Marshal(findTask(t, on, "single"))
+	if strings.Contains(string(single), "sessions") {
+		t.Fatalf("a single-session task must have no sessions key: %s", single)
+	}
+}
+
 func TestAggregateReportsMissingTasks(t *testing.T) {
 	runs := []RunInput{
 		run("a", fake{task: "t1", score: 1, maxScore: 2}, fake{task: "t2", score: 2, maxScore: 2}),
@@ -211,6 +263,52 @@ func TestAggregateReportsMissingTasks(t *testing.T) {
 	b := findTask(t, findArm(t, report, "b"), "t1")
 	if b.Runs != 0 || b.Score.N != 0 || b.Score.Median != nil {
 		t.Fatalf("b/t1 has no runs: %+v", b)
+	}
+}
+
+func num(v float64) *float64 { return &v }
+
+func memoryOn(fixture bool, adds, searches float64, stored int, latency float64) *engine.MemoryStats {
+	return &engine.MemoryStats{Enabled: true, Fixture: fixture, Ops: map[string]float64{"add": adds, "search": searches},
+		Errors: num(0), AvgLatencyMs: num(latency), Stored: &stored, SeededStored: &stored, FixtureSize: 2}
+}
+
+func TestAggregateMemory(t *testing.T) {
+	const task = "tasks/recall"
+	failed := &engine.MemoryStats{Enabled: true, Fixture: true, Error: "read memory metrics (after): exit code 7"}
+	runs := []RunInput{
+		run("fx", fake{task: task, memory: memoryOn(true, 2, 5, 4, 100), mem0Calls: 1}),
+		run("fx", fake{task: task, memory: memoryOn(true, 4, 7, 6, 300), mem0Calls: 3}),
+		run("fx", fake{task: task, memory: failed}),
+		run("off", fake{task: task, memory: &engine.MemoryStats{}}),
+		run("none", fake{task: task}),
+		run("mixed", fake{task: task, memory: memoryOn(false, 0, 1, 0, 50)}),
+		run("mixed", fake{task: task}),
+	}
+	report := aggregateArms(runs)
+	fx := findTask(t, findArm(t, report, "fx"), task).Memory
+	if fx == nil || fx.Mode != "on-with-fixture" {
+		t.Fatalf("fx: %+v", fx)
+	}
+	// the failed snapshot is left out of the server numbers, not counted as zero
+	if fx.AddOps.N != 2 || *fx.AddOps.Median != 3 || *fx.SearchOps.Min != 5 || *fx.SearchOps.Max != 7 || *fx.Stored.Median != 5 || *fx.AvgLatencyMs.Median != 200 || *fx.Errors.Median != 0 {
+		t.Fatalf("fx numbers: %+v", fx)
+	}
+	if fx.SeededStored.N != 2 || *fx.SeededStored.Median != 5 || fx.FixtureSize.N != 2 || *fx.FixtureSize.Median != 2 {
+		t.Fatalf("fx seeded: %+v", fx.SeededStored)
+	}
+	if fx.Mem0ToolCalls.N != 3 || *fx.Mem0ToolCalls.Median != 1 {
+		t.Fatalf("fx tool calls: %+v", fx.Mem0ToolCalls)
+	}
+	off := findTask(t, findArm(t, report, "off"), task).Memory
+	if off == nil || off.Mode != "off" || off.AddOps.N != 0 || off.Stored.Median != nil || off.Mem0ToolCalls.N != 1 {
+		t.Fatalf("off: %+v", off)
+	}
+	if m := findTask(t, findArm(t, report, "none"), task).Memory; m != nil {
+		t.Fatalf("runs without memory stats have no memory block: %+v", m)
+	}
+	if m := findTask(t, findArm(t, report, "mixed"), task).Memory; m == nil || m.Mode != "mixed" {
+		t.Fatalf("mixed: %+v", m)
 	}
 }
 
@@ -264,7 +362,8 @@ func TestPrepareCompareRunsFilesAndDryRun(t *testing.T) {
 
 // The prompt must name every key of arms.json and the verdict output lines.
 func TestCompareRunsPromptNamesTheFields(t *testing.T) {
-	report := aggregateArms([]RunInput{run("a", fake{task: "t", score: 1, maxScore: 1}), run("b", fake{task: "t", score: 1, maxScore: 1})})
+	report := aggregateArms([]RunInput{run("a", fake{task: "t", score: 1, maxScore: 1}), run("b", fake{task: "t", score: 1, maxScore: 1, memory: memoryOn(true, 1, 1, 1, 1),
+		sessions: []engine.SessionOutcome{{Index: 1}, {Index: 2}}})})
 	encoded, _ := json.Marshal(report)
 	var generic map[string]any
 	_ = json.Unmarshal(encoded, &generic)
@@ -293,7 +392,7 @@ func TestCompareRunsPromptNamesTheFields(t *testing.T) {
 			t.Errorf("COMPARE_RUNS_PROMPT does not mention the arms.json key %q", key)
 		}
 	}
-	for _, want := range []string{"profile", "score", "milestones", "toolCalls", "patchLines", "timedOut", "skipped", "median", "min-max", "n < 3", "neverDelegated", "VERDICT <arm> vs <baseline>", "CONFIDENCE <arm>", "ARMS AS COLUMNS", "runsDelegated", "overlap"} {
+	for _, want := range []string{"profile", "score", "milestones", "toolCalls", "patchLines", "timedOut", "skipped", "median", "min-max", "n < 3", "neverDelegated", "VERDICT <arm> vs <baseline>", "CONFIDENCE <arm>", "ARMS AS COLUMNS", "runsDelegated", "overlap", "on-with-fixture", "on-without-fixture", "mixed", "toolUsage.byTool", "automatic recall", "automatic capture", "## Memory", "latency"} {
 		if !strings.Contains(COMPARE_RUNS_PROMPT, want) {
 			t.Errorf("COMPARE_RUNS_PROMPT lacks %q", want)
 		}

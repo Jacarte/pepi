@@ -2,12 +2,14 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
 	"unicode/utf8"
 
 	"dagger/daggervals/internal/dagger"
+	"dagger/daggervals/internal/evals/memory"
 	tasks "dagger/daggervals/internal/evals/task"
 )
 
@@ -66,15 +68,6 @@ func TestVerifyMilestoneOracle(t *testing.T) {
 	}
 }
 
-func TestRunRecordsSkippedTasks(t *testing.T) {
-	e := NewEngine(nil, nil, nil)
-	e.Skipped = []TaskOutcome{SkippedOutcome("kv-database", "multi-session not supported yet", "plain")}
-	outcomes, err := e.Run(context.Background(), nil, "run", "plain")
-	if err != nil || len(outcomes) != 1 || !outcomes[0].Skipped || outcomes[0].SkipReason != "multi-session not supported yet" || outcomes[0].Task != "kv-database" {
-		t.Fatalf("outcomes: %+v, %v", outcomes, err)
-	}
-}
-
 func TestGradingErrorsAreHarnessErrors(t *testing.T) {
 	e := &Engine{}
 	task := func(o tasks.MilestoneOracle) tasks.FixTask {
@@ -99,6 +92,45 @@ func TestGradingErrorsAreHarnessErrors(t *testing.T) {
 	}
 }
 
+// Outcomes of agents that exited normally keep their JSON (and the caches) unchanged.
+func TestAgentFailureFieldsAreOmittedWhenUnset(t *testing.T) {
+	without, _ := json.Marshal(TaskOutcome{Task: "t"})
+	with, _ := json.Marshal(TaskOutcome{Task: "t", AgentExitCode: 1, AgentError: "refused"})
+	if strings.Contains(string(without), "AgentE") || !strings.Contains(string(with), `"AgentExitCode":1,"AgentError":"refused"`) {
+		t.Fatalf("without: %s with: %s", without, with)
+	}
+}
+
+// A non-zero agent exit is data only after a complete Pi report with a tool call and without
+// a provider error in its stderr.
+func TestAgentSessionError(t *testing.T) {
+	answered := ProcessStats{ToolCalls: []ToolCall{{ID: "a", Tool: "bash"}, {ID: "b", Tool: "read"}}}
+	if err := agentSessionError(0, ProcessStats{}, errors.New("no report"), ""); err != nil {
+		t.Fatalf("exit 0 is never an agent failure: %v", err)
+	}
+	// The observed case: two tool calls, then the refusal.
+	if err := agentSessionError(1, answered, nil, "[daggervals] 2026-11-19T08:24:15.503Z tool end bash ok 523ms\nThe model refused to complete the request"); err != nil {
+		t.Fatalf("a refusal after tool calls is data: %v", err)
+	}
+	for name, c := range map[string]struct {
+		processes ProcessStats
+		statsErr  error
+		stderr    string
+		want      string
+	}{
+		"no tool call":      {ProcessStats{}, nil, "401 Unauthorized", "no tool call"},
+		"incomplete report": {answered, errors.New("Pi process stats incomplete capture"), "", "incomplete capture"},
+		"auth":              {answered, nil, "Error: 401 invalid x-api-key", "provider error"},
+		"rate limit":        {answered, nil, "429 Too Many Requests: rate_limit_error", "provider error"},
+		"overloaded":        {answered, nil, "overloaded_error: Overloaded", "provider error"},
+		"server error":      {answered, nil, "upstream returned 503", "provider error"},
+	} {
+		if err := agentSessionError(1, c.processes, c.statsErr, c.stderr); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: must stay fatal with %q, got %v", name, c.want, err)
+		}
+	}
+}
+
 // taskError decides whether runTask aborts the run (and so skips the cache).
 func TestTaskErrorAbortsOnlyForStatsOrHarnessErrors(t *testing.T) {
 	verdict := errors.New("task failed validation")
@@ -116,5 +148,77 @@ func TestTaskErrorAbortsOnlyForStatsOrHarnessErrors(t *testing.T) {
 	}
 	if err := taskError(stats, verdict); !errors.Is(err, stats) || !errors.Is(err, verdict) {
 		t.Fatalf("stats error must abort and keep the verdict: %v", err)
+	}
+}
+
+// A single session is copied as it is: no Sessions, the same JSON as before multi-session.
+func TestAddSessionsSingleIsUnchanged(t *testing.T) {
+	ms := 1500.0
+	s := &session{
+		agentStats:    AgentStats{Turns: 3, Input: 10, Output: 5, CostUSD: 0.5},
+		processStats:  ProcessStats{ToolCalls: []ToolCall{{ID: "a", Tool: "bash"}}, Groups: []ProcessGroup{{Role: "parent", AgentType: "parent", Instances: []ProcessInstance{{ID: "parent", DurationMs: &ms}}}}},
+		networkStats:  NetworkStats{IPPackets: 7},
+		timedOut:      true,
+		statsError:    "partial",
+		agentExitCode: 0,
+	}
+	var got TaskOutcome
+	if err := addSessions(&got, []*session{s}, false); err != nil {
+		t.Fatal(err)
+	}
+	want := TaskOutcome{AgentStats: s.agentStats, ProcessStats: s.processStats, NetworkStats: s.networkStats, TimedOut: true, StatsError: "partial"}
+	gotJSON, _ := json.Marshal(got)
+	wantJSON, _ := json.Marshal(want)
+	if string(gotJSON) != string(wantJSON) || strings.Contains(string(gotJSON), "Sessions") {
+		t.Fatalf("got %s\nwant %s", gotJSON, wantJSON)
+	}
+}
+
+// Several sessions: sums, merged process stats, the first agent failure, per-session entries.
+func TestAddSessionsMulti(t *testing.T) {
+	ms := func(v float64) *float64 { return &v }
+	parent := func(d float64) []ProcessGroup {
+		return []ProcessGroup{{Role: "parent", AgentType: "parent", Instances: []ProcessInstance{{ID: "parent", DurationMs: ms(d)}}}}
+	}
+	one := &session{
+		agentStats:    AgentStats{Turns: 4, Input: 100, Output: 10, CacheRead: 50, CostUSD: 1},
+		processStats:  ProcessStats{Groups: parent(60000), ToolCalls: []ToolCall{{ID: "a"}, {ID: "b"}}, Warnings: []string{"w"}},
+		networkStats:  NetworkStats{IPPackets: 5, IPBytes: 500},
+		agentExitCode: 1, agentError: "The model refused to complete the request",
+		memory: &memory.SessionStats{Ops: map[string]float64{"add": 1, "search": 1}},
+		output: "explained the fix", recalled: []string{"memory text"},
+	}
+	two := &session{
+		agentStats:   AgentStats{Turns: 2, Input: 40, Output: 4, CostUSD: 0.25},
+		processStats: ProcessStats{Groups: parent(30000), ToolCalls: []ToolCall{{ID: "c"}}, Warnings: []string{"w"}},
+		networkStats: NetworkStats{IPPackets: 3, IPBytes: 300},
+		timedOut:     true, statsError: "partial",
+	}
+	var got TaskOutcome
+	if err := addSessions(&got, []*session{one, two}, true); err != nil {
+		t.Fatal(err)
+	}
+	if got.AgentStats != (AgentStats{Turns: 6, Input: 140, Output: 14, CacheRead: 50, CostUSD: 1.25}) {
+		t.Fatalf("agent stats: %+v", got.AgentStats)
+	}
+	if !got.TimedOut || got.AgentExitCode != 1 || got.AgentError != one.agentError || got.StatsError != "session 2: partial" {
+		t.Fatalf("flags: %+v", got)
+	}
+	if got.NetworkStats.IPPackets != 8 || got.NetworkStats.IPBytes != 800 || len(got.ProcessStats.ToolCalls) != 3 ||
+		len(got.ProcessStats.Groups) != 1 || len(got.ProcessStats.Groups[0].Instances) != 2 || len(got.ProcessStats.Warnings) != 1 {
+		t.Fatalf("merged stats: %+v %+v", got.NetworkStats, got.ProcessStats)
+	}
+	if len(got.Sessions) != 2 {
+		t.Fatalf("sessions: %+v", got.Sessions)
+	}
+	s1, s2 := got.Sessions[0], got.Sessions[1]
+	if s1.Output != "explained the fix" || len(s1.Recalled) != 1 || s1.OutputError != "" {
+		t.Fatalf("session 1 output/recalled: %+v", s1)
+	}
+	if s1.Index != 1 || *s1.WallClockSec != 60 || s1.ToolCalls != 2 || s1.Tokens != 160 || s1.CostUSD != 1 || s1.AgentExitCode != 1 || s1.Memory.Ops["add"] != 1 {
+		t.Fatalf("session 1: %+v", s1)
+	}
+	if s2.Index != 2 || *s2.WallClockSec != 30 || s2.ToolCalls != 1 || !s2.TimedOut || s2.StatsError != "partial" || s2.Memory != nil {
+		t.Fatalf("session 2: %+v", s2)
 	}
 }

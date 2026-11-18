@@ -114,6 +114,97 @@ type armTask struct {
 	// RunsWithSubagentCall counts runs where the parent called the subagent tool.
 	RunsWithSubagentCall int `json:"runsWithSubagentCall"`
 	TimedOutRuns         int `json:"timedOutRuns"`
+	// AgentFailedRuns counts runs whose agent exited non-zero by itself (agentExitCode).
+	AgentFailedRuns int `json:"agentFailedRuns"`
+	// Memory is set when any run of the task has memory stats.
+	Memory *armMemory `json:"memory,omitempty"`
+	// Sessions summarizes each session over the runs of a multi-session task.
+	Sessions []armSession `json:"sessions,omitempty"`
+}
+
+// armSession is session Index (from 1) of a multi-session task over the arm's runs.
+type armSession struct {
+	Index        int      `json:"index"`
+	WallClockSec numStats `json:"wallClockSec"`
+	ToolCalls    numStats `json:"toolCalls"`
+	Tokens       numStats `json:"tokens"`
+	CostUSD      numStats `json:"costUsd"`
+}
+
+// armMemory summarizes TaskOutcome.Memory over the runs that have it.
+type armMemory struct {
+	// Mode is the memory arm of the runs: on-with-fixture, on-without-fixture, off, or mixed
+	// (the runs differ, or some have no memory stats).
+	Mode string `json:"mode"`
+	// Mem0ToolCalls are the parent's mem0_memory tool calls; the other numbers come from the
+	// memory server's metrics.
+	Mem0ToolCalls numStats `json:"mem0ToolCalls"`
+	AddOps        numStats `json:"addOps"`
+	SearchOps     numStats `json:"searchOps"`
+	Errors        numStats `json:"errors"`
+	Stored        numStats `json:"stored"`
+	SeededStored  numStats `json:"seededStored"`
+	FixtureSize   numStats `json:"fixtureSize"`
+	AvgLatencyMs  numStats `json:"avgLatencyMs"`
+}
+
+func memoryMode(m *engine.MemoryStats) string {
+	switch {
+	case !m.Enabled:
+		return "off"
+	case m.Fixture:
+		return "on-with-fixture"
+	default:
+		return "on-without-fixture"
+	}
+}
+
+// aggregateMemory is nil when no run has memory stats. Missing numbers stay out of the stats.
+func aggregateMemory(present []taskReport) *armMemory {
+	var out *armMemory
+	var tools, adds, searches, errs, stored, seeded, fixtureSize, latency []float64
+	withStats := 0
+	for _, r := range present {
+		m := r.Memory
+		if m == nil {
+			continue
+		}
+		withStats++
+		if out == nil {
+			out = &armMemory{Mode: memoryMode(m)}
+		} else if out.Mode != memoryMode(m) {
+			out.Mode = "mixed"
+		}
+		tools = append(tools, float64(r.ToolUsage.ByTool["mem0_memory"].Calls))
+		if m.Ops != nil {
+			adds, searches = append(adds, m.Ops["add"]), append(searches, m.Ops["search"])
+		}
+		if m.Errors != nil {
+			errs = append(errs, *m.Errors)
+		}
+		if m.Stored != nil {
+			stored = append(stored, float64(*m.Stored))
+		}
+		if m.FixtureSize > 0 {
+			fixtureSize = append(fixtureSize, float64(m.FixtureSize))
+		}
+		if m.SeededStored != nil {
+			seeded = append(seeded, float64(*m.SeededStored))
+		}
+		if m.AvgLatencyMs != nil {
+			latency = append(latency, *m.AvgLatencyMs)
+		}
+	}
+	if out == nil {
+		return nil
+	}
+	if withStats < len(present) {
+		out.Mode = "mixed"
+	}
+	out.Mem0ToolCalls, out.AddOps, out.SearchOps = stats(tools), stats(adds), stats(searches)
+	out.Errors, out.Stored, out.SeededStored, out.AvgLatencyMs = stats(errs), stats(stored), stats(seeded), stats(latency)
+	out.FixtureSize = stats(fixtureSize)
+	return out
 }
 
 // armTotal sums the per-task medians of an arm over its tasks.
@@ -131,6 +222,7 @@ type armTotal struct {
 	SubagentCallsMedianSum float64 `json:"subagentCallsMedianSum"`
 	PatchLinesMedianSum    float64 `json:"patchLinesMedianSum"`
 	TimedOutRuns           int     `json:"timedOutRuns"`
+	AgentFailedRuns        int     `json:"agentFailedRuns"`
 	RunsDelegated          int     `json:"runsDelegated"`
 	// NeverDelegated is true when no run of the arm started a child agent or called the subagent tool.
 	NeverDelegated bool `json:"neverDelegated"`
@@ -272,10 +364,15 @@ func aggregateTask(task string, present []taskReport, missing []int) armTask {
 		if r.TimedOut {
 			t.TimedOutRuns++
 		}
+		if r.AgentExitCode != 0 {
+			t.AgentFailedRuns++
+		}
 	}
 	t.Score, t.CostUSD, t.WallClockSec, t.Turns = stats(score), stats(cost), stats(wall), stats(turns)
 	t.Tokens, t.PatchLines = stats(tokens), stats(patch)
 	t.ToolCalls, t.SubagentCalls = stats(tools), stats(subCalls)
+	t.Memory = aggregateMemory(present)
+	t.Sessions = aggregateSessions(present)
 	return t
 }
 
@@ -306,6 +403,7 @@ func totalOf(tasks []armTask) armTotal {
 		t.SubagentCallsMedianSum += medianOf(task.SubagentCalls)
 		t.PatchLinesMedianSum += medianOf(task.PatchLines)
 		t.TimedOutRuns += task.TimedOutRuns
+		t.AgentFailedRuns += task.AgentFailedRuns
 		t.RunsDelegated += task.RunsDelegated
 		if task.RunsDelegated > 0 || task.RunsWithSubagentCall > 0 {
 			anyDelegation = true
@@ -373,4 +471,28 @@ func (p *PreparedRuns) DryRunLines() []string {
 	lines = append(lines, paths...)
 	lines = append(lines, "", "=== prompt ===")
 	return append(lines, strings.Split(p.Prompt, "\n")...)
+}
+
+// aggregateSessions summarizes the sessions of the runs that have them, by index.
+func aggregateSessions(present []taskReport) []armSession {
+	var out []armSession
+	for index := 1; ; index++ {
+		var wall, tools, tokens, cost []float64
+		for _, r := range present {
+			if index > len(r.Sessions) {
+				continue
+			}
+			s := r.Sessions[index-1]
+			if s.WallClockSec != nil {
+				wall = append(wall, *s.WallClockSec)
+			}
+			tools = append(tools, float64(s.ToolCalls))
+			tokens = append(tokens, float64(s.Tokens))
+			cost = append(cost, s.CostUSD)
+		}
+		if len(tools) == 0 {
+			return out
+		}
+		out = append(out, armSession{Index: index, WallClockSec: stats(wall), ToolCalls: stats(tools), Tokens: stats(tokens), CostUSD: stats(cost)})
+	}
 }

@@ -43,7 +43,7 @@ curl -fsSL "https://go.dev/dl/go%s.linux-${arch}.tar.gz" | tar -C /usr/local -xz
 func (c GoTask) GetFinalDiff(ctx context.Context, container *dagger.Container) string {
 	diff, err := container.
 		WithWorkdir(goWorkdir).
-		WithExec([]string{"bash", "-c", "git add -A && git diff --cached \"$(cat " + rustBaseTreeFile + ")\""}).
+		WithExec([]string{"bash", "-c", "git add -A && git diff --cached \"$(cat " + BaseTreeFile + ")\""}).
 		Stdout(ctx)
 	if err != nil {
 		return fmt.Sprintf("Error getting final diff: %v", err)
@@ -87,7 +87,7 @@ func (e GoTestEnv) Script(ctx context.Context) (string, error) {
 	}
 	patch := strings.TrimRight(e.TestPatch, "\n")
 	return fmt.Sprintf("cd %s\ngit apply -v - <<'%s'\n%s\n%s\ngit add -A\ngit write-tree > %s\n",
-		goWorkdir, eof, patch, eof, rustBaseTreeFile), nil
+		goWorkdir, eof, patch, eof, BaseTreeFile), nil
 }
 
 // GoTaskOracle re-runs the task's go test command after the agent finished.

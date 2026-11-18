@@ -124,6 +124,16 @@ type DaggervalsEvalsOpts struct {
 	//
 	// Default: 1
 	Runs int
+	// Env file of the Hippocampus memory server (LLM gateway credentials); only that server gets it. Default: the workspace's .hippocampus.env when it exists, else no memory service.
+	HippocampusEnv *File
+	// Run with the memory disabled in the agent (no mem0 tool, no automatic recall or capture) and no memory service. The run id gets @nomem.
+	NoHippocampus bool
+	// Image tag of jacarte/mem0server. Default: the pinned c8f33b2. The tag and the image digest are part of the run id.
+	HippocampusRef string
+	// Seed the task's memory/fixture.json into the memory server before the agent starts. false adds @nofx to the run id.
+	//
+	// Default: true
+	MemoryFixture bool
 }
 
 func (r *Daggervals) Evals(auth *Secret, agentEnv *File, agentProfile string, cacheDir *Directory, opts ...DaggervalsEvalsOpts) *DaggervalsEvalResult {
@@ -159,6 +169,22 @@ func (r *Daggervals) Evals(auth *Secret, agentEnv *File, agentProfile string, ca
 		// `runs` optional argument
 		if !querybuilder.IsZeroValue(opts[i].Runs) {
 			q = q.Arg("runs", opts[i].Runs)
+		}
+		// `hippocampusEnv` optional argument
+		if !querybuilder.IsZeroValue(opts[i].HippocampusEnv) {
+			q = q.Arg("hippocampusEnv", opts[i].HippocampusEnv)
+		}
+		// `noHippocampus` optional argument
+		if !querybuilder.IsZeroValue(opts[i].NoHippocampus) {
+			q = q.Arg("noHippocampus", opts[i].NoHippocampus)
+		}
+		// `hippocampusRef` optional argument
+		if !querybuilder.IsZeroValue(opts[i].HippocampusRef) {
+			q = q.Arg("hippocampusRef", opts[i].HippocampusRef)
+		}
+		// `memoryFixture` optional argument
+		if !querybuilder.IsZeroValue(opts[i].MemoryFixture) {
+			q = q.Arg("memoryFixture", opts[i].MemoryFixture)
 		}
 	}
 	q = q.Arg("auth", auth)
@@ -230,13 +256,37 @@ func (r *Daggervals) GradeTask(ctx context.Context, taskName string, testbed *Di
 	return response, q.Execute(ctx)
 }
 
-func (r *Daggervals) Hello(ctx context.Context, auth *Secret, agentEnv *File, agentProfile string) (string, error) {
+// DaggervalsHelloOpts contains options for Daggervals.Hello
+type DaggervalsHelloOpts struct {
+	// Env file of the Hippocampus memory server (LLM gateway credentials); only that server gets it. Default: the workspace's .hippocampus.env when it exists, else no memory service.
+	HippocampusEnv *File
+	// Run with the memory disabled in the agent (no mem0 tool, no automatic recall or capture) and no memory service.
+	NoHippocampus bool
+	// Image tag of jacarte/mem0server. Default: the pinned c8f33b2.
+	HippocampusRef string
+}
+
+func (r *Daggervals) Hello(ctx context.Context, auth *Secret, agentEnv *File, agentProfile string, opts ...DaggervalsHelloOpts) (string, error) {
 	assertNotNil("auth", auth)
 	assertNotNil("agentEnv", agentEnv)
 	if r.hello != nil {
 		return *r.hello, nil
 	}
 	q := r.query.Select("hello")
+	for i := len(opts) - 1; i >= 0; i-- {
+		// `hippocampusEnv` optional argument
+		if !querybuilder.IsZeroValue(opts[i].HippocampusEnv) {
+			q = q.Arg("hippocampusEnv", opts[i].HippocampusEnv)
+		}
+		// `noHippocampus` optional argument
+		if !querybuilder.IsZeroValue(opts[i].NoHippocampus) {
+			q = q.Arg("noHippocampus", opts[i].NoHippocampus)
+		}
+		// `hippocampusRef` optional argument
+		if !querybuilder.IsZeroValue(opts[i].HippocampusRef) {
+			q = q.Arg("hippocampusRef", opts[i].HippocampusRef)
+		}
+	}
 	q = q.Arg("auth", auth)
 	q = q.Arg("agentEnv", agentEnv)
 	q = q.Arg("agentProfile", agentProfile)

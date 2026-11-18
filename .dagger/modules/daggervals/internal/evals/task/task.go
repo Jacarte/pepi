@@ -69,6 +69,16 @@ type FixTask struct {
 
 	Oracle Oracle
 
-	// TimeoutSeconds is the agent's time limit; 0 means DefaultTaskTimeoutSeconds.
+	// TimeoutSeconds is the agent's time limit, of each session; 0 means
+	// DefaultTaskTimeoutSeconds.
 	TimeoutSeconds int
+
+	// SessionPrompts, when set, makes a multi-session task: one fresh `pi -p` per prompt, in
+	// order, in the same container, so a session sees the workspace and the agent dir (and
+	// the memory service) the previous one left but not its conversation. TestEnv runs only
+	// before the first session. ProblemStatement then holds every prompt, for the judges.
+	SessionPrompts []string
+
+	// MemoryFixture are memories seeded into the task's memory server before the agent starts.
+	MemoryFixture []string
 }

@@ -17,6 +17,9 @@ type DaggervalsEvalsOpts = core.DaggervalsEvalsOpts
 // DaggervalsGradeTaskOpts contains options for Daggervals.GradeTask
 type DaggervalsGradeTaskOpts = core.DaggervalsGradeTaskOpts
 
+// DaggervalsHelloOpts contains options for Daggervals.Hello
+type DaggervalsHelloOpts = core.DaggervalsHelloOpts
+
 // DaggervalsTaskAgentFilesOpts contains options for Daggervals.TaskAgentFiles
 type DaggervalsTaskAgentFilesOpts = core.DaggervalsTaskAgentFilesOpts
 

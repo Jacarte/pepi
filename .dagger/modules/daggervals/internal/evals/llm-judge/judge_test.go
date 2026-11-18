@@ -161,6 +161,51 @@ func TestBuildReportsKeepsZeroScore(t *testing.T) {
 	}
 }
 
+// An agent failure reaches the judges, and the prompts say it is not evidence about the change.
+func TestReportCarriesAgentFailure(t *testing.T) {
+	reports := buildReports([]engine.TaskOutcome{{Task: "a", AgentExitCode: 1, AgentError: "The model refused to complete the request"}, {Task: "b"}})
+	with, _ := json.Marshal(reports[0])
+	without, _ := json.Marshal(reports[1])
+	if !strings.Contains(string(with), `"agentExitCode":1,"agentError":"The model refused to complete the request"`) || strings.Contains(string(without), "agentE") {
+		t.Fatalf("agent failure fields: %s / %s", with, without)
+	}
+	for name, prompt := range map[string]string{"JUDGE_PROMPT": JUDGE_PROMPT, "COMPARE_PROMPT": COMPARE_PROMPT, "COMPARE_RUNS_PROMPT": COMPARE_RUNS_PROMPT} {
+		for _, want := range []string{"agentExitCode", "agentError", "refusing the request", "instead of reading"} {
+			if !strings.Contains(prompt, want) {
+				t.Errorf("%s does not mention %q", name, want)
+			}
+		}
+	}
+	for _, want := range []string{"| Agent failures n/N |", "one arm has agent failures is weaker"} {
+		if !strings.Contains(COMPARE_RUNS_PROMPT, want) {
+			t.Errorf("COMPARE_RUNS_PROMPT lacks %q", want)
+		}
+	}
+}
+
+// The judges get the sessions of a multi-session task and are told how to read them.
+func TestReportCarriesSessions(t *testing.T) {
+	reports := buildReports([]engine.TaskOutcome{{Task: "a", Sessions: []engine.SessionOutcome{{Index: 1, ToolCalls: 3}, {Index: 2, ToolCalls: 1}}}, {Task: "b"}})
+	with, _ := json.Marshal(reports[0])
+	without, _ := json.Marshal(reports[1])
+	if !strings.Contains(string(with), `"sessions":[{"index":1,"wallClockSec":null,"turns":0,"toolCalls":3`) || strings.Contains(string(without), "sessions") {
+		t.Fatalf("sessions field: %s / %s", with, without)
+	}
+	for name, prompt := range map[string]string{"JUDGE_PROMPT": JUDGE_PROMPT, "COMPARE_PROMPT": COMPARE_PROMPT, "COMPARE_RUNS_PROMPT": COMPARE_RUNS_PROMPT} {
+		if !strings.Contains(prompt, "sessions (multi-session tasks only") || !strings.Contains(prompt, "not its conversation") {
+			t.Errorf("%s does not describe sessions", name)
+		}
+	}
+	for name, prompt := range map[string]string{"COMPARE_PROMPT": COMPARE_PROMPT, "COMPARE_RUNS_PROMPT": COMPARE_RUNS_PROMPT} {
+		if !strings.Contains(prompt, "later sessions' effort") || !strings.Contains(prompt, "first session runs under the same") {
+			t.Errorf("%s lacks the multi-session memory clause", name)
+		}
+	}
+	if !strings.Contains(COMPARE_RUNS_PROMPT, "| S<i> wall clock s median (min-max) |") || !strings.Contains(COMPARE_RUNS_PROMPT, "| S<i> tool calls median (min-max) |") {
+		t.Error("COMPARE_RUNS_PROMPT lacks the per-session rows")
+	}
+}
+
 func TestReportCarriesProfile(t *testing.T) {
 	reports := buildReports([]engine.TaskOutcome{{Task: "a", Profile: "plain"}, {Task: "b"}})
 	with, _ := json.Marshal(reports[0])

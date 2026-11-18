@@ -5,10 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"path"
+	"regexp"
+	"slices"
 	"strconv"
+	"strings"
 	"unicode/utf8"
 
 	"dagger/daggervals/internal/dagger"
+	"dagger/daggervals/internal/evals/memory"
 	"dagger/daggervals/internal/evals/network"
 	tasks "dagger/daggervals/internal/evals/task"
 
@@ -32,11 +36,12 @@ type Cache interface {
 
 type Engine struct {
 	Agent LLM
-	Cache Cache
-	Tasks []tasks.FixTask
-	// Skipped are valid tasks the harness cannot run (for example multi-session tasks).
-	// They are appended to the outcomes as Skipped entries so the run records them.
-	Skipped []TaskOutcome
+	// AgentEnv is the agent's env file: its values are replaced in AgentError.
+	AgentEnv *dagger.EnvFile
+	Cache    Cache
+	Tasks    []tasks.FixTask
+	// Memory, when set, gives each task its own memory services (or the off arm).
+	Memory *memory.Config
 }
 
 type AgentStats struct {
@@ -112,6 +117,9 @@ type ProcessUsage struct {
 // NetworkStats is passive packet accounting, not HTTP request or URL logging.
 type NetworkStats = network.Stats
 
+// MemoryStats are the memory server numbers of one task.
+type MemoryStats = memory.Stats
+
 // TaskOutcome keeps verification failures as data so callers can still report stats.
 type TaskOutcome struct {
 	Task             string
@@ -133,6 +141,12 @@ type TaskOutcome struct {
 	// StatsError says why the agent stats are missing or partial, if they are.
 	TimedOut   bool   `json:",omitempty"`
 	StatsError string `json:",omitempty"`
+	// AgentExitCode is the agent's own non-zero exit status after the model answered at least
+	// once (for example a model refusal; see agentSessionError) and AgentError the tail of its
+	// stderr, secrets replaced. As after a timeout the workspace was still graded, and the
+	// outcome is cached like any other: a new --fixed name reruns it.
+	AgentExitCode int    `json:",omitempty"`
+	AgentError    string `json:",omitempty"`
 
 	// Milestone grading (tasks suite), set only by a MilestoneOracle. Score counts the
 	// passed milestones by Scoring (prefix|count); Valid means Score == MaxScore.
@@ -141,15 +155,59 @@ type TaskOutcome struct {
 	MaxScore   int                     `json:",omitempty"`
 	Scoring    string                  `json:",omitempty"`
 
-	// Skipped tasks were not run; SkipReason says why.
+	// Skipped tasks were not run; SkipReason says why. Only older runs have them (multi-session
+	// tasks were skipped then).
 	Skipped    bool   `json:",omitempty"`
 	SkipReason string `json:",omitempty"`
+
+	// Memory is set only when the eval ran with memory on or off (Engine.Memory).
+	Memory *MemoryStats `json:",omitempty"`
+
+	// Sessions has one entry per `pi -p` of a multi-session task, nil for a single session.
+	// The fields above then cover the whole task: AgentStats and the NetworkStats counters
+	// are sums over the sessions, ProcessStats holds every session's agents and tool calls,
+	// TimedOut is true when any session timed out, AgentExitCode and AgentError are those of
+	// the first session whose agent failed, StatsError lists the sessions' stats problems,
+	// Output is the last session's answer and Memory spans all sessions. The milestones are
+	// graded once, on the workspace the last session left.
+	Sessions []SessionOutcome `json:",omitempty"`
 
 	Profile string
 }
 
+// SessionOutcome is one session of a multi-session task. Null numbers are unavailable.
+type SessionOutcome struct {
+	// Index counts from 1.
+	Index int `json:"index"`
+	// WallClockSec is the lifetime of the session's Pi process.
+	WallClockSec *float64 `json:"wallClockSec"`
+	Turns        int64    `json:"turns"`
+	// ToolCalls counts the parent's tool calls.
+	ToolCalls int `json:"toolCalls"`
+	// Tokens is input, output, cache read and cache write tokens together.
+	Tokens        int64   `json:"tokens"`
+	CostUSD       float64 `json:"costUsd"`
+	TimedOut      bool    `json:"timedOut,omitempty"`
+	AgentExitCode int     `json:"agentExitCode,omitempty"`
+	AgentError    string  `json:"agentError,omitempty"`
+	StatsError    string  `json:"statsError,omitempty"`
+	// Output is the session's final reply (its stdout), tail-truncated to
+	// MaxSessionOutputBytes: for an earlier session, what its memory capture saw last.
+	Output      string `json:"output,omitempty"`
+	OutputError string `json:"outputError,omitempty"`
+	// Recalled holds the Hippocampus recall messages of the session (parent and children),
+	// each cut to maxRecalled bytes: the memory the agent was given.
+	Recalled []string `json:"recalled,omitempty"`
+	// Memory is what the memory server did during the session and the memories stored after
+	// it; absent without memory services.
+	Memory *memory.SessionStats `json:"memory,omitempty"`
+}
+
 // MaxOutputBytes bounds TaskOutcome.Output so cached outcomes stay small.
 const MaxOutputBytes = 64 * 1024
+
+// MaxSessionOutputBytes bounds SessionOutcome.Output.
+const MaxSessionOutputBytes = 8 * 1024
 
 // tailBytes keeps the last max bytes of s, on a rune boundary, with a marker when cut.
 func tailBytes(s string, max int) string {
@@ -161,11 +219,6 @@ func tailBytes(s string, max int) string {
 		cut++
 	}
 	return "[... truncated " + strconv.Itoa(cut) + " bytes ...]\n" + s[cut:]
-}
-
-// SkippedOutcome records a task that was not run.
-func SkippedOutcome(name, reason, profile string) TaskOutcome {
-	return TaskOutcome{Task: name, Skipped: true, SkipReason: reason, Profile: profile}
 }
 
 func NewEngine(agent LLM, tasks []tasks.FixTask, cache Cache) *Engine {
@@ -188,7 +241,7 @@ func (e *Engine) Run(ctx context.Context, container *dagger.Container, runId str
 	}
 
 	if len(e.Tasks) == 0 {
-		return append([]TaskOutcome{}, e.Skipped...), nil
+		return []TaskOutcome{}, nil
 	}
 	// Pi provisioning and toolchains are outside the capture window.
 	setupFunc, err := e.Agent.Setup()(container).Sync(ctx)
@@ -225,15 +278,15 @@ func (e *Engine) Run(ctx context.Context, container *dagger.Container, runId str
 	if err != nil {
 		return outcomes, err
 	}
-	outcomes = append(outcomes, e.Skipped...)
 	return outcomes, e.saveCache(runId, outcomes)
 }
 
 // MaxParallelTasks bounds how many tasks run at the same time.
 const MaxParallelTasks = 3
 
-// runTask runs one task in its own container. It returns the outcome even when stats
-// extraction failed, together with that error. A failed verification is not an error.
+// runTask runs one task in its own container: its sessions one after the other, each a fresh
+// `pi -p`, then the grading. It returns the outcome even when stats extraction failed,
+// together with that error. A failed verification is not an error.
 func (e *Engine) runTask(ctx context.Context, preparedEnv *dagger.Container, task tasks.FixTask, profile string) (*TaskOutcome, error) {
 	prepared := task.Env.PrepareEnvForTesting(ctx)(preparedEnv)
 
@@ -245,37 +298,63 @@ func (e *Engine) runTask(ctx context.Context, preparedEnv *dagger.Container, tas
 		}
 		testEnvScript = script
 	}
-	timeout := timeoutSeconds(task)
-	result, err := network.Measure(prepared, testEnvScript, e.Agent.TaskCommand(task), timeout)
+	mem, err := e.Memory.StartTask(ctx, prepared, task.MemoryFixture)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("task %s: %w", task.Env.GetRepo(), err)
 	}
-	// Force execution even when the oracle does not query the container.
-	result, err = result.Sync(ctx)
-	if err != nil {
-		return nil, err
+	// Stopped only when runTask returns: every later exec on the agent container (final diff,
+	// Go and Rust oracles) would start the bound services again.
+	defer mem.Stop(context.WithoutCancel(ctx))
+
+	prompts := task.SessionPrompts
+	if len(prompts) == 0 {
+		prompts = []string{task.ProblemStatement}
 	}
-	// The measured exec has stopped capture, parsed it, and removed raw data.
-	networkStats, networkErr := network.ReadStats(ctx, result)
-	// A task that hit its time limit is graded as it stands; its stats may be partial.
-	timedOut, timeoutErr := result.Directory("/tmp").Exists(ctx, path.Base(network.TimeoutMarkerPath))
-	if timeoutErr != nil {
-		return nil, fmt.Errorf("task %s: read timeout marker: %w", task.Env.GetRepo(), timeoutErr)
+	container := mem.Bind(prepared)
+	multi := len(prompts) > 1
+	var agentDirBefore *dagger.Directory
+	if multi {
+		agentDirBefore = container.Directory(piAgentDir).WithoutFile("auth.json")
 	}
-	// Extract and print stats before verification, even if verification fails.
-	agentStats, processStats, agentErr := e.Agent.GetStats(ctx, result)
-	statsErr := errors.Join(agentErr, networkErr)
-	statsError := ""
-	if timedOut && statsErr != nil {
-		statsError = statsErr.Error()
-		statsErr = nil
+	var sessions []*session
+	for i, prompt := range prompts {
+		label := task.Env.GetRepo()
+		if multi {
+			label = fmt.Sprintf("%s session %d", label, i+1)
+		}
+		setupScript, reset := sessionSetup(i, testEnvScript)
+		if reset {
+			// After the previous session's AfterSession, so its capture has been delivered.
+			container = resetSession(container, agentDirBefore)
+		}
+		s, err := e.runSession(ctx, container, task, label, setupScript, prompt)
+		if err != nil {
+			return nil, err
+		}
+		if multi {
+			// Pi has delivered the session's capture before exiting (bounded by its request
+			// timeout), so the stored count shows it.
+			s.memory = mem.AfterSession(ctx, i+1)
+			output, err := s.result.Stdout(ctx)
+			if err != nil {
+				s.outputError = err.Error()
+			}
+			s.output = tailBytes(output, MaxSessionOutputBytes)
+			if s.recalled, err = recalled(ctx, s.result); err != nil {
+				return nil, fmt.Errorf("task %s: %w", label, err)
+			}
+		}
+		sessions = append(sessions, s)
+		container = s.result
+		// A stats error aborts the run; the task is still graded below, as for one session.
+		if s.statsErr != nil {
+			break
+		}
 	}
-	if agentErr == nil {
-		fmt.Printf("Task %s stats: %+v\n", task.Env.GetRepo(), agentStats)
-	}
-	if timedOut {
-		fmt.Printf("Task %s timed out after %d s\n", task.Env.GetRepo(), timeout)
-	}
+	// Right after the agent, before the final diff and the oracle touch the server.
+	memoryStats := mem.Stats(ctx)
+	result := container
+
 	// Verify the final answer even if stats extraction failed.
 	valid, grade, validationErr := e.verify(ctx, task, result)
 	validationError := ""
@@ -290,24 +369,191 @@ func (e *Engine) runTask(ctx context.Context, preparedEnv *dagger.Container, tas
 	outcome := &TaskOutcome{
 		Task:             task.Env.GetRepo(),
 		ProblemStatement: task.ProblemStatement,
-		AgentStats:       agentStats,
-		ProcessStats:     processStats,
-		NetworkStats:     networkStats,
 		Valid:            valid && validationErr == nil,
 		ValidationError:  validationError,
 		GoldenPatch:      task.GoldenPatch,
 		FinalDiff:        task.Env.GetFinalDiff(ctx, result),
 		Output:           tailBytes(output, MaxOutputBytes),
 		OutputError:      outputError,
-		TimedOut:         timedOut,
-		StatsError:       statsError,
 		Milestones:       grade.results,
 		Score:            grade.score,
 		MaxScore:         grade.maxScore,
 		Scoring:          grade.scoring,
+		Memory:           memoryStats,
 		Profile:          profile,
 	}
+	statsErr := addSessions(outcome, sessions, multi)
 	return outcome, taskError(statsErr, validationErr)
+}
+
+// session is what one measured `pi -p` of a task left: the container after it and its stats.
+type session struct {
+	result        *dagger.Container
+	agentStats    AgentStats
+	processStats  ProcessStats
+	networkStats  NetworkStats
+	timedOut      bool
+	agentExitCode int
+	agentError    string
+	// statsErr aborts the run; statsError is the stats problem of a timed out session, data.
+	statsErr   error
+	statsError string
+	memory     *memory.SessionStats
+	// output, outputError and recalled are kept for multi-session tasks only.
+	output      string
+	outputError string
+	recalled    []string
+}
+
+// runSession runs prompt as one measured `pi -p` on container, after setupScript, and reads
+// its stats. An error is fatal: an infrastructure failure or a Pi that never ran a session.
+func (e *Engine) runSession(ctx context.Context, container *dagger.Container, task tasks.FixTask, label, setupScript, prompt string) (*session, error) {
+	sessionTask := task
+	sessionTask.ProblemStatement = prompt
+	timeout := timeoutSeconds(task)
+	result, err := network.Measure(container, setupScript, e.Agent.TaskCommand(sessionTask), timeout)
+	if err != nil {
+		return nil, err
+	}
+	// Force execution even when the oracle does not query the container.
+	result, err = result.Sync(ctx)
+	if err != nil {
+		return nil, err
+	}
+	s := &session{result: result}
+	// The measured exec has stopped capture, parsed it, and removed raw data.
+	var networkErr error
+	s.networkStats, networkErr = network.ReadStats(ctx, result)
+	// A session that hit its time limit is graded as it stands; its stats may be partial.
+	if s.timedOut, err = result.Directory("/tmp").Exists(ctx, path.Base(network.TimeoutMarkerPath)); err != nil {
+		return nil, fmt.Errorf("task %s: read timeout marker: %w", label, err)
+	}
+	if s.agentExitCode, s.agentError, err = network.AgentExit(ctx, result, e.AgentEnv); err != nil {
+		return nil, fmt.Errorf("task %s: %w", label, err)
+	}
+	// Extract and print stats before verification, even if verification fails.
+	var agentErr error
+	s.agentStats, s.processStats, agentErr = e.Agent.GetStats(ctx, result)
+	if err := agentSessionError(s.agentExitCode, s.processStats, agentErr, s.agentError); err != nil {
+		return nil, fmt.Errorf("task %s: the agent exited with status %d, not counted as an agent failure because %w; its stderr ends with:\n%s", label, s.agentExitCode, err, s.agentError)
+	}
+	s.statsErr = errors.Join(agentErr, networkErr)
+	if s.timedOut && s.statsErr != nil {
+		s.statsError = s.statsErr.Error()
+		s.statsErr = nil
+	}
+	if agentErr == nil {
+		fmt.Printf("Task %s stats: %+v\n", label, s.agentStats)
+	}
+	if s.timedOut {
+		fmt.Printf("Task %s timed out after %d s\n", label, timeout)
+	}
+	if s.agentExitCode != 0 {
+		fmt.Printf("Task %s: the agent exited with status %d\n", label, s.agentExitCode)
+	}
+	return s, nil
+}
+
+// addSessions fills the agent fields of outcome from its sessions (see TaskOutcome.Sessions)
+// and returns their stats errors. A single session is copied as it is.
+func addSessions(outcome *TaskOutcome, sessions []*session, multi bool) error {
+	var statsErrors []string
+	var errs []error
+	for i, s := range sessions {
+		label := ""
+		if multi {
+			label = fmt.Sprintf("session %d: ", i+1)
+		}
+		if s.statsErr != nil {
+			errs = append(errs, s.statsErr)
+		}
+		if s.statsError != "" {
+			statsErrors = append(statsErrors, label+s.statsError)
+		}
+	}
+	outcome.StatsError = strings.Join(statsErrors, "\n")
+	if !multi {
+		s := sessions[0]
+		outcome.AgentStats, outcome.ProcessStats, outcome.NetworkStats = s.agentStats, s.processStats, s.networkStats
+		outcome.TimedOut, outcome.AgentExitCode, outcome.AgentError = s.timedOut, s.agentExitCode, s.agentError
+		return errors.Join(errs...)
+	}
+	var networks []NetworkStats
+	var processes []ProcessStats
+	for i, s := range sessions {
+		a := s.agentStats
+		outcome.AgentStats.Turns += a.Turns
+		outcome.AgentStats.Input += a.Input
+		outcome.AgentStats.Output += a.Output
+		outcome.AgentStats.CacheRead += a.CacheRead
+		outcome.AgentStats.CacheWrite += a.CacheWrite
+		outcome.AgentStats.CostUSD += a.CostUSD
+		networks, processes = append(networks, s.networkStats), append(processes, s.processStats)
+		outcome.TimedOut = outcome.TimedOut || s.timedOut
+		if outcome.AgentExitCode == 0 {
+			outcome.AgentExitCode, outcome.AgentError = s.agentExitCode, s.agentError
+		}
+		outcome.Sessions = append(outcome.Sessions, SessionOutcome{
+			Index:         i + 1,
+			WallClockSec:  parentWallClockSec(s.processStats),
+			Turns:         a.Turns,
+			ToolCalls:     len(s.processStats.ToolCalls),
+			Tokens:        a.Input + a.Output + a.CacheRead + a.CacheWrite,
+			CostUSD:       a.CostUSD,
+			TimedOut:      s.timedOut,
+			AgentExitCode: s.agentExitCode,
+			AgentError:    s.agentError,
+			StatsError:    s.statsError,
+			Output:        s.output,
+			OutputError:   s.outputError,
+			Recalled:      s.recalled,
+			Memory:        s.memory,
+		})
+	}
+	outcome.NetworkStats = network.Merge(networks...)
+	outcome.ProcessStats = mergeProcessStats(processes)
+	return errors.Join(errs...)
+}
+
+// parentWallClockSec is the lifetime of the parent Pi process, nil when unavailable.
+func parentWallClockSec(ps ProcessStats) *float64 {
+	for _, g := range ps.Groups {
+		if g.Role != "parent" {
+			continue
+		}
+		for _, in := range g.Instances {
+			if in.DurationMs != nil {
+				sec := *in.DurationMs / 1000
+				return &sec
+			}
+		}
+	}
+	return nil
+}
+
+// mergeProcessStats puts the sessions' process stats together: the instances of the same
+// role and agent type in one group, every tool call and background process, and the
+// distinct warnings.
+func mergeProcessStats(all []ProcessStats) ProcessStats {
+	merged := ProcessStats{Groups: []ProcessGroup{}, BackgroundProcesses: []ProcessResource{}, Warnings: []string{}, ToolCalls: []ToolCall{}}
+	for _, ps := range all {
+		for _, g := range ps.Groups {
+			i := slices.IndexFunc(merged.Groups, func(m ProcessGroup) bool { return m.Role == g.Role && m.AgentType == g.AgentType })
+			if i < 0 {
+				merged.Groups = append(merged.Groups, ProcessGroup{Role: g.Role, AgentType: g.AgentType})
+				i = len(merged.Groups) - 1
+			}
+			merged.Groups[i].Instances = append(merged.Groups[i].Instances, g.Instances...)
+		}
+		merged.BackgroundProcesses = append(merged.BackgroundProcesses, ps.BackgroundProcesses...)
+		merged.ToolCalls = append(merged.ToolCalls, ps.ToolCalls...)
+		for _, w := range ps.Warnings {
+			if !slices.Contains(merged.Warnings, w) {
+				merged.Warnings = append(merged.Warnings, w)
+			}
+		}
+	}
+	return merged
 }
 
 func timeoutSeconds(task tasks.FixTask) int {
@@ -316,6 +562,28 @@ func timeoutSeconds(task tasks.FixTask) int {
 	}
 	return task.TimeoutSeconds
 }
+
+// agentSessionError says why a non-zero agent exit is not the agent's outcome. It is only when
+// Pi ran a session in which the model answered: a complete process report with a tool call.
+// A model turn is not enough, since Pi also saves provider errors as assistant messages.
+// Without that evidence Pi failed at startup (settings, extensions, auth), and a provider
+// error (auth, rate limit, overload, 5xx) in the stderr tail is the harness's environment, not
+// the agent: both would score 0 across a whole arm, so they stay fatal and the user reruns.
+func agentSessionError(exitCode int, processes ProcessStats, statsErr error, stderrTail string) error {
+	switch {
+	case exitCode == 0:
+		return nil
+	case statsErr != nil:
+		return fmt.Errorf("there is no complete Pi process report (%w)", statsErr)
+	case len(processes.ToolCalls) == 0:
+		return errors.New("the model made no tool call, so it never answered")
+	case providerErrorPattern.MatchString(stderrTail):
+		return errors.New("its stderr shows a provider error (auth, rate limit, overload or 5xx)")
+	}
+	return nil
+}
+
+var providerErrorPattern = regexp.MustCompile(`(?i)\b(?:401|403|429|5\d\d)\b|rate.?limit|overloaded|authentication|unauthorized`)
 
 // HarnessError is a failure of the grading harness itself (the grader container could not be
 // built, a script returned a usage error), not a verdict on the agent's work. It aborts the

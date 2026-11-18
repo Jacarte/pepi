@@ -12,7 +12,7 @@ func TestAgentOnlyGetsSeed(t *testing.T) {
 		t.Fatalf("seed path: %q", got)
 	}
 	for _, p := range []string{seedPath("x"), goWorkdir} {
-		if strings.Contains(p, "hidden") || strings.Contains(p, "milestones") || strings.Contains(p, "task.yaml") {
+		if strings.Contains(p, "hidden") || strings.Contains(p, "milestones") || strings.Contains(p, "task.yaml") || strings.Contains(p, "memory") {
 			t.Fatalf("agent-visible path %q names grading files", p)
 		}
 	}
@@ -25,7 +25,7 @@ func TestAgentOnlyGetsSeed(t *testing.T) {
 	if script != want {
 		t.Fatalf("test env script:\n%s\nwant:\n%s", script, want)
 	}
-	for _, forbidden := range []string{"hidden", "milestones", "/tasks", "git apply"} {
+	for _, forbidden := range []string{"hidden", "milestones", "/tasks", "git apply", "memory"} {
 		if strings.Contains(script, forbidden) || strings.Contains(seedGitScript, forbidden) {
 			t.Fatalf("agent-side scripts must not mention %q", forbidden)
 		}

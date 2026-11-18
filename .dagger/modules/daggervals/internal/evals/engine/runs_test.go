@@ -32,6 +32,8 @@ func TestRunID(t *testing.T) {
 		{"several runs, fixed id, tasks suffix", "tm-plain", 2, 3, tasksSuffix, "tm-plain-2" + tasksSuffix},
 		{"several runs, hash id, suite suffix", "abc123", 3, 3, "@all", "abc123-3@all"},
 		{"several runs, no suffix", "tm-plain", 1, 2, "", "tm-plain-1"},
+		{"memory on after the tasks suffix", "tm-plain", 2, 3, tasksSuffix + "@hippo=c8f33b2-3169412edb99", "tm-plain-2" + tasksSuffix + "@hippo=c8f33b2-3169412edb99"},
+		{"memory off", "abc123", 1, 1, "@go@nomem", "abc123@go@nomem"},
 	}
 	for _, tt := range tests {
 		if got := RunID(tt.base, tt.i, tt.runs, tt.suffix); got != tt.want {

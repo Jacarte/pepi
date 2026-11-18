@@ -1,6 +1,7 @@
 package task
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -14,12 +15,8 @@ import (
 )
 
 // Tasks are read from the pepi-eval-tasks layout
-// tasks/<name>/{task.yaml, milestones.yaml, prompts/NN.md, seed/, hidden/}
+// tasks/<name>/{task.yaml, milestones.yaml, prompts/NN.md, seed/, hidden/, memory/fixture.json}
 // through a TaskSource, so the parsing is tested without a Dagger engine.
-
-// MultiSessionSkipReason is why tasks with sessions > 1 are skipped: the engine runs one
-// `pi -p` per task.
-const MultiSessionSkipReason = "multi-session not supported yet"
 
 const (
 	// DefaultTaskTimeoutSeconds is the agent time limit when FixTask.TimeoutSeconds is 0.
@@ -59,12 +56,9 @@ type RepoTaskSpec struct {
 	Milestones            []Milestone
 	// Prompts holds prompts/01.md .. prompts/NN.md, one per session.
 	Prompts []string
-}
-
-// SkippedTask is a valid task the harness cannot run yet.
-type SkippedTask struct {
-	Name   string
-	Reason string
+	// MemoryFixture holds the texts of the optional memory/fixture.json. Only the harness
+	// reads it, to seed the memory server; it never reaches the agent's container.
+	MemoryFixture []string
 }
 
 // taskYAML mirrors task.yaml, including the fields only the tasks repo scripts read.
@@ -119,9 +113,9 @@ func ParseTaskYAML(dirName, data string) (RepoTaskSpec, error) {
 		bad("name %q does not match directory %q", raw.Name, dirName)
 	}
 	switch raw.Kind {
-	case "long", "needs-subagents", "parallel":
+	case "long", "needs-subagents", "parallel", "memory":
 	default:
-		bad("kind must be long|needs-subagents|parallel (got %q)", raw.Kind)
+		bad("kind must be long|needs-subagents|parallel|memory (got %q)", raw.Kind)
 	}
 	if raw.Language != "go" {
 		bad("language must be go (got %q)", raw.Language)
@@ -199,8 +193,33 @@ func ParseMilestonesYAML(data string) ([]Milestone, error) {
 	return raw.Milestones, nil
 }
 
+// ParseMemoryFixture validates memory/fixture.json: {"memories":[{"text":"..."}]}.
+func ParseMemoryFixture(data string) ([]string, error) {
+	var raw struct {
+		Memories []struct {
+			Text string `json:"text"`
+		} `json:"memories"`
+	}
+	decoder := json.NewDecoder(strings.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&raw); err != nil {
+		return nil, fmt.Errorf("memory/fixture.json: %w", err)
+	}
+	if len(raw.Memories) == 0 {
+		return nil, errors.New("memory/fixture.json: no memories")
+	}
+	texts := make([]string, len(raw.Memories))
+	for i, m := range raw.Memories {
+		if strings.TrimSpace(m.Text) == "" {
+			return nil, fmt.Errorf("memory/fixture.json: memory #%d: text missing", i+1)
+		}
+		texts[i] = m.Text
+	}
+	return texts, nil
+}
+
 // LoadRepoTask reads and validates tasks/<name>, which must hold one prompt per session
-// (prompts/01.md .. NN.md).
+// (prompts/01.md .. NN.md) and may hold memory/fixture.json.
 func LoadRepoTask(src TaskSource, name string) (RepoTaskSpec, error) {
 	dir := "tasks/" + name
 	taskYAMLText, err := src.ReadFile(dir + "/task.yaml")
@@ -242,15 +261,29 @@ func LoadRepoTask(src TaskSource, name string) (RepoTaskSpec, error) {
 		}
 		spec.Prompts = append(spec.Prompts, text)
 	}
+
+	taskEntries, err := src.ListDir(dir)
+	if err != nil {
+		return RepoTaskSpec{}, fmt.Errorf("task %s: %w", name, err)
+	}
+	if slices.Contains(taskEntries, "memory/") {
+		fixture, err := src.ReadFile(dir + "/memory/fixture.json")
+		if err != nil {
+			return RepoTaskSpec{}, fmt.Errorf("task %s: %w", name, err)
+		}
+		if spec.MemoryFixture, err = ParseMemoryFixture(fixture); err != nil {
+			return RepoTaskSpec{}, fmt.Errorf("task %s: %w", name, err)
+		}
+	}
 	return spec, nil
 }
 
-// LoadRepoTasks loads the named tasks, or every task directory when names is empty.
-// A task with sessions > 1 is returned in skipped. A malformed task is an error.
-func LoadRepoTasks(src TaskSource, names []string) (runnable []RepoTaskSpec, skipped []SkippedTask, err error) {
+// LoadRepoTasks loads the named tasks, or every task directory when names is empty. A
+// malformed task is an error.
+func LoadRepoTasks(src TaskSource, names []string) ([]RepoTaskSpec, error) {
 	entries, err := src.ListDir("tasks")
 	if err != nil {
-		return nil, nil, fmt.Errorf("list tasks: %w", err)
+		return nil, fmt.Errorf("list tasks: %w", err)
 	}
 	var available []string
 	for _, entry := range entries {
@@ -265,23 +298,20 @@ func LoadRepoTasks(src TaskSource, names []string) (runnable []RepoTaskSpec, ski
 		selected = nil
 		for _, name := range names {
 			if !slices.Contains(available, name) {
-				return nil, nil, fmt.Errorf("unknown task %q: available tasks: %s", name, strings.Join(available, ", "))
+				return nil, fmt.Errorf("unknown task %q: available tasks: %s", name, strings.Join(available, ", "))
 			}
 			selected = append(selected, name)
 		}
 	}
+	var specs []RepoTaskSpec
 	for _, name := range selected {
 		spec, err := LoadRepoTask(src, name)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
-		if spec.Sessions > 1 {
-			skipped = append(skipped, SkippedTask{Name: name, Reason: MultiSessionSkipReason})
-			continue
-		}
-		runnable = append(runnable, spec)
+		specs = append(specs, spec)
 	}
-	return runnable, skipped, nil
+	return specs, nil
 }
 
 // ParseTaskNames splits the comma-separated taskNames argument: trimmed, without
@@ -317,8 +347,8 @@ func TasksRunIDSuffix(commitSHA string, names []string) (string, error) {
 	return suffix, nil
 }
 
-// TimeoutSeconds is the agent time limit: the deadline for parallel tasks that have
-// one, else the session timeout, capped at MaxTaskTimeoutSeconds.
+// TimeoutSeconds is the agent time limit of each session: the deadline for parallel tasks
+// that have one, else the session timeout, capped at MaxTaskTimeoutSeconds.
 func (s RepoTaskSpec) TimeoutSeconds() int {
 	minutes := s.SessionTimeoutMinutes
 	if s.Kind == "parallel" && s.DeadlineMinutes > 0 {
@@ -327,8 +357,18 @@ func (s RepoTaskSpec) TimeoutSeconds() int {
 	return min(minutes*60, MaxTaskTimeoutSeconds)
 }
 
-// ProblemStatement is the prompt of the only session of a runnable task.
-func (s RepoTaskSpec) ProblemStatement() string { return s.Prompts[0] }
+// ProblemStatement is the prompt of a single-session task; for more sessions, every prompt
+// under a "Session N prompt:" heading, for the judges (the agent gets one prompt per session).
+func (s RepoTaskSpec) ProblemStatement() string {
+	if len(s.Prompts) == 1 {
+		return s.Prompts[0]
+	}
+	parts := make([]string, len(s.Prompts))
+	for i, prompt := range s.Prompts {
+		parts[i] = fmt.Sprintf("Session %d prompt:\n%s", i+1, prompt)
+	}
+	return strings.Join(parts, "\n\n")
+}
 
 // DefaultTasksRepo is the tasks repo used when tasksRepo is empty.
 const DefaultTasksRepo = "https://github.com/Jacarte/pepi-eval-tasks.git"

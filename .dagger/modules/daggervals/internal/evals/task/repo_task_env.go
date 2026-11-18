@@ -35,17 +35,17 @@ func (t RepoTask) PrepareEnvForTesting(ctx context.Context) dagger.WithContainer
 type RepoTestEnv struct{}
 
 func (RepoTestEnv) Script(ctx context.Context) (string, error) {
-	return fmt.Sprintf("cd %s\ngit add -A\ngit write-tree > %s\n", goWorkdir, rustBaseTreeFile), nil
+	return fmt.Sprintf("cd %s\ngit add -A\ngit write-tree > %s\n", goWorkdir, BaseTreeFile), nil
 }
 
 func seedPath(name string) string { return "tasks/" + name + "/seed" }
 
 func taskPath(name string) string { return "tasks/" + name }
 
-// NewRepoFixTask builds the FixTask of a single-session task. tasksTree is the whole
-// tasks repo checkout; base is the plain image the grader starts from.
+// NewRepoFixTask builds the FixTask of a task. tasksTree is the whole tasks repo checkout;
+// base is the plain image the grader starts from.
 func NewRepoFixTask(spec RepoTaskSpec, tasksTree *dagger.Directory, base *dagger.Container) FixTask {
-	return FixTask{
+	fixTask := FixTask{
 		ProblemStatement: spec.ProblemStatement(),
 		Env: RepoTask{
 			GoTask: GoTask{Repo: taskPath(spec.Name), GoVersion: spec.GoVersion},
@@ -58,7 +58,12 @@ func NewRepoFixTask(spec RepoTaskSpec, tasksTree *dagger.Directory, base *dagger
 			Base:      base,
 		},
 		TimeoutSeconds: spec.TimeoutSeconds(),
+		MemoryFixture:  spec.MemoryFixture,
 	}
+	if len(spec.Prompts) > 1 {
+		fixTask.SessionPrompts = spec.Prompts
+	}
+	return fixTask
 }
 
 // RepoTaskOracle grades the hidden milestones in a fresh container.

@@ -11,6 +11,7 @@ import (
 	"dagger/daggervals/internal/evals/engine"
 	"dagger/daggervals/internal/evals/llm"
 	judge "dagger/daggervals/internal/evals/llm-judge"
+	"dagger/daggervals/internal/evals/memory"
 
 	"dagger/daggervals/internal/evals/setup"
 	"dagger/daggervals/internal/evals/task"
@@ -19,13 +20,21 @@ import (
 type Daggervals struct {
 	Source *dagger.Directory
 	Auth   *dagger.Secret
+	// HippocampusEnvDir holds the workspace's .hippocampus.env, if there is one. It is never in
+	// Source: only the memory server gets it.
+	// +private
+	HippocampusEnvDir *dagger.Directory
 }
+
+// hippocampusEnvFile is the default env file of the memory server, at the workspace root.
+const hippocampusEnvFile = ".hippocampus.env"
 
 func New(
 	// The current workspace, auto-populated by Dagger.
 	ws *dagger.Workspace,
 ) *Daggervals {
 	return &Daggervals{
+		HippocampusEnvDir: ws.Directory("/", dagger.WorkspaceDirectoryOpts{Include: []string{hippocampusEnvFile}}),
 		Source: ws.Directory("/", dagger.WorkspaceDirectoryOpts{
 			Exclude: []string{
 				"logs",
@@ -39,6 +48,7 @@ func New(
 				"bin",
 				"auth.json",
 				"evals_cache",
+				hippocampusEnvFile,
 			},
 		}),
 	}
@@ -49,17 +59,37 @@ type EvalResult struct {
 	Cache *dagger.Directory
 }
 
-func (m *Daggervals) Hello(ctx context.Context, auth *dagger.Secret, agentEnv *dagger.File, agentProfile string) (string, error) {
+func (m *Daggervals) Hello(
+	ctx context.Context,
+	auth *dagger.Secret,
+	agentEnv *dagger.File,
+	agentProfile string,
+	// Env file of the Hippocampus memory server (LLM gateway credentials); only that server gets it. Default: the workspace's .hippocampus.env when it exists, else no memory service.
+	// +optional
+	hippocampusEnv *dagger.File,
+	// Run with the memory disabled in the agent (no mem0 tool, no automatic recall or capture) and no memory service.
+	// +optional
+	noHippocampus bool,
+	// Image tag of jacarte/mem0server. Default: the pinned c8f33b2.
+	// +optional
+	hippocampusRef string,
+) (string, error) {
+	memoryConfig, err := m.memoryConfig(ctx, hippocampusEnv, noHippocampus, hippocampusRef, true)
+	if err != nil {
+		return "", err
+	}
 	rootContainer, err := rootImage().Sync(ctx)
 	if err != nil {
 		return "", err
 	}
 
 	evalEngine := engine.NewEngine(
-		llm.NewPiAgent(&setup.PiSetup{Workspace: m.Source, Auth: auth, Env: agentEnv.AsEnvFile(), Profile: agentProfile}),
+		llm.NewPiAgent(&setup.PiSetup{Workspace: m.Source, Auth: auth, Env: agentEnv.AsEnvFile(), Profile: agentProfile, Memory: memoryConfig.Mode()}),
 		[]task.FixTask{task.HelloWorldTask},
 		nil,
 	)
+	evalEngine.Memory = memoryConfig
+	evalEngine.AgentEnv = agentEnv.AsEnvFile()
 	outcomes, err := evalEngine.Run(ctx, rootContainer, "noul", agentProfile)
 	if err != nil {
 		return "", err
@@ -94,11 +124,28 @@ func (m *Daggervals) Evals(
 	// +optional
 	// +default=1
 	runs int,
+	// Env file of the Hippocampus memory server (LLM gateway credentials); only that server gets it. Default: the workspace's .hippocampus.env when it exists, else no memory service.
+	// +optional
+	hippocampusEnv *dagger.File,
+	// Run with the memory disabled in the agent (no mem0 tool, no automatic recall or capture) and no memory service. The run id gets @nomem.
+	// +optional
+	noHippocampus bool,
+	// Image tag of jacarte/mem0server. Default: the pinned c8f33b2. The tag and the image digest are part of the run id.
+	// +optional
+	hippocampusRef string,
+	// Seed the task's memory/fixture.json into the memory server before the agent starts. false adds @nofx to the run id.
+	// +optional
+	// +default=true
+	memoryFixture bool,
 ) (*EvalResult, error) {
 	if err := engine.ValidateRuns(runs); err != nil {
 		return nil, err
 	}
 	if err := task.ValidateTasksSuiteArgs(suite, tasksRepo, tasksRef, taskNames); err != nil {
+		return nil, err
+	}
+	memoryConfig, err := m.memoryConfig(ctx, hippocampusEnv, noHippocampus, hippocampusRef, memoryFixture)
+	if err != nil {
 		return nil, err
 	}
 	var tasks []task.FixTask
@@ -119,11 +166,11 @@ func (m *Daggervals) Evals(
 			return nil, err
 		}
 		if len(repoSuite.Tasks) == 0 {
-			return nil, fmt.Errorf("no runnable task selected: %s", repoSuite.skippedSummary())
+			return nil, fmt.Errorf("no task in the tasks repo")
 		}
 		tasks = repoSuite.Tasks
 	}
-	piSetup := setup.PiSetup{Workspace: m.Source, Auth: auth, Env: agentEnv.AsEnvFile(), Profile: agentProfile}
+	piSetup := setup.PiSetup{Workspace: m.Source, Auth: auth, Env: agentEnv.AsEnvFile(), Profile: agentProfile, Memory: memoryConfig.Mode()}
 	piAgent := llm.NewPiAgent(&piSetup)
 
 	baseID := fixed
@@ -140,10 +187,11 @@ func (m *Daggervals) Evals(
 	} else if suite != "" && suite != "rust" {
 		idSuffix = "@" + suite
 	}
+	idSuffix += memoryConfig.RunIDSuffix()
 
 	result := &EvalResult{Cache: cacheDir}
 	for i := 1; i <= runs; i++ {
-		one, err := evalOnce(ctx, piAgent, tasks, repoSuite, rootContainer, agentProfile, result.Cache, engine.RunID(baseID, i, runs, idSuffix))
+		one, err := evalOnce(ctx, piAgent, piSetup.Env, memoryConfig, tasks, rootContainer, agentProfile, result.Cache, engine.RunID(baseID, i, runs, idSuffix))
 		if err != nil {
 			return nil, err
 		}
@@ -158,15 +206,11 @@ func (m *Daggervals) Evals(
 
 // evalOnce runs the eval and the judge once under runId. The returned cache directory is
 // cacheDir plus this run's entry and eval report.
-func evalOnce(ctx context.Context, piAgent *llm.PiAgent, tasks []task.FixTask, repoSuite *tasksSuite, rootContainer *dagger.Container, agentProfile string, cacheDir *dagger.Directory, runId string) (*EvalResult, error) {
+func evalOnce(ctx context.Context, piAgent *llm.PiAgent, agentEnv *dagger.EnvFile, memoryConfig *memory.Config, tasks []task.FixTask, rootContainer *dagger.Container, agentProfile string, cacheDir *dagger.Directory, runId string) (*EvalResult, error) {
 	evalCache := cache.NewGHCache(cacheDir, ctx)
 	evalEngine := engine.NewEngine(piAgent, tasks, evalCache)
-	if repoSuite != nil {
-		for _, skip := range repoSuite.Skipped {
-			fmt.Printf("Task %s skipped: %s\n", skip.Name, skip.Reason)
-			evalEngine.Skipped = append(evalEngine.Skipped, engine.SkippedOutcome("tasks/"+skip.Name, skip.Reason, agentProfile))
-		}
-	}
+	evalEngine.Memory = memoryConfig
+	evalEngine.AgentEnv = agentEnv
 
 	outcomes, err := evalEngine.Run(ctx, rootContainer, runId, agentProfile)
 	if err != nil {
@@ -179,13 +223,28 @@ func evalOnce(ctx context.Context, piAgent *llm.PiAgent, tasks []task.FixTask, r
 	}
 
 	joinedEvals := strings.Join(judgedEvals, "\n")
-	if repoSuite != nil && len(repoSuite.Skipped) > 0 {
-		joinedEvals += "\n\nSkipped tasks: " + repoSuite.skippedSummary() + "\n"
-	}
 	return &EvalResult{
 		Cache: evalCache.GetDirectory().WithNewFile(runId+".eval.md", joinedEvals),
 		Log:   judgedEvals,
 	}, nil
+}
+
+// memoryConfig resolves the memory flags of Evals and Hello. Without hippocampusEnv the
+// workspace's .hippocampus.env is used when it exists.
+func (m *Daggervals) memoryConfig(ctx context.Context, hippocampusEnv *dagger.File, noHippocampus bool, hippocampusRef string, memoryFixture bool) (*memory.Config, error) {
+	if hippocampusEnv != nil && noHippocampus {
+		return nil, fmt.Errorf("hippocampusEnv and noHippocampus are mutually exclusive")
+	}
+	if hippocampusEnv == nil && !noHippocampus {
+		exists, err := m.HippocampusEnvDir.Exists(ctx, hippocampusEnvFile)
+		if err != nil {
+			return nil, err
+		}
+		if exists {
+			hippocampusEnv = m.HippocampusEnvDir.File(hippocampusEnvFile)
+		}
+	}
+	return memory.Resolve(ctx, hippocampusEnv, noHippocampus, hippocampusRef, memoryFixture)
 }
 
 // evalSuiteTasks maps the suite argument of Evals to its tasks. Empty means rust.
@@ -205,18 +264,9 @@ func evalSuiteTasks(suite string) ([]task.FixTask, error) {
 // tasksSuite is the result of loading the tasks repo at a resolved commit.
 type tasksSuite struct {
 	Tasks       []task.FixTask
-	Skipped     []task.SkippedTask
 	RunIDSuffix string
 	// Tree is the whole checkout of the repo, without .git.
 	Tree *dagger.Directory
-}
-
-func (s *tasksSuite) skippedSummary() string {
-	parts := make([]string, 0, len(s.Skipped))
-	for _, skip := range s.Skipped {
-		parts = append(parts, skip.Name+" ("+skip.Reason+")")
-	}
-	return strings.Join(parts, ", ")
 }
 
 // checkoutTasksRepo resolves tasksRef (a branch or a sha) to a commit and returns that
@@ -252,7 +302,7 @@ func tasksTree(ctx context.Context, tasksRepo, tasksRef string, tasksToken *dagg
 	return checkoutTasksRepo(ctx, tasksRepo, tasksRef, tasksToken)
 }
 
-// loadTasksSuite loads the runnable tasks of the repo at tasksRef. base is the plain image
+// loadTasksSuite loads the tasks of the repo at tasksRef. base is the plain image
 // the grading container is built from.
 func loadTasksSuite(ctx context.Context, tasksRepo, tasksRef, taskNames string, tasksToken *dagger.Secret, base *dagger.Container) (*tasksSuite, error) {
 	names, err := task.ParseTaskNames(taskNames)
@@ -267,11 +317,11 @@ func loadTasksSuite(ctx context.Context, tasksRepo, tasksRef, taskNames string, 
 	if err != nil {
 		return nil, err
 	}
-	specs, skipped, err := task.LoadRepoTasks(task.DirSource{Ctx: ctx, Dir: tree}, names)
+	specs, err := task.LoadRepoTasks(task.DirSource{Ctx: ctx, Dir: tree}, names)
 	if err != nil {
 		return nil, err
 	}
-	suite := &tasksSuite{Skipped: skipped, RunIDSuffix: suffix, Tree: tree}
+	suite := &tasksSuite{RunIDSuffix: suffix, Tree: tree}
 	for _, spec := range specs {
 		suite.Tasks = append(suite.Tasks, task.NewRepoFixTask(spec, tree, base))
 	}
