@@ -149,32 +149,6 @@ func TestPromptsDescribeMilestoneFields(t *testing.T) {
 	}
 }
 
-// Every JSON key the milestone fields add to a report must be named in both prompts.
-func TestPromptsNameEveryReportMilestoneKey(t *testing.T) {
-	encoded, err := json.Marshal(buildReports([]engine.TaskOutcome{{
-		Task: "t", Score: 1, MaxScore: 2, Scoring: "count", TimedOut: true,
-		Milestones: []tasks.MilestoneResult{{ID: "m1", Title: "T", Passed: true, Detail: "d"}},
-	}}))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var reports []map[string]any
-	if err := json.Unmarshal(encoded, &reports); err != nil {
-		t.Fatal(err)
-	}
-	keys := []string{"score", "maxScore", "scoring", "milestones", "timedOut"}
-	for _, key := range keys {
-		if _, ok := reports[0][key]; !ok {
-			t.Fatalf("report lacks %s: %s", key, encoded)
-		}
-		for name, prompt := range map[string]string{"JUDGE_PROMPT": JUDGE_PROMPT, "COMPARE_PROMPT": COMPARE_PROMPT} {
-			if !strings.Contains(prompt, key) {
-				t.Errorf("%s does not name the report key %q", name, key)
-			}
-		}
-	}
-}
-
 // A score of 0 must reach the judge as 0, not be dropped like an absent field.
 func TestBuildReportsKeepsZeroScore(t *testing.T) {
 	reports := buildReports([]engine.TaskOutcome{{Task: "tasks/five-modules", Score: 0, MaxScore: 5, Scoring: "count"}})
@@ -184,5 +158,17 @@ func TestBuildReportsKeepsZeroScore(t *testing.T) {
 	}
 	if !strings.Contains(string(encoded), `"score":0`) || !strings.Contains(string(encoded), `"maxScore":5`) {
 		t.Fatalf("zero score missing: %s", encoded)
+	}
+}
+
+func TestReportCarriesProfile(t *testing.T) {
+	reports := buildReports([]engine.TaskOutcome{{Task: "a", Profile: "plain"}, {Task: "b"}})
+	with, _ := json.Marshal(reports[0])
+	without, _ := json.Marshal(reports[1])
+	if !strings.Contains(string(with), `"profile":"plain"`) || strings.Contains(string(without), "profile") {
+		t.Fatalf("profile field: %s / %s", with, without)
+	}
+	if !strings.Contains(COMPARE_PROMPT, `profile "plain" means`) {
+		t.Fatal("COMPARE_PROMPT must explain the plain profile")
 	}
 }

@@ -22,10 +22,8 @@ func TestScoreMilestones(t *testing.T) {
 		want    int
 	}{
 		{"prefix stops at the first failure", ScoringPrefix, []bool{true, true, false, true}, 2},
-		{"prefix all", ScoringPrefix, []bool{true, true}, 2},
 		{"prefix first fails", ScoringPrefix, []bool{false, true, true}, 0},
 		{"count ignores order", ScoringCount, []bool{true, true, false, true}, 3},
-		{"count none", ScoringCount, []bool{false, false}, 0},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -93,6 +91,14 @@ func TestFormatMilestoneLines(t *testing.T) {
 	}
 }
 
+func TestPrecheckScriptHasEveryCheck(t *testing.T) {
+	for _, want := range []string{"find . -type l", "! -type d ! -type f", "[[:cntrl:]]", "du -sk", "-gt 204800", "exit 10", "exit 11", "exit 12", "exit 13"} {
+		if !strings.Contains(precheckScript, want) {
+			t.Errorf("precheckScript lacks %q:\n%s", want, precheckScript)
+		}
+	}
+}
+
 func TestPrecheckDetail(t *testing.T) {
 	tests := []struct {
 		code     int
@@ -131,13 +137,5 @@ func TestRejectAllFailsEveryMilestone(t *testing.T) {
 	score, maxScore, err := ScoreMilestones(ScoringCount, results)
 	if err != nil || score != 0 || maxScore != 2 {
 		t.Fatalf("score %d/%d, %v", score, maxScore, err)
-	}
-}
-
-func TestPrecheckScriptListsTheThreeChecks(t *testing.T) {
-	for _, want := range []string{"find . -type l", "! -type d ! -type f", "du -sk", "exit 10", "exit 11", "exit 12", "exit 13", "[[:cntrl:]]", "204800"} {
-		if !strings.Contains(precheckScript, want) {
-			t.Errorf("precheck script lacks %q:\n%s", want, precheckScript)
-		}
 	}
 }

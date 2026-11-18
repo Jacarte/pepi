@@ -35,16 +35,14 @@ const (
 	checkMilestoneFailed   = 1 // failed or rejected (cheat scan, restored tests)
 	checkMilestoneBadUsage = 2
 	checkMilestoneTimedOut = 124 // timeout(1) after SIGTERM
-	checkMilestoneKilled   = 137 // timeout(1) after SIGKILL (-k), or killed from outside
+	checkMilestoneKilled   = 137 // timeout(1) after SIGKILL (-k)
 )
 
 // maxDetailBytes bounds MilestoneResult.Detail.
 const maxDetailBytes = 300
 
 // MilestoneFromCheck maps the exit code and output of check-milestone.sh to a result.
-// Exit 0 is a pass, 1 and the timeout code are failures of the agent's work. Anything
-// else (bad usage, a missing tool) is a harness problem and is returned as an error so
-// it is not scored as a failing milestone.
+// Any code other than pass, fail or timeout is a harness problem and is an error.
 func MilestoneFromCheck(m Milestone, exitCode int, output string) (MilestoneResult, error) {
 	result := MilestoneResult{ID: m.ID, Title: m.Title}
 	switch exitCode {
@@ -62,9 +60,8 @@ func MilestoneFromCheck(m Milestone, exitCode int, output string) (MilestoneResu
 	return result, nil
 }
 
-// PrecheckDetail maps the exit code and output of the workspace precheck (symlinks, special
-// files, size) to the detail every milestone fails with. rejected is false for exit 0. An
-// unknown exit code is a harness error.
+// PrecheckDetail maps the exit code and output of the workspace precheck to the detail
+// every milestone fails with. An unknown exit code is a harness error.
 func PrecheckDetail(exitCode int, output string) (detail string, rejected bool, err error) {
 	listed := strings.TrimSpace(output)
 	switch exitCode {
@@ -83,9 +80,8 @@ func PrecheckDetail(exitCode int, output string) (detail string, rejected bool, 
 	}
 }
 
-// failureLine is the last "REJECT:" line of the output, which names the reason, or the
-// last non-empty line when there is none (for example a build error before the script
-// could reject).
+// failureLine is the last "REJECT:" line of the output, or the last non-empty line when
+// there is none (for example a build error).
 func failureLine(output string) string {
 	last, reject := "", ""
 	for _, line := range strings.Split(output, "\n") {

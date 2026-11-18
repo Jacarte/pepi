@@ -243,6 +243,55 @@ func invoke(ctx context.Context, parentJSON []byte, parentName string, fnName st
 				}
 			}
 			return (*Daggervals).CompareEvals(&parent, ctx, auth, agentEnv, agentProfile, before, after)
+		case "CompareRuns":
+			var parent Daggervals
+			err = json.Unmarshal(parentJSON, &parent)
+			if err != nil {
+				panic(fmt.Errorf("%s: %w", "failed to unmarshal parent object", err))
+			}
+			var auth *dagger.Secret
+			if inputArgs["auth"] != nil {
+				err = json.Unmarshal([]byte(inputArgs["auth"]), &auth)
+				if err != nil {
+					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg auth", err))
+				}
+			}
+			var agentEnv *dagger.File
+			if inputArgs["agentEnv"] != nil {
+				err = json.Unmarshal([]byte(inputArgs["agentEnv"]), &agentEnv)
+				if err != nil {
+					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg agentEnv", err))
+				}
+			}
+			var agentProfile string
+			if inputArgs["agentProfile"] != nil {
+				err = json.Unmarshal([]byte(inputArgs["agentProfile"]), &agentProfile)
+				if err != nil {
+					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg agentProfile", err))
+				}
+			}
+			var files []*dagger.File
+			if inputArgs["files"] != nil {
+				err = json.Unmarshal([]byte(inputArgs["files"]), &files)
+				if err != nil {
+					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg files", err))
+				}
+			}
+			var labels string
+			if inputArgs["labels"] != nil {
+				err = json.Unmarshal([]byte(inputArgs["labels"]), &labels)
+				if err != nil {
+					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg labels", err))
+				}
+			}
+			var dryRun bool
+			if inputArgs["dryRun"] != nil {
+				err = json.Unmarshal([]byte(inputArgs["dryRun"]), &dryRun)
+				if err != nil {
+					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg dryRun", err))
+				}
+			}
+			return (*Daggervals).CompareRuns(&parent, ctx, auth, agentEnv, agentProfile, files, labels, dryRun)
 		case "Evals":
 			var parent Daggervals
 			err = json.Unmarshal(parentJSON, &parent)
@@ -491,65 +540,76 @@ func invoke(ctx context.Context, parentJSON []byte, parentName string, fnName st
 					WithFunction(
 						dag.Function("CompareEvals",
 							dag.TypeDef().WithListOf(dag.TypeDef().WithKind(dagger.TypeDefKindStringKind))).
-							WithSourceMap(dag.SourceMap("main.go", 368, 1)).
-							WithArg("auth", dag.TypeDef().WithObject("Secret"), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 368, 56)}).
-							WithArg("agentEnv", dag.TypeDef().WithObject("File"), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 368, 77)}).
-							WithArg("agentProfile", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 368, 100)}).
-							WithArg("before", dag.TypeDef().WithObject("File"), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 368, 121)}).
-							WithArg("after", dag.TypeDef().WithObject("File"), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 368, 142)})).
+							WithSourceMap(dag.SourceMap("main.go", 348, 1)).
+							WithArg("auth", dag.TypeDef().WithObject("Secret"), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 348, 56)}).
+							WithArg("agentEnv", dag.TypeDef().WithObject("File"), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 348, 77)}).
+							WithArg("agentProfile", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 348, 100)}).
+							WithArg("before", dag.TypeDef().WithObject("File"), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 348, 121)}).
+							WithArg("after", dag.TypeDef().WithObject("File"), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 348, 142)})).
+					WithFunction(
+						dag.Function("CompareRuns",
+							dag.TypeDef().WithListOf(dag.TypeDef().WithKind(dagger.TypeDefKindStringKind))).
+							WithDescription("CompareRuns compares two or more eval cache files, as CompareEvals does for two. labels\nnames the arm of each file, comma-separated, one per file; files with the same label are\nrepetitions of one arm, and the first label is the baseline. Empty labels name the files\nrun1, run2, ... The aggregation is done in Go (see judge.PrepareCompareRuns). With dryRun\nthe model is not called: the result is the aggregate and the full prompt, and auth,\nagentEnv and agentProfile are not needed.").
+							WithSourceMap(dag.SourceMap("main.go", 384, 1)).
+							WithArg("auth", dag.TypeDef().WithObject("Secret").WithOptional(true), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 387, 2)}).
+							WithArg("agentEnv", dag.TypeDef().WithObject("File").WithOptional(true), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 389, 2)}).
+							WithArg("agentProfile", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind).WithOptional(true), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 391, 2)}).
+							WithArg("files", dag.TypeDef().WithListOf(dag.TypeDef().WithObject("File")), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 392, 2)}).
+							WithArg("labels", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind).WithOptional(true), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 394, 2)}).
+							WithArg("dryRun", dag.TypeDef().WithKind(dagger.TypeDefKindBooleanKind).WithOptional(true), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 396, 2)})).
 					WithFunction(
 						dag.Function("Evals",
 							dag.TypeDef().WithObject("EvalResult")).
-							WithSourceMap(dag.SourceMap("main.go", 72, 1)).
-							WithArg("auth", dag.TypeDef().WithObject("Secret"), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 74, 2)}).
-							WithArg("agentEnv", dag.TypeDef().WithObject("File"), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 75, 2)}).
-							WithArg("agentProfile", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 76, 2)}).
-							WithArg("cacheDir", dag.TypeDef().WithObject("Directory"), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 77, 2)}).
-							WithArg("fixed", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind).WithOptional(true), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 79, 2)}).
-							WithArg("suite", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind).WithOptional(true), dagger.FunctionWithArgOpts{Description: "Task suite to run: rust (default), go, all or tasks. tasks cannot be combined with the others.", SourceMap: dag.SourceMap("main.go", 82, 2)}).
-							WithArg("tasksRepo", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind).WithOptional(true), dagger.FunctionWithArgOpts{Description: "Git repo of the tasks suite (suite=tasks). Default: https://github.com/Jacarte/pepi-eval-tasks.git", SourceMap: dag.SourceMap("main.go", 85, 2)}).
-							WithArg("tasksRef", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind).WithOptional(true), dagger.FunctionWithArgOpts{Description: "Branch or commit sha of the tasks repo; required with suite=tasks. The resolved sha is part of the run id.", SourceMap: dag.SourceMap("main.go", 88, 2)}).
-							WithArg("taskNames", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind).WithOptional(true), dagger.FunctionWithArgOpts{Description: "Comma-separated names of the tasks to run (suite=tasks). Empty means every supported task.", SourceMap: dag.SourceMap("main.go", 91, 2)}).
-							WithArg("tasksToken", dag.TypeDef().WithObject("Secret").WithOptional(true), dagger.FunctionWithArgOpts{Description: "Token to fetch a private tasks repo (suite=tasks). Unset means an anonymous clone. Only the git fetch uses it.", SourceMap: dag.SourceMap("main.go", 94, 2)})).
+							WithSourceMap(dag.SourceMap("main.go", 70, 1)).
+							WithArg("auth", dag.TypeDef().WithObject("Secret"), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 72, 2)}).
+							WithArg("agentEnv", dag.TypeDef().WithObject("File"), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 73, 2)}).
+							WithArg("agentProfile", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 74, 2)}).
+							WithArg("cacheDir", dag.TypeDef().WithObject("Directory"), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 75, 2)}).
+							WithArg("fixed", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind).WithOptional(true), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 77, 2)}).
+							WithArg("suite", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind).WithOptional(true), dagger.FunctionWithArgOpts{Description: "Task suite to run: rust (default), go, all or tasks. tasks cannot be combined with the others.", SourceMap: dag.SourceMap("main.go", 80, 2)}).
+							WithArg("tasksRepo", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind).WithOptional(true), dagger.FunctionWithArgOpts{Description: "Git repo of the tasks suite (suite=tasks). Default: https://github.com/Jacarte/pepi-eval-tasks.git", SourceMap: dag.SourceMap("main.go", 83, 2)}).
+							WithArg("tasksRef", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind).WithOptional(true), dagger.FunctionWithArgOpts{Description: "Branch or commit sha of the tasks repo; required with suite=tasks. The resolved sha is part of the run id.", SourceMap: dag.SourceMap("main.go", 86, 2)}).
+							WithArg("taskNames", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind).WithOptional(true), dagger.FunctionWithArgOpts{Description: "Comma-separated names of the tasks to run (suite=tasks). Empty means every supported task.", SourceMap: dag.SourceMap("main.go", 89, 2)}).
+							WithArg("tasksToken", dag.TypeDef().WithObject("Secret").WithOptional(true), dagger.FunctionWithArgOpts{Description: "Token to fetch a private tasks repo (suite=tasks). Unset means an anonymous clone. Only the git fetch uses it.", SourceMap: dag.SourceMap("main.go", 92, 2)})).
 					WithFunction(
 						dag.Function("GenerateImage",
 							dag.TypeDef().WithObject("Container")).
 							WithDescription("GenerateImage returns a container with pi and the selected profile baked in.\nIt never receives auth.json: mount it at run time. Export it with\n`export --path image.tar` or push it with `publish --address ...`.").
-							WithSourceMap(dag.SourceMap("main.go", 403, 1)).
-							WithArg("agentProfile", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 403, 57)})).
+							WithSourceMap(dag.SourceMap("main.go", 431, 1)).
+							WithArg("agentProfile", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 431, 57)})).
 					WithFunction(
 						dag.Function("GradeTask",
 							dag.TypeDef().WithListOf(dag.TypeDef().WithKind(dagger.TypeDefKindStringKind))).
-							WithDescription("GradeTask grades a workspace with the hidden milestones of one task, without an agent\nor an LLM. testbed plays the role of the agent's /testbed. It returns one line per\nmilestone (\"m1-x PASS\" or \"m1-x FAIL: detail\") and a score line. It is the same grader\nthe tasks suite uses, so it checks a task or a reference solution end to end.").
-							WithSourceMap(dag.SourceMap("main.go", 278, 1)).
-							WithArg("taskName", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 280, 2)}).
-							WithArg("testbed", dag.TypeDef().WithObject("Directory"), dagger.FunctionWithArgOpts{Description: "The files the agent leaves in /testbed (no .git needed). Not called workspace: dagger reserves that flag.", SourceMap: dag.SourceMap("main.go", 282, 2)}).
-							WithArg("tasksRepo", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind).WithOptional(true), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 284, 2)}).
-							WithArg("tasksRef", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind).WithOptional(true), dagger.FunctionWithArgOpts{Description: "Branch or commit sha of the tasks repo. Required unless tasksDir is set.", SourceMap: dag.SourceMap("main.go", 287, 2)}).
-							WithArg("tasksToken", dag.TypeDef().WithObject("Secret").WithOptional(true), dagger.FunctionWithArgOpts{Description: "Token for a private tasks repo; unset means an anonymous clone.", SourceMap: dag.SourceMap("main.go", 290, 2)}).
-							WithArg("tasksDir", dag.TypeDef().WithObject("Directory").WithOptional(true), dagger.FunctionWithArgOpts{Description: "A local checkout of the tasks repo to use instead of cloning tasksRepo at tasksRef. For developing tasks and scripts before they are pushed.", SourceMap: dag.SourceMap("main.go", 293, 2)})).
+							WithDescription("GradeTask grades a workspace with the hidden milestones of one task, without an agent\nor an LLM, using the grader of the tasks suite. testbed plays the role of the agent's\n/testbed. It returns one line per milestone (\"m1-x PASS\" or \"m1-x FAIL: detail\"), a score\nline and the tasks commit.").
+							WithSourceMap(dag.SourceMap("main.go", 258, 1)).
+							WithArg("taskName", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 260, 2)}).
+							WithArg("testbed", dag.TypeDef().WithObject("Directory"), dagger.FunctionWithArgOpts{Description: "The files the agent leaves in /testbed. Not called workspace: dagger reserves that flag.", SourceMap: dag.SourceMap("main.go", 262, 2)}).
+							WithArg("tasksRepo", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind).WithOptional(true), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 264, 2)}).
+							WithArg("tasksRef", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind).WithOptional(true), dagger.FunctionWithArgOpts{Description: "Branch or commit sha of the tasks repo. Required unless tasksDir is set.", SourceMap: dag.SourceMap("main.go", 267, 2)}).
+							WithArg("tasksToken", dag.TypeDef().WithObject("Secret").WithOptional(true), dagger.FunctionWithArgOpts{Description: "Token for a private tasks repo; unset means an anonymous clone.", SourceMap: dag.SourceMap("main.go", 270, 2)}).
+							WithArg("tasksDir", dag.TypeDef().WithObject("Directory").WithOptional(true), dagger.FunctionWithArgOpts{Description: "A local checkout of the tasks repo to use instead of cloning, for developing tasks before they are pushed.", SourceMap: dag.SourceMap("main.go", 273, 2)})).
 					WithFunction(
 						dag.Function("Hello",
 							dag.TypeDef().WithKind(dagger.TypeDefKindStringKind)).
-							WithSourceMap(dag.SourceMap("main.go", 53, 1)).
-							WithArg("auth", dag.TypeDef().WithObject("Secret"), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 53, 49)}).
-							WithArg("agentEnv", dag.TypeDef().WithObject("File"), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 53, 70)}).
-							WithArg("agentProfile", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 53, 93)})).
+							WithSourceMap(dag.SourceMap("main.go", 52, 1)).
+							WithArg("auth", dag.TypeDef().WithObject("Secret"), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 52, 49)}).
+							WithArg("agentEnv", dag.TypeDef().WithObject("File"), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 52, 70)}).
+							WithArg("agentProfile", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 52, 93)})).
 					WithFunction(
 						dag.Function("TaskAgentFiles",
 							dag.TypeDef().WithListOf(dag.TypeDef().WithKind(dagger.TypeDefKindStringKind))).
-							WithDescription("TaskAgentFiles lists the files a task puts in the agent's /testbed (the seed), to\ncheck that hidden/, task.yaml and milestones.yaml never reach the agent's container.").
-							WithSourceMap(dag.SourceMap("main.go", 317, 1)).
-							WithArg("taskName", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 319, 2)}).
-							WithArg("tasksRepo", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind).WithOptional(true), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 321, 2)}).
-							WithArg("tasksRef", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind).WithOptional(true), dagger.FunctionWithArgOpts{Description: "Branch or commit sha of the tasks repo. Required unless tasksDir is set.", SourceMap: dag.SourceMap("main.go", 324, 2)}).
-							WithArg("tasksToken", dag.TypeDef().WithObject("Secret").WithOptional(true), dagger.FunctionWithArgOpts{Description: "Token for a private tasks repo; unset means an anonymous clone.", SourceMap: dag.SourceMap("main.go", 327, 2)}).
-							WithArg("tasksDir", dag.TypeDef().WithObject("Directory").WithOptional(true), dagger.FunctionWithArgOpts{Description: "A local checkout of the tasks repo to use instead of cloning.", SourceMap: dag.SourceMap("main.go", 330, 2)})).
+							WithDescription("TaskAgentFiles lists the files a task puts in the agent's /testbed (the seed), to check\nthat hidden/, task.yaml and milestones.yaml never reach the agent.").
+							WithSourceMap(dag.SourceMap("main.go", 297, 1)).
+							WithArg("taskName", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 299, 2)}).
+							WithArg("tasksRepo", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind).WithOptional(true), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 301, 2)}).
+							WithArg("tasksRef", dag.TypeDef().WithKind(dagger.TypeDefKindStringKind).WithOptional(true), dagger.FunctionWithArgOpts{Description: "Branch or commit sha of the tasks repo. Required unless tasksDir is set.", SourceMap: dag.SourceMap("main.go", 304, 2)}).
+							WithArg("tasksToken", dag.TypeDef().WithObject("Secret").WithOptional(true), dagger.FunctionWithArgOpts{Description: "Token for a private tasks repo; unset means an anonymous clone.", SourceMap: dag.SourceMap("main.go", 307, 2)}).
+							WithArg("tasksDir", dag.TypeDef().WithObject("Directory").WithOptional(true), dagger.FunctionWithArgOpts{Description: "A local checkout of the tasks repo to use instead of cloning.", SourceMap: dag.SourceMap("main.go", 310, 2)})).
 					WithFunction(
 						dag.Function("TestCacheWrite",
 							dag.TypeDef().WithObject("Directory")).
-							WithSourceMap(dag.SourceMap("main.go", 344, 1)).
-							WithArg("cacheDir", dag.TypeDef().WithObject("Directory"), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 344, 58)})).
+							WithSourceMap(dag.SourceMap("main.go", 324, 1)).
+							WithArg("cacheDir", dag.TypeDef().WithObject("Directory"), dagger.FunctionWithArgOpts{SourceMap: dag.SourceMap("main.go", 324, 58)})).
 					WithField("Source", dag.TypeDef().WithObject("Directory"), dagger.TypeDefWithFieldOpts{SourceMap: dag.SourceMap("main.go", 20, 2)}).
 					WithField("Auth", dag.TypeDef().WithObject("Secret"), dagger.TypeDefWithFieldOpts{SourceMap: dag.SourceMap("main.go", 21, 2)}).
 					WithConstructor(
@@ -558,9 +618,9 @@ func invoke(ctx context.Context, parentJSON []byte, parentName string, fnName st
 							WithSourceMap(dag.SourceMap("main.go", 24, 1)).
 							WithArg("ws", dag.TypeDef().WithObject("Workspace"), dagger.FunctionWithArgOpts{Description: "The current workspace, auto-populated by Dagger.", SourceMap: dag.SourceMap("main.go", 26, 2)}))).
 			WithObject(
-				dag.TypeDef().WithObject("EvalResult", dagger.TypeDefWithObjectOpts{SourceMap: dag.SourceMap("main.go", 48, 6)}).
-					WithField("Log", dag.TypeDef().WithListOf(dag.TypeDef().WithKind(dagger.TypeDefKindStringKind)), dagger.TypeDefWithFieldOpts{SourceMap: dag.SourceMap("main.go", 49, 2)}).
-					WithField("Cache", dag.TypeDef().WithObject("Directory"), dagger.TypeDefWithFieldOpts{SourceMap: dag.SourceMap("main.go", 50, 2)})), nil
+				dag.TypeDef().WithObject("EvalResult", dagger.TypeDefWithObjectOpts{SourceMap: dag.SourceMap("main.go", 47, 6)}).
+					WithField("Log", dag.TypeDef().WithListOf(dag.TypeDef().WithKind(dagger.TypeDefKindStringKind)), dagger.TypeDefWithFieldOpts{SourceMap: dag.SourceMap("main.go", 48, 2)}).
+					WithField("Cache", dag.TypeDef().WithObject("Directory"), dagger.TypeDefWithFieldOpts{SourceMap: dag.SourceMap("main.go", 49, 2)})), nil
 	default:
 		return nil, fmt.Errorf("unknown object %s", parentName)
 	}

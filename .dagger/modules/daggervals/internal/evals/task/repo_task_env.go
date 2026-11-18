@@ -8,8 +8,7 @@ import (
 	"dagger/daggervals/internal/dagger"
 )
 
-// seedGitScript commits the seed so GetFinalDiff can diff against it. The identity is
-// throwaway and local to the repo.
+// seedGitScript commits the seed so GetFinalDiff can diff against it.
 const seedGitScript = `git init -q && git config user.name seed && git config user.email seed@example.invalid && git add -A && git commit -q -m seed`
 
 // tasksMountPath is where the tasks repo checkout is mounted in the grading container.
@@ -17,7 +16,6 @@ const tasksMountPath = "/tasks"
 
 // RepoTask is the Environment of a task from the tasks repo. Only the task's seed/ goes
 // into /testbed: the agent never gets hidden/, task.yaml, milestones.yaml or the repo.
-// It reuses GoTask for the Go install, the environment variables and the final diff.
 type RepoTask struct {
 	GoTask
 	Seed *dagger.Directory
@@ -33,22 +31,19 @@ func (t RepoTask) PrepareEnvForTesting(ctx context.Context) dagger.WithContainer
 	}
 }
 
-// RepoTestEnv only records the base tree: nothing is applied before the agent runs
-// (the hidden tests are only used at grading).
+// RepoTestEnv only records the base tree; the hidden tests are used only at grading.
 type RepoTestEnv struct{}
 
 func (RepoTestEnv) Script(ctx context.Context) (string, error) {
 	return fmt.Sprintf("cd %s\ngit add -A\ngit write-tree > %s\n", goWorkdir, rustBaseTreeFile), nil
 }
 
-// seedPath is the only directory of the task that is copied to the agent.
 func seedPath(name string) string { return "tasks/" + name + "/seed" }
 
-// taskPath is the task directory inside the tasks repo.
 func taskPath(name string) string { return "tasks/" + name }
 
 // NewRepoFixTask builds the FixTask of a single-session task. tasksTree is the whole
-// tasks repo checkout; base is the plain image (no agent) the grader starts from.
+// tasks repo checkout; base is the plain image the grader starts from.
 func NewRepoFixTask(spec RepoTaskSpec, tasksTree *dagger.Directory, base *dagger.Container) FixTask {
 	return FixTask{
 		ProblemStatement: spec.ProblemStatement(),
@@ -69,8 +64,7 @@ func NewRepoFixTask(spec RepoTaskSpec, tasksTree *dagger.Directory, base *dagger
 // RepoTaskOracle grades the hidden milestones in a fresh container.
 type RepoTaskOracle struct {
 	Spec RepoTaskSpec
-	// TasksRepo is the whole checkout of the tasks repo. It is mounted only in the
-	// grading container.
+	// TasksRepo is mounted only in the grading container.
 	TasksRepo *dagger.Directory
 	// Base is the plain image: no agent, no secrets.
 	Base *dagger.Container
@@ -92,7 +86,7 @@ func (o RepoTaskOracle) ValidateFinalAnswer(ctx context.Context, container *dagg
 	return true, nil
 }
 
-// GradeMilestones grades the agent's /testbed (without .git) from a fresh container.
+// GradeMilestones grades the agent's /testbed (without .git).
 func (o RepoTaskOracle) GradeMilestones(ctx context.Context, container *dagger.Container) ([]MilestoneResult, error) {
 	return o.GradeWorkspace(ctx, container.Directory(goWorkdir).WithoutDirectory(".git"))
 }
@@ -138,29 +132,21 @@ if [ "$kib" -gt %d ]; then echo "$kib"; exit %d; fi
 // unprivileged runs a command as the user that agent code runs as in the grading container.
 var unprivileged = []string{"setpriv", "--no-new-privs", "--reuid=65534", "--regid=65534", "--clear-groups"}
 
-// gradingBase is the grading container before the workspace is copied in: the plain image
-// with the task's Go, the unprivileged user checked, and the tasks repo mounted. Nothing of
-// the agent's container is in it.
+// gradingBase is the grading container before the workspace is copied in. Nothing of the
+// agent's container is in it.
 func (o RepoTaskOracle) gradingBase() *dagger.Container {
 	goTask := GoTask{GoVersion: o.Spec.GoVersion}
 	return o.Base.
 		WithExec([]string{"env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "install", "-y", "build-essential", "gawk", "util-linux"}).
 		With(goTask.withGoToolchain).
-		// The scripts run the agent's code as uid 65534 with setpriv and fail closed without
-		// it: check it here, so a missing setpriv or user is a harness error right away.
+		// The scripts run the agent's code as uid 65534 with setpriv: fail here if it is missing.
 		WithExec(append(append([]string{}, unprivileged...), "sh", "-c", `[ "$(id -u)" = 65534 ]`)).
 		WithEnvVariable("GRADE_GOCACHE", gradeGoCache).
 		WithMountedDirectory(tasksMountPath, o.TasksRepo)
 }
 
-// withWorkspace copies the agent's files to /work.
-func (o RepoTaskOracle) withWorkspace(base *dagger.Container, workspace *dagger.Directory) *dagger.Container {
-	return base.WithDirectory("/work", workspace).WithWorkdir("/work")
-}
-
 // warmUp compiles the standard library and the workspace once, as the unprivileged user, so
-// the milestone execs, which each start from this layer, reuse the Go build cache. Nothing
-// is executed. It never fails the grading: a timeout only means a colder cache.
+// the milestone execs reuse the Go build cache. It never fails the grading.
 func warmUp(container *dagger.Container) *dagger.Container {
 	script := fmt.Sprintf(`mkdir -p %[1]s /tmp/grade-home /tmp/grade-gopath && chown -R 65534:65534 %[1]s /tmp/grade-home /tmp/grade-gopath
 timeout -k %[2]d %[3]d %[4]s env HOME=/tmp/grade-home GOPATH=/tmp/grade-gopath GOCACHE=%[1]s bash -c 'cd /work && go build std; go build ./...' || true
@@ -168,8 +154,8 @@ timeout -k %[2]d %[3]d %[4]s env HOME=/tmp/grade-home GOPATH=/tmp/grade-gopath G
 	return container.WithExec([]string{"bash", "-c", script})
 }
 
-// rejectAll scores every milestone as failed with the same detail: the workspace was refused
-// before any milestone ran, which is the agent's doing, not a harness error.
+// rejectAll fails every milestone with the same detail: the workspace was refused before
+// any milestone ran.
 func (o RepoTaskOracle) rejectAll(detail string) []MilestoneResult {
 	results := make([]MilestoneResult, len(o.Spec.Milestones))
 	for i, m := range o.Spec.Milestones {
@@ -179,13 +165,11 @@ func (o RepoTaskOracle) rejectAll(detail string) []MilestoneResult {
 }
 
 // GradeWorkspace runs every milestone with scripts/check-milestone.sh, each in its own
-// exec started from the same prepared container, so a milestone cannot affect another.
-// A workspace with symlinks or special files, or over the size limit, fails every
-// milestone without running any. Errors are harness problems (apt, download, a script
-// bug), never an agent failure.
+// exec from the same prepared container, so a milestone cannot affect another. A refused
+// workspace fails every milestone. Errors are harness problems, never an agent failure.
 func (o RepoTaskOracle) GradeWorkspace(ctx context.Context, workspace *dagger.Directory) ([]MilestoneResult, error) {
 	taskDir := tasksMountPath + "/" + taskPath(o.Spec.Name)
-	withWork := o.withWorkspace(o.gradingBase(), workspace)
+	withWork := o.gradingBase().WithDirectory("/work", workspace).WithWorkdir("/work")
 
 	pre := withWork.WithExec([]string{"bash", "-c", precheckScript}, dagger.ContainerWithExecOpts{Expect: dagger.ReturnTypeAny})
 	preCode, err := pre.ExitCode(ctx)
@@ -249,14 +233,9 @@ func (o RepoTaskOracle) GradeWorkspace(ctx context.Context, workspace *dagger.Di
 	return results, nil
 }
 
-// AgentFiles lists the files of the task that go into /testbed. The seed directory is
-// the only thing copied there.
+// AgentFiles lists the files of the task that go into /testbed.
 func (t RepoTask) AgentFiles(ctx context.Context) ([]string, error) {
-	files, err := t.Seed.Glob(ctx, "**/*")
-	if err != nil {
-		return nil, err
-	}
-	return files, nil
+	return t.Seed.Glob(ctx, "**/*")
 }
 
 // DirSource reads a tasks repo checkout held as a Dagger directory.
@@ -270,12 +249,7 @@ func (d DirSource) ReadFile(path string) (string, error) {
 }
 
 func (d DirSource) ListDir(path string) ([]string, error) {
-	entries, err := d.Dir.Entries(d.Ctx, dagger.DirectoryEntriesOpts{Path: path})
-	if err != nil {
-		return nil, err
-	}
-	return entries, nil
+	return d.Dir.Entries(d.Ctx, dagger.DirectoryEntriesOpts{Path: path})
 }
 
 var _ MilestoneOracle = RepoTaskOracle{}
-var _ TaskSource = DirSource{}

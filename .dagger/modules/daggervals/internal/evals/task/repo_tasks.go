@@ -13,22 +13,18 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// This file reads tasks from the pepi-eval-tasks repo layout:
-//
-//	tasks/<name>/{task.yaml, milestones.yaml, prompts/NN.md, seed/, hidden/}
-//
-// It is pure Go: the repo is read through a TaskSource, so the parsing is tested
-// without a Dagger engine. See repo_task_env.go for the Dagger side.
+// Tasks are read from the pepi-eval-tasks layout
+// tasks/<name>/{task.yaml, milestones.yaml, prompts/NN.md, seed/, hidden/}
+// through a TaskSource, so the parsing is tested without a Dagger engine.
 
-// MultiSessionSkipReason is why tasks with sessions > 1 are not run. The engine runs one
-// `pi -p` per task, so a task that needs sequential sessions in the same workspace
-// (kv-database) cannot be executed yet. The loader returns it as skipped, never as an error.
+// MultiSessionSkipReason is why tasks with sessions > 1 are skipped: the engine runs one
+// `pi -p` per task.
 const MultiSessionSkipReason = "multi-session not supported yet"
 
 const (
 	// DefaultTaskTimeoutSeconds is the agent time limit when FixTask.TimeoutSeconds is 0.
 	DefaultTaskTimeoutSeconds = 1800
-	// MaxTaskTimeoutSeconds caps any per-task limit (capture.sh enforces the same cap).
+	// MaxTaskTimeoutSeconds is also the cap in network/capture.sh.
 	MaxTaskTimeoutSeconds = 3600
 )
 
@@ -37,9 +33,8 @@ const (
 	ScoringCount  = "count"
 )
 
-// TaskSource is the read-only view of a tasks repo checkout the loader needs.
+// TaskSource is the read-only view of a tasks repo checkout.
 type TaskSource interface {
-	// ReadFile returns the contents of the file at a slash-separated path.
 	ReadFile(path string) (string, error)
 	// ListDir returns the entry names of a directory. Subdirectories end with "/".
 	ListDir(path string) ([]string, error)
@@ -59,11 +54,8 @@ type RepoTaskSpec struct {
 	GoVersion             string
 	Sessions              int
 	SessionTimeoutMinutes int
-	BudgetUSD             float64
 	DeadlineMinutes       int // 0 when null
 	Scoring               string
-	OwnedDirs             []string
-	RestoreSeedTests      bool
 	Milestones            []Milestone
 	// Prompts holds prompts/01.md .. prompts/NN.md, one per session.
 	Prompts []string
@@ -75,7 +67,8 @@ type SkippedTask struct {
 	Reason string
 }
 
-// taskYAML mirrors task.yaml. Pointers tell a missing field from zero.
+// taskYAML mirrors task.yaml, including the fields only the tasks repo scripts read.
+// Pointers tell a missing field from zero.
 type taskYAML struct {
 	Name                  string   `yaml:"name"`
 	Kind                  string   `yaml:"kind"`
@@ -100,8 +93,7 @@ var (
 	taskNamePattern   = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]*$`)
 )
 
-// decodeStrict rejects unknown keys, so a typo in a task file fails loudly instead of
-// silently falling back to a default.
+// decodeStrict rejects unknown keys, so a typo in a task file does not fall back to a default.
 func decodeStrict(data string, out any) error {
 	decoder := yaml.NewDecoder(strings.NewReader(data))
 	decoder.KnownFields(true)
@@ -111,8 +103,8 @@ func decodeStrict(data string, out any) error {
 	return nil
 }
 
-// ParseTaskYAML validates task.yaml. dirName is the task directory name and must match
-// the name field. Milestones and prompts are filled by LoadRepoTask.
+// ParseTaskYAML validates task.yaml; dirName must match the name field. Milestones and
+// prompts are filled by LoadRepoTask.
 func ParseTaskYAML(dirName, data string) (RepoTaskSpec, error) {
 	var raw taskYAML
 	if err := decodeStrict(data, &raw); err != nil {
@@ -171,10 +163,7 @@ func ParseTaskYAML(dirName, data string) (RepoTaskSpec, error) {
 		GoVersion:             raw.GoVersion,
 		Sessions:              *raw.Sessions,
 		SessionTimeoutMinutes: *raw.SessionTimeoutMinutes,
-		BudgetUSD:             *raw.BudgetUSD,
 		Scoring:               raw.Scoring,
-		OwnedDirs:             raw.OwnedDirs,
-		RestoreSeedTests:      raw.RestoreSeedTests,
 	}
 	if raw.DeadlineMinutes != nil {
 		spec.DeadlineMinutes = *raw.DeadlineMinutes
@@ -210,8 +199,8 @@ func ParseMilestonesYAML(data string) ([]Milestone, error) {
 	return raw.Milestones, nil
 }
 
-// LoadRepoTask reads and validates tasks/<name>. The directory must hold exactly one
-// prompt per session (prompts/01.md .. NN.md).
+// LoadRepoTask reads and validates tasks/<name>, which must hold one prompt per session
+// (prompts/01.md .. NN.md).
 func LoadRepoTask(src TaskSource, name string) (RepoTaskSpec, error) {
 	dir := "tasks/" + name
 	taskYAMLText, err := src.ReadFile(dir + "/task.yaml")
@@ -257,9 +246,7 @@ func LoadRepoTask(src TaskSource, name string) (RepoTaskSpec, error) {
 }
 
 // LoadRepoTasks loads the named tasks, or every task directory when names is empty.
-// A task with sessions > 1 is returned in skipped (MultiSessionSkipReason), not as an
-// error, so one unsupported task does not fail the run. A malformed task is an error:
-// the run is pinned to a commit, so it would not heal by itself.
+// A task with sessions > 1 is returned in skipped. A malformed task is an error.
 func LoadRepoTasks(src TaskSource, names []string) (runnable []RepoTaskSpec, skipped []SkippedTask, err error) {
 	entries, err := src.ListDir("tasks")
 	if err != nil {
@@ -318,8 +305,7 @@ func ParseTaskNames(csv string) ([]string, error) {
 }
 
 // TasksRunIDSuffix is appended to the run id of a tasks-suite run: the first 12 hex
-// digits of the resolved commit, so the id changes with the tasks and cannot equal the
-// rust or go ids, plus the task filter when one is set.
+// digits of the resolved commit, plus the task filter when one is set.
 func TasksRunIDSuffix(commitSHA string, names []string) (string, error) {
 	if len(commitSHA) < 12 || strings.Trim(commitSHA, "0123456789abcdef") != "" {
 		return "", fmt.Errorf("tasks commit %q is not a hex sha", commitSHA)
@@ -341,16 +327,14 @@ func (s RepoTaskSpec) TimeoutSeconds() int {
 	return min(minutes*60, MaxTaskTimeoutSeconds)
 }
 
-// ProblemStatement is the prompt of the only session. Multi-session tasks are skipped
-// before this is used.
+// ProblemStatement is the prompt of the only session of a runnable task.
 func (s RepoTaskSpec) ProblemStatement() string { return s.Prompts[0] }
 
 // DefaultTasksRepo is the tasks repo used when tasksRepo is empty.
 const DefaultTasksRepo = "https://github.com/Jacarte/pepi-eval-tasks.git"
 
-// ValidateTasksSuiteArgs checks the suite, tasksRepo, tasksRef and taskNames arguments of
-// Evals that concern the tasks suite. "tasks" is only valid alone, needs tasksRef, and
-// the tasks arguments are rejected for any other suite instead of being ignored.
+// ValidateTasksSuiteArgs checks the tasks-suite arguments of Evals: suite=tasks is only
+// valid alone and needs tasksRef, and the other suites reject the tasks arguments.
 func ValidateTasksSuiteArgs(suite, tasksRepo, tasksRef, taskNames string) error {
 	if suite != "tasks" {
 		if strings.Contains(suite, "tasks") {

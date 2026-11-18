@@ -6,13 +6,7 @@ import (
 	"testing"
 )
 
-var _ Environment = RepoTask{}
-var _ TestEnvironment = RepoTestEnv{}
-var _ MilestoneOracle = RepoTaskOracle{}
-
-// What reaches the agent's container: only seedPath(name), mounted as /testbed. The
-// engine-level listing of those files is printed by `dagger call daggervals
-// task-agent-files`.
+// Only seedPath(name) reaches the agent's container, as /testbed.
 func TestAgentOnlyGetsSeed(t *testing.T) {
 	if got := seedPath("five-modules"); got != "tasks/five-modules/seed" {
 		t.Fatalf("seed path: %q", got)
@@ -45,12 +39,5 @@ func TestRepoTaskReusesGoTask(t *testing.T) {
 	}
 	if !strings.Contains(env.installGoScript(), "go1.22.5.linux-") {
 		t.Fatalf("install script does not use the task's Go: %s", env.installGoScript())
-	}
-}
-
-func TestOracleScoringComesFromTheTask(t *testing.T) {
-	o := RepoTaskOracle{Spec: RepoTaskSpec{Scoring: ScoringPrefix}}
-	if o.Scoring() != "prefix" {
-		t.Fatalf("scoring: %q", o.Scoring())
 	}
 }

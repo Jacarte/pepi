@@ -1,6 +1,7 @@
 #!/bin/bash
 # Select a profile and overlay its immediate files onto this script's directory.
-# A profile may contain settings.json, mcp.json and models-router.json; only
+# A profile may contain settings.json, mcp.json, models-router.json and AGENTS.md (any
+# regular file in it is copied; an empty AGENTS.md leaves the agent with no rules); only
 # files actually present are copied. Unrelated root files are left untouched.
 #
 # Usage: profile.sh          interactive menu

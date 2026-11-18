@@ -21,8 +21,7 @@ type Judge struct {
 	Agent Agent
 }
 
-// taskReport is what the judge reads. engine.TaskOutcome is not marshaled directly:
-// its ValidationError is an error interface and would serialize as {}.
+// taskReport is what the judge reads: a TaskOutcome plus precomputed summaries.
 type taskReport struct {
 	Task             string              `json:"task"`
 	ProblemStatement string              `json:"problemStatement"`
@@ -45,9 +44,9 @@ type taskReport struct {
 	Scoring    string             `json:"scoring,omitempty"`
 	Milestones []milestoneSummary `json:"milestones,omitempty"`
 	TimedOut   bool               `json:"timedOut,omitempty"`
+	Profile    string             `json:"profile,omitempty"`
 }
 
-// milestoneSummary is one graded hidden milestone.
 type milestoneSummary struct {
 	ID     string `json:"id"`
 	Title  string `json:"title"`
@@ -58,8 +57,7 @@ type milestoneSummary struct {
 const maxJudgeOutput = 6000
 
 // patchStats is computed from finalDiff and goldenPatch so the judge does not count lines.
-// Test detection is by file path only; tests inside source files (for example Rust
-// #[cfg(test)] modules) are not detected.
+// Test detection is by file path only.
 type patchStats struct {
 	Files     int `json:"files"`
 	Additions int `json:"additions"`
@@ -278,12 +276,13 @@ func buildReports(results []engine.TaskOutcome) []taskReport {
 	reports := make([]taskReport, 0, len(results))
 	for _, r := range results {
 		if r.Skipped {
-			continue // not run: nothing for the judge to read
+			continue
 		}
 		report := taskReport{
 			Task:             r.Task,
 			ProblemStatement: r.ProblemStatement,
 			OracleValid:      r.Valid,
+			OracleError:      r.ValidationError,
 			GoldenPatch:      r.GoldenPatch,
 			FinalDiff:        r.FinalDiff,
 			AgentStats:       r.AgentStats,
@@ -295,12 +294,9 @@ func buildReports(results []engine.TaskOutcome) []taskReport {
 			Tokens:           summarizeTokens(r.AgentStats),
 			AgentOutput:      tailOutput(r.Output, maxJudgeOutput),
 		}
-		if r.ValidationError != "" {
-			report.OracleError = r.ValidationError
-		}
-		report.MaxScore, report.Scoring, report.TimedOut = r.MaxScore, r.Scoring, r.TimedOut
+		report.MaxScore, report.Scoring, report.TimedOut, report.Profile = r.MaxScore, r.Scoring, r.TimedOut, r.Profile
 		if r.MaxScore > 0 {
-			// a pointer, so a score of 0 is reported as 0 and not dropped by omitempty
+			// a pointer, so a score of 0 is not dropped by omitempty
 			score := r.Score
 			report.Score = &score
 		}
@@ -331,18 +327,17 @@ Each element describes one task:
   passed in any order, for independent milestones); maxScore is the number of milestones.
   The oracle is valid only when score equals maxScore. Quote the score as "score/maxScore"
   and name the failed milestones with their detail.
-- timedOut: true means the agent hit its time limit and was cut off. The run is not a
-  completed attempt: its workspace was graded as it stood, its agentStats and
-  processStats may be partial or unavailable, and agentOutput is probably not a final
-  answer. Say so, never read it as a finished attempt that chose to stop, and never
-  compare it with a completed run as if they were equivalent.
-- Tasks that were skipped (for example multi-session tasks not supported yet) are not in
-  the input: they are not failures.
-- goldenPatch: the reference human fix. The agent never saw it. Tasks of the tasks suite
-  (they carry score and milestones) have no golden patch: goldenPatch is empty, and
+- timedOut: true means the agent hit its time limit and was cut off. It is not a completed
+  attempt: the workspace was graded as it stood, agentStats and processStats may be
+  partial, and agentOutput is probably not a final answer. Say so; never read it as a
+  finished attempt that chose to stop, and never treat it as equivalent to a completed run.
+- Tasks that were skipped (for example multi-session tasks) are not in the input and are
+  not failures.
+- goldenPatch: the reference human fix, never seen by the agent. Tasks of the tasks suite
+  (they carry score and milestones) have no golden patch: goldenPatch is empty and the
   patchStats golden fields are zero. For them the milestone score is the primary correctness signal;
-  judge the diff on its own merits, for integrity and scope, and do
-  not lower confidence merely because goldenPatch is empty.
+  judge the diff on its own merits, for integrity and scope, and do not lower confidence
+  merely because goldenPatch is empty.
 - finalDiff: what the agent actually changed (empty means it changed nothing). It excludes
   the failing tests that the harness itself applied before the agent started, so any test
   file edit in it was made by the agent.
@@ -464,16 +459,17 @@ null means unavailable, never zero), timing (precomputed from processStats: wall
 busyMs, parallelism, byRoleMs, longestInstance, instancesWithoutTiming, timingSources;
 agent execution only) and networkStats (passive packet accounting).
 
-Tasks that were skipped (for example multi-session tasks not supported yet) are not in
-the files and are not failures. For tasks with milestones, the milestone score
+Tasks that were skipped (for example multi-session tasks) are not in the files and are
+not failures. Each element may carry profile, the agent profile of the run:
+profile "plain" means the agent had no subagent tool and no AGENTS.md rules; compare it
+against the same task under another profile. For tasks with milestones, the milestone score
 (score/maxScore under the task's scoring) is the primary correctness signal, ahead of
 the diff comparison: more milestones passed is more correct, and equal scores are SAME
 unless the diffs show an integrity problem. Without a golden patch, do not lower
 confidence just because goldenPatch is empty. A run with timedOut true was cut short: it
 is not a completed attempt, its stats may be partial and its output is not a final
-answer. Never treat it as equivalent to a completed run, compare it separately (name it
-as timed out in the table and in Evidence), and do not draw cost or time conclusions
-from a timed out side against a completed one.
+answer. Never treat it as equivalent to a completed run: compare it separately (name it as
+timed out in the table and in Evidence) and draw no cost or time conclusions from a timed out side against a completed one.
 
 Method:
 1. Match tasks by the task field. Report tasks present in only one file as "only before"
@@ -618,54 +614,46 @@ CONFIDENCE: high | medium | low
 The BEFORE file and the AFTER file are:
 `
 
-func (j *Judge) Judge(ctx context.Context, results []engine.TaskOutcome, container *dagger.Container) ([]string, error) {
+// ask writes files into the judge container, runs prompt there and returns the verdict lines.
+func (j *Judge) ask(ctx context.Context, container *dagger.Container, files map[string]string, prompt string) ([]string, error) {
 	container = container.With(j.Agent.Setup())
-
-	// Call the agent to judge the results and return a verdict
-	marshaledResults, err := json.Marshal(buildReports(results))
+	paths := make([]string, 0, len(files))
+	for path := range files {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	for _, path := range paths {
+		container = container.WithNewFile(path, files[path])
+	}
+	verdict, err := j.Agent.CallPrompt(container, prompt).Stdout(ctx)
 	if err != nil {
 		return nil, err
 	}
-	container = container.WithNewFile("/tmp/daggervals-results.json", string(marshaledResults))
+	return strings.Split(verdict, "\n"), nil
+}
 
-	prompt := JUDGE_PROMPT + "\n /tmp/daggervals-results.json\n"
+func reportsJSON(outcomes []engine.TaskOutcome) (string, error) {
+	encoded, err := json.Marshal(buildReports(outcomes))
+	return string(encoded), err
+}
 
-	container = j.Agent.CallPrompt(container, prompt)
-	verdict, err := container.Stdout(ctx)
+func (j *Judge) Judge(ctx context.Context, results []engine.TaskOutcome, container *dagger.Container) ([]string, error) {
+	encoded, err := reportsJSON(results)
 	if err != nil {
 		return nil, err
 	}
-
-	// Split the verdict into lines and return as a slice of strings
-	verdictLines := strings.Split(verdict, "\n")
-	return verdictLines, nil
+	return j.ask(ctx, container, map[string]string{"/tmp/daggervals-results.json": encoded}, JUDGE_PROMPT+"\n /tmp/daggervals-results.json\n")
 }
 
 func (j *Judge) Compare2Evals(ctx context.Context, before []engine.TaskOutcome, after []engine.TaskOutcome, container *dagger.Container) ([]string, error) {
-	container = container.With(j.Agent.Setup())
-
-	// Call the agent to compare the two sets of results and return a verdict
-	marshaledResults1, err := json.Marshal(buildReports(before))
+	beforeJSON, err := reportsJSON(before)
 	if err != nil {
 		return nil, err
 	}
-	container = container.WithNewFile("/tmp/daggervals-before.json", string(marshaledResults1))
-
-	marshaledResults2, err := json.Marshal(buildReports(after))
+	afterJSON, err := reportsJSON(after)
 	if err != nil {
 		return nil, err
 	}
-	container = container.WithNewFile("/tmp/daggervals-after.json", string(marshaledResults2))
-
-	prompt := COMPARE_PROMPT + "\n /tmp/daggervals-before.json /tmp/daggervals-after.json\n"
-
-	container = j.Agent.CallPrompt(container, prompt)
-	verdict, err := container.Stdout(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	// Split the verdict into lines and return as a slice of strings
-	verdictLines := strings.Split(verdict, "\n")
-	return verdictLines, nil
+	files := map[string]string{"/tmp/daggervals-before.json": beforeJSON, "/tmp/daggervals-after.json": afterJSON}
+	return j.ask(ctx, container, files, COMPARE_PROMPT+"\n /tmp/daggervals-before.json /tmp/daggervals-after.json\n")
 }

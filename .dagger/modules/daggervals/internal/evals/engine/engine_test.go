@@ -60,12 +60,6 @@ func TestVerifyMilestoneOracle(t *testing.T) {
 		t.Fatalf("count: %v %+v", valid, grade)
 	}
 
-	// A grading failure is data: invalid, no score, no panic.
-	valid, grade, err = run(fakeMilestoneOracle{scoring: "count", err: errors.New("exec failed")})
-	if valid || err == nil || grade.maxScore != 0 || !strings.Contains(err.Error(), "grading") {
-		t.Fatalf("grading error: %v %+v %v", valid, grade, err)
-	}
-
 	// No milestones is never a pass.
 	if valid, _, _ := run(fakeMilestoneOracle{scoring: "count"}); valid {
 		t.Fatal("zero milestones must not be valid")

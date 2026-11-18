@@ -177,14 +177,13 @@ func NewEngine(agent LLM, tasks []tasks.FixTask, cache Cache) *Engine {
 }
 
 func (e *Engine) Run(ctx context.Context, container *dagger.Container, runId string, profile string) ([]TaskOutcome, error) {
-
-	if e.Cache != nil {
-		if runId != "" {
-			if cached, err := e.Cache.Get(runId); err == nil && len(cached) > 0 {
-				return cached, nil
-			} else if err != nil {
-				return nil, fmt.Errorf("read cache for run %s: %w", runId, err)
-			}
+	if e.Cache != nil && runId != "" {
+		cached, err := e.Cache.Get(runId)
+		if err != nil {
+			return nil, fmt.Errorf("read cache for run %s: %w", runId, err)
+		}
+		if len(cached) > 0 {
+			return cached, nil
 		}
 	}
 
@@ -203,9 +202,8 @@ func (e *Engine) Run(ctx context.Context, container *dagger.Container, runId str
 		return nil, err
 	}
 
-	// Tasks run in parallel, at most MaxParallelTasks at a time. Each goroutine writes
-	// only its own slot, so results keep the task order. A failed verification is data
-	// and does not stop the other tasks; any other error cancels the remaining ones.
+	// Each goroutine writes only its own slot, so results keep the task order. A failed
+	// verification does not stop the other tasks; any other error cancels them.
 	results := make([]*TaskOutcome, len(e.Tasks))
 	eg, egCtx := errgroup.WithContext(ctx)
 	eg.SetLimit(MaxParallelTasks)
@@ -247,7 +245,8 @@ func (e *Engine) runTask(ctx context.Context, preparedEnv *dagger.Container, tas
 		}
 		testEnvScript = script
 	}
-	result, err := network.Measure(prepared, testEnvScript, e.Agent.TaskCommand(task), task.TimeoutSeconds)
+	timeout := timeoutSeconds(task)
+	result, err := network.Measure(prepared, testEnvScript, e.Agent.TaskCommand(task), timeout)
 	if err != nil {
 		return nil, err
 	}
@@ -258,8 +257,7 @@ func (e *Engine) runTask(ctx context.Context, preparedEnv *dagger.Container, tas
 	}
 	// The measured exec has stopped capture, parsed it, and removed raw data.
 	networkStats, networkErr := network.ReadStats(ctx, result)
-	// A task that hit its time limit is data for grading, not a failure of the harness:
-	// its stats may be partial.
+	// A task that hit its time limit is graded as it stands; its stats may be partial.
 	timedOut, timeoutErr := result.Directory("/tmp").Exists(ctx, path.Base(network.TimeoutMarkerPath))
 	if timeoutErr != nil {
 		return nil, fmt.Errorf("task %s: read timeout marker: %w", task.Env.GetRepo(), timeoutErr)
@@ -276,7 +274,7 @@ func (e *Engine) runTask(ctx context.Context, preparedEnv *dagger.Container, tas
 		fmt.Printf("Task %s stats: %+v\n", task.Env.GetRepo(), agentStats)
 	}
 	if timedOut {
-		fmt.Printf("Task %s timed out after %d s\n", task.Env.GetRepo(), timeoutSeconds(task))
+		fmt.Printf("Task %s timed out after %d s\n", task.Env.GetRepo(), timeout)
 	}
 	// Verify the final answer even if stats extraction failed.
 	valid, grade, validationErr := e.verify(ctx, task, result)
@@ -321,16 +319,14 @@ func timeoutSeconds(task tasks.FixTask) int {
 
 // HarnessError is a failure of the grading harness itself (the grader container could not be
 // built, a script returned a usage error), not a verdict on the agent's work. It aborts the
-// run so that nothing is cached and a re-run grades again. By design one harness error aborts
-// the whole run, parallel tasks included (the errgroup cancels them): a half-graded run would
-// otherwise be cached or compared as if the grading had worked.
+// whole run, so a half-graded run is never cached.
 type HarnessError struct{ Err error }
 
 func (e *HarnessError) Error() string { return "grading harness error: " + e.Err.Error() }
 func (e *HarnessError) Unwrap() error { return e.Err }
 
-// taskError is what runTask returns next to the outcome. Stats errors always abort the run;
-// a verdict that is not valid does not, unless it is a harness error.
+// taskError is what runTask returns next to the outcome: stats errors and harness errors
+// abort the run, a failed verdict does not.
 func taskError(statsErr, validationErr error) error {
 	var harness *HarnessError
 	if statsErr != nil || errors.As(validationErr, &harness) {
@@ -348,8 +344,8 @@ type milestoneGrade struct {
 }
 
 // verify asks the task's oracle for the verdict. A MilestoneOracle grades every milestone
-// (valid when all pass); other oracles give pass/fail. The returned error is data about
-// the verdict, never a harness failure.
+// (valid when all pass); other oracles give pass/fail. A failed verdict is returned as an
+// error, a HarnessError when the grading itself failed.
 func (e *Engine) verify(ctx context.Context, task tasks.FixTask, container *dagger.Container) (bool, milestoneGrade, error) {
 	repo := task.Env.GetRepo()
 	if oracle, ok := task.Oracle.(tasks.MilestoneOracle); ok {

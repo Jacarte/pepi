@@ -56,6 +56,57 @@ func (r *Daggervals) CompareEvals(ctx context.Context, auth *Secret, agentEnv *F
 	return response, q.Execute(ctx)
 }
 
+// DaggervalsCompareRunsOpts contains options for Daggervals.CompareRuns
+type DaggervalsCompareRunsOpts struct {
+	Auth *Secret
+
+	AgentEnv *File
+
+	AgentProfile string
+
+	Labels string
+
+	DryRun bool
+}
+
+// CompareRuns compares two or more eval cache files, as CompareEvals does for two. labels
+// names the arm of each file, comma-separated, one per file; files with the same label are
+// repetitions of one arm, and the first label is the baseline. Empty labels name the files
+// run1, run2, ... The aggregation is done in Go (see judge.PrepareCompareRuns). With dryRun
+// the model is not called: the result is the aggregate and the full prompt, and auth,
+// agentEnv and agentProfile are not needed.
+func (r *Daggervals) CompareRuns(ctx context.Context, files []*File, opts ...DaggervalsCompareRunsOpts) ([]string, error) {
+	q := r.query.Select("compareRuns")
+	for i := len(opts) - 1; i >= 0; i-- {
+		// `auth` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Auth) {
+			q = q.Arg("auth", opts[i].Auth)
+		}
+		// `agentEnv` optional argument
+		if !querybuilder.IsZeroValue(opts[i].AgentEnv) {
+			q = q.Arg("agentEnv", opts[i].AgentEnv)
+		}
+		// `agentProfile` optional argument
+		if !querybuilder.IsZeroValue(opts[i].AgentProfile) {
+			q = q.Arg("agentProfile", opts[i].AgentProfile)
+		}
+		// `labels` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Labels) {
+			q = q.Arg("labels", opts[i].Labels)
+		}
+		// `dryRun` optional argument
+		if !querybuilder.IsZeroValue(opts[i].DryRun) {
+			q = q.Arg("dryRun", opts[i].DryRun)
+		}
+	}
+	q = q.Arg("files", files)
+
+	var response []string
+
+	q = q.Bind(&response)
+	return response, q.Execute(ctx)
+}
+
 // DaggervalsEvalsOpts contains options for Daggervals.Evals
 type DaggervalsEvalsOpts struct {
 	Fixed string
@@ -133,14 +184,14 @@ type DaggervalsGradeTaskOpts struct {
 	TasksRef string
 	// Token for a private tasks repo; unset means an anonymous clone.
 	TasksToken *Secret
-	// A local checkout of the tasks repo to use instead of cloning tasksRepo at tasksRef. For developing tasks and scripts before they are pushed.
+	// A local checkout of the tasks repo to use instead of cloning, for developing tasks before they are pushed.
 	TasksDir *Directory
 }
 
 // GradeTask grades a workspace with the hidden milestones of one task, without an agent
-// or an LLM. testbed plays the role of the agent's /testbed. It returns one line per
-// milestone ("m1-x PASS" or "m1-x FAIL: detail") and a score line. It is the same grader
-// the tasks suite uses, so it checks a task or a reference solution end to end.
+// or an LLM, using the grader of the tasks suite. testbed plays the role of the agent's
+// /testbed. It returns one line per milestone ("m1-x PASS" or "m1-x FAIL: detail"), a score
+// line and the tasks commit.
 func (r *Daggervals) GradeTask(ctx context.Context, taskName string, testbed *Directory, opts ...DaggervalsGradeTaskOpts) ([]string, error) {
 	assertNotNil("testbed", testbed)
 	q := r.query.Select("gradeTask")
@@ -263,8 +314,8 @@ type DaggervalsTaskAgentFilesOpts struct {
 	TasksDir *Directory
 }
 
-// TaskAgentFiles lists the files a task puts in the agent's /testbed (the seed), to
-// check that hidden/, task.yaml and milestones.yaml never reach the agent's container.
+// TaskAgentFiles lists the files a task puts in the agent's /testbed (the seed), to check
+// that hidden/, task.yaml and milestones.yaml never reach the agent.
 func (r *Daggervals) TaskAgentFiles(ctx context.Context, taskName string, opts ...DaggervalsTaskAgentFilesOpts) ([]string, error) {
 	q := r.query.Select("taskAgentFiles")
 	for i := len(opts) - 1; i >= 0; i-- {

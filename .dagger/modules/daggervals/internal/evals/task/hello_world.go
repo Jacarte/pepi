@@ -147,11 +147,8 @@ func checkJevDecision(lane, provider, id string, changed, escalated *bool, rawRe
 	return nil
 }
 
-// helloWorldProbeLines are the report lines the task asks the agent to print, so a run
-// shows what the container really offers. They are only read by people (the oracle logs
-// stdout); the oracle itself checks "hello world" and the Jev router log.
-var helloWorldProbeLines = []string{"TOOLS:", "SUBAGENT_TOOL:", "SUBAGENTS:", "SCOUT_CALL:", "PACKAGES:", "EXTENSIONS:", "AGENTS_MD:"}
-
+// The report lines of steps 2-8 are only read by people; the oracle checks "hello world"
+// and the Jev router log.
 var HelloWorldTask = FixTask{
 	ProblemStatement: "Do these steps in order and do not skip any, even when a step fails; report a failure instead of stopping.\n" +
 		"1. Call the jev_route tool with action \"recommend\" and task \"Rename one variable in one file\" (role \"worker\" is optional).\n" +

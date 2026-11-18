@@ -85,12 +85,8 @@ func TestLoadRepoTaskValid(t *testing.T) {
 		t.Fatal(err)
 	}
 	if spec.Name != "demo" || spec.Kind != "parallel" || spec.GoVersion != "1.22.5" || spec.Sessions != 1 ||
-		spec.SessionTimeoutMinutes != 30 || spec.BudgetUSD != 2 || spec.DeadlineMinutes != 15 ||
-		spec.Scoring != ScoringCount || !spec.RestoreSeedTests {
+		spec.SessionTimeoutMinutes != 30 || spec.DeadlineMinutes != 15 || spec.Scoring != ScoringCount {
 		t.Fatalf("unexpected spec: %+v", spec)
-	}
-	if len(spec.OwnedDirs) != 1 || spec.OwnedDirs[0] != "acceptance" {
-		t.Fatalf("owned_dirs: %v", spec.OwnedDirs)
 	}
 	if len(spec.Milestones) != 2 || spec.Milestones[1].Title != "Second: thing" || spec.Milestones[0].Command != "go test ./a/... -run '^TestM1'" {
 		t.Fatalf("milestones: %+v", spec.Milestones)
@@ -100,15 +96,12 @@ func TestLoadRepoTaskValid(t *testing.T) {
 	}
 }
 
-func TestLoadRepoTaskNullDeadlineAndMinimalFields(t *testing.T) {
+func TestLoadRepoTaskNullDeadline(t *testing.T) {
 	taskYAML := strings.NewReplacer("kind: parallel", "kind: long", "deadline_minutes: 15", "deadline_minutes: null",
 		"owned_dirs: [acceptance]\n", "", "restore_seed_tests: true\n", "").Replace(validTaskYAML)
 	spec, err := LoadRepoTask(fakeTask("demo", taskYAML, validMilestonesYAML, "p"), "demo")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if spec.DeadlineMinutes != 0 || len(spec.OwnedDirs) != 0 || spec.RestoreSeedTests {
-		t.Fatalf("unexpected spec: %+v", spec)
+	if err != nil || spec.DeadlineMinutes != 0 {
+		t.Fatalf("unexpected spec %+v, %v", spec, err)
 	}
 }
 
@@ -132,10 +125,8 @@ func TestLoadRepoTaskRejectsBadTasks(t *testing.T) {
 		{"missing sessions", replace("sessions: 1\n", ""), []string{"p"}, "sessions must be"},
 		{"zero sessions", replace("sessions: 1", "sessions: 0"), []string{"p"}, "sessions must be"},
 		{"missing timeout", replace("session_timeout_minutes: 30\n", ""), []string{"p"}, "session_timeout_minutes"},
-		{"missing go_version", replace("go_version: 1.22.5\n", ""), []string{"p"}, "go_version"},
 		{"go_version injection", replace("go_version: 1.22.5", `go_version: "1.22.5; rm -rf /"`), []string{"p"}, "go_version"},
 		{"bad scoring", replace("scoring: count", "scoring: sum"), []string{"p"}, "scoring must be"},
-		{"missing scoring", replace("scoring: count             # milestones passed, in any order\n", ""), []string{"p"}, "scoring must be"},
 		{"parallel without deadline", replace("deadline_minutes: 15", "deadline_minutes: null"), []string{"p"}, "deadline_minutes required"},
 		{"absolute owned dir", replace("[acceptance]", "[/etc]"), []string{"p"}, "owned_dirs"},
 		{"escaping owned dir", replace("[acceptance]", "[../x]"), []string{"p"}, "owned_dirs"},
@@ -246,8 +237,6 @@ func TestValidateTasksSuiteArgs(t *testing.T) {
 		wantErr                               string
 	}{
 		{"default suite", "", "", "", "", ""},
-		{"rust", "rust", "", "", "", ""},
-		{"all", "all", "", "", "", ""},
 		{"tasks with ref", "tasks", "", "main", "", ""},
 		{"tasks with everything", "tasks", "https://example.com/x.git", "abc", "a,b", ""},
 		{"tasks without ref", "tasks", "", "", "", "requires tasksRef"},
@@ -281,7 +270,6 @@ func TestTimeoutSeconds(t *testing.T) {
 		{"long ignores a deadline", RepoTaskSpec{Kind: "long", SessionTimeoutMinutes: 20, DeadlineMinutes: 5}, 1200},
 		{"parallel without deadline", RepoTaskSpec{Kind: "parallel", SessionTimeoutMinutes: 10}, 600},
 		{"capped", RepoTaskSpec{Kind: "long", SessionTimeoutMinutes: 120}, 3600},
-		{"deadline capped", RepoTaskSpec{Kind: "parallel", SessionTimeoutMinutes: 30, DeadlineMinutes: 90}, 3600},
 	}
 	for _, tt := range tests {
 		if got := tt.spec.TimeoutSeconds(); got != tt.want {

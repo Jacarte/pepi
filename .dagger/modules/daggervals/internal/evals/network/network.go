@@ -17,13 +17,6 @@ const reportPath = "/tmp/daggervals-network.json"
 // its time limit; capture.sh still emits the stats then.
 const TimeoutMarkerPath = "/tmp/daggervals-task-timeout"
 
-const (
-	// DefaultTimeoutSeconds is the time limit of the measured agent when none is given.
-	DefaultTimeoutSeconds = 1800
-	// MaxTimeoutSeconds is the largest limit capture.sh accepts.
-	MaxTimeoutSeconds = 3600
-)
-
 //go:embed capture.sh
 var captureScript string
 
@@ -79,18 +72,11 @@ type Flow struct {
 
 // Measure deliberately uses one exec: background capture cannot survive a
 // Dagger exec boundary. Tool installation, PiSetup and Env must already be synced.
-// timeoutSeconds limits TestEnv plus the agent: 0 means DefaultTimeoutSeconds, and
-// values above MaxTimeoutSeconds are rejected. It reaches capture.sh through the
-// DAGGERVALS_TASK_TIMEOUT_SECONDS variable of that one process, not the container env.
+// timeoutSeconds limits TestEnv plus the agent; capture.sh validates it. It is passed as
+// an env var of that one process, not set in the container env.
 func Measure(container *dagger.Container, testEnvScript string, command []string, timeoutSeconds int) (*dagger.Container, error) {
 	if len(command) == 0 || command[0] == "" {
 		return nil, fmt.Errorf("network measurement: empty agent command")
-	}
-	if timeoutSeconds == 0 {
-		timeoutSeconds = DefaultTimeoutSeconds
-	}
-	if timeoutSeconds < 0 || timeoutSeconds > MaxTimeoutSeconds {
-		return nil, fmt.Errorf("network measurement: timeout %d s out of range 1..%d", timeoutSeconds, MaxTimeoutSeconds)
 	}
 	const dir = "/tmp/daggervals-measure"
 	args := []string{"env", fmt.Sprintf("DAGGERVALS_TASK_TIMEOUT_SECONDS=%d", timeoutSeconds),
