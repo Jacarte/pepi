@@ -120,6 +120,10 @@ type DaggervalsEvalsOpts struct {
 	TaskNames string
 	// Token to fetch a private tasks repo (suite=tasks). Unset means an anonymous clone. Only the git fetch uses it.
 	TasksToken *Secret
+	// How many times to run the whole eval, one after the other (1 to 20). Run i is cached as <id>-<i><suffixes>, so the runs plug into compare-runs.
+	//
+	// Default: 1
+	Runs int
 }
 
 func (r *Daggervals) Evals(auth *Secret, agentEnv *File, agentProfile string, cacheDir *Directory, opts ...DaggervalsEvalsOpts) *DaggervalsEvalResult {
@@ -151,6 +155,10 @@ func (r *Daggervals) Evals(auth *Secret, agentEnv *File, agentProfile string, ca
 		// `tasksToken` optional argument
 		if !querybuilder.IsZeroValue(opts[i].TasksToken) {
 			q = q.Arg("tasksToken", opts[i].TasksToken)
+		}
+		// `runs` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Runs) {
+			q = q.Arg("runs", opts[i].Runs)
 		}
 	}
 	q = q.Arg("auth", auth)

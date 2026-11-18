@@ -90,7 +90,14 @@ func (m *Daggervals) Evals(
 	// Token to fetch a private tasks repo (suite=tasks). Unset means an anonymous clone. Only the git fetch uses it.
 	// +optional
 	tasksToken *dagger.Secret,
+	// How many times to run the whole eval, one after the other (1 to 20). Run i is cached as <id>-<i><suffixes>, so the runs plug into compare-runs.
+	// +optional
+	// +default=1
+	runs int,
 ) (*EvalResult, error) {
+	if err := engine.ValidateRuns(runs); err != nil {
+		return nil, err
+	}
 	if err := task.ValidateTasksSuiteArgs(suite, tasksRepo, tasksRef, taskNames); err != nil {
 		return nil, err
 	}
@@ -119,26 +126,46 @@ func (m *Daggervals) Evals(
 	piSetup := setup.PiSetup{Workspace: m.Source, Auth: auth, Env: agentEnv.AsEnvFile(), Profile: agentProfile}
 	piAgent := llm.NewPiAgent(&piSetup)
 
-	evalCache := cache.NewGHCache(cacheDir, ctx)
-	evalEngine := engine.NewEngine(piAgent, tasks, evalCache)
-
-	runId := fixed
-	if runId == "" {
+	baseID := fixed
+	if baseID == "" {
 		// A hash of the workspace files and the profile.
-		runId, err = piSetup.GetSetupId(ctx, rootContainer)
+		baseID, err = piSetup.GetSetupId(ctx, rootContainer)
 		if err != nil {
 			return nil, err
 		}
 	}
-
+	idSuffix := ""
 	if repoSuite != nil {
-		runId += repoSuite.RunIDSuffix
+		idSuffix = repoSuite.RunIDSuffix
+	} else if suite != "" && suite != "rust" {
+		idSuffix = "@" + suite
+	}
+
+	result := &EvalResult{Cache: cacheDir}
+	for i := 1; i <= runs; i++ {
+		one, err := evalOnce(ctx, piAgent, tasks, repoSuite, rootContainer, agentProfile, result.Cache, engine.RunID(baseID, i, runs, idSuffix))
+		if err != nil {
+			return nil, err
+		}
+		result.Cache = one.Cache
+		if runs > 1 {
+			result.Log = append(result.Log, fmt.Sprintf("## run %d/%d", i, runs))
+		}
+		result.Log = append(result.Log, one.Log...)
+	}
+	return result, nil
+}
+
+// evalOnce runs the eval and the judge once under runId. The returned cache directory is
+// cacheDir plus this run's entry and eval report.
+func evalOnce(ctx context.Context, piAgent *llm.PiAgent, tasks []task.FixTask, repoSuite *tasksSuite, rootContainer *dagger.Container, agentProfile string, cacheDir *dagger.Directory, runId string) (*EvalResult, error) {
+	evalCache := cache.NewGHCache(cacheDir, ctx)
+	evalEngine := engine.NewEngine(piAgent, tasks, evalCache)
+	if repoSuite != nil {
 		for _, skip := range repoSuite.Skipped {
 			fmt.Printf("Task %s skipped: %s\n", skip.Name, skip.Reason)
 			evalEngine.Skipped = append(evalEngine.Skipped, engine.SkippedOutcome("tasks/"+skip.Name, skip.Reason, agentProfile))
 		}
-	} else if suite != "" && suite != "rust" {
-		runId += "@" + suite
 	}
 
 	outcomes, err := evalEngine.Run(ctx, rootContainer, runId, agentProfile)
