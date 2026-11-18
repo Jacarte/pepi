@@ -59,6 +59,16 @@ func (r *Daggervals) CompareEvals(ctx context.Context, auth *Secret, agentEnv *F
 // DaggervalsEvalsOpts contains options for Daggervals.Evals
 type DaggervalsEvalsOpts struct {
 	Fixed string
+	// Task suite to run: rust (default), go, all or tasks. tasks cannot be combined with the others.
+	Suite string
+	// Git repo of the tasks suite (suite=tasks). Default: https://github.com/Jacarte/pepi-eval-tasks.git
+	TasksRepo string
+	// Branch or commit sha of the tasks repo; required with suite=tasks. The resolved sha is part of the run id.
+	TasksRef string
+	// Comma-separated names of the tasks to run (suite=tasks). Empty means every supported task.
+	TaskNames string
+	// Token to fetch a private tasks repo (suite=tasks). Unset means an anonymous clone. Only the git fetch uses it.
+	TasksToken *Secret
 }
 
 func (r *Daggervals) Evals(auth *Secret, agentEnv *File, agentProfile string, cacheDir *Directory, opts ...DaggervalsEvalsOpts) *DaggervalsEvalResult {
@@ -70,6 +80,26 @@ func (r *Daggervals) Evals(auth *Secret, agentEnv *File, agentProfile string, ca
 		// `fixed` optional argument
 		if !querybuilder.IsZeroValue(opts[i].Fixed) {
 			q = q.Arg("fixed", opts[i].Fixed)
+		}
+		// `suite` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Suite) {
+			q = q.Arg("suite", opts[i].Suite)
+		}
+		// `tasksRepo` optional argument
+		if !querybuilder.IsZeroValue(opts[i].TasksRepo) {
+			q = q.Arg("tasksRepo", opts[i].TasksRepo)
+		}
+		// `tasksRef` optional argument
+		if !querybuilder.IsZeroValue(opts[i].TasksRef) {
+			q = q.Arg("tasksRef", opts[i].TasksRef)
+		}
+		// `taskNames` optional argument
+		if !querybuilder.IsZeroValue(opts[i].TaskNames) {
+			q = q.Arg("taskNames", opts[i].TaskNames)
+		}
+		// `tasksToken` optional argument
+		if !querybuilder.IsZeroValue(opts[i].TasksToken) {
+			q = q.Arg("tasksToken", opts[i].TasksToken)
 		}
 	}
 	q = q.Arg("auth", auth)
@@ -94,6 +124,51 @@ func (r *Daggervals) GenerateImage(agentProfile string) *Container {
 		query:     q,
 		refetchID: r.refetchID,
 	}
+}
+
+// DaggervalsGradeTaskOpts contains options for Daggervals.GradeTask
+type DaggervalsGradeTaskOpts struct {
+	TasksRepo string
+	// Branch or commit sha of the tasks repo. Required unless tasksDir is set.
+	TasksRef string
+	// Token for a private tasks repo; unset means an anonymous clone.
+	TasksToken *Secret
+	// A local checkout of the tasks repo to use instead of cloning tasksRepo at tasksRef. For developing tasks and scripts before they are pushed.
+	TasksDir *Directory
+}
+
+// GradeTask grades a workspace with the hidden milestones of one task, without an agent
+// or an LLM. testbed plays the role of the agent's /testbed. It returns one line per
+// milestone ("m1-x PASS" or "m1-x FAIL: detail") and a score line. It is the same grader
+// the tasks suite uses, so it checks a task or a reference solution end to end.
+func (r *Daggervals) GradeTask(ctx context.Context, taskName string, testbed *Directory, opts ...DaggervalsGradeTaskOpts) ([]string, error) {
+	assertNotNil("testbed", testbed)
+	q := r.query.Select("gradeTask")
+	for i := len(opts) - 1; i >= 0; i-- {
+		// `tasksRepo` optional argument
+		if !querybuilder.IsZeroValue(opts[i].TasksRepo) {
+			q = q.Arg("tasksRepo", opts[i].TasksRepo)
+		}
+		// `tasksRef` optional argument
+		if !querybuilder.IsZeroValue(opts[i].TasksRef) {
+			q = q.Arg("tasksRef", opts[i].TasksRef)
+		}
+		// `tasksToken` optional argument
+		if !querybuilder.IsZeroValue(opts[i].TasksToken) {
+			q = q.Arg("tasksToken", opts[i].TasksToken)
+		}
+		// `tasksDir` optional argument
+		if !querybuilder.IsZeroValue(opts[i].TasksDir) {
+			q = q.Arg("tasksDir", opts[i].TasksDir)
+		}
+	}
+	q = q.Arg("taskName", taskName)
+	q = q.Arg("testbed", testbed)
+
+	var response []string
+
+	q = q.Bind(&response)
+	return response, q.Execute(ctx)
 }
 
 func (r *Daggervals) Hello(ctx context.Context, auth *Secret, agentEnv *File, agentProfile string) (string, error) {
@@ -175,6 +250,47 @@ func (r *Daggervals) Source() *Directory {
 		query:     q,
 		refetchID: r.refetchID,
 	}
+}
+
+// DaggervalsTaskAgentFilesOpts contains options for Daggervals.TaskAgentFiles
+type DaggervalsTaskAgentFilesOpts struct {
+	TasksRepo string
+	// Branch or commit sha of the tasks repo. Required unless tasksDir is set.
+	TasksRef string
+	// Token for a private tasks repo; unset means an anonymous clone.
+	TasksToken *Secret
+	// A local checkout of the tasks repo to use instead of cloning.
+	TasksDir *Directory
+}
+
+// TaskAgentFiles lists the files a task puts in the agent's /testbed (the seed), to
+// check that hidden/, task.yaml and milestones.yaml never reach the agent's container.
+func (r *Daggervals) TaskAgentFiles(ctx context.Context, taskName string, opts ...DaggervalsTaskAgentFilesOpts) ([]string, error) {
+	q := r.query.Select("taskAgentFiles")
+	for i := len(opts) - 1; i >= 0; i-- {
+		// `tasksRepo` optional argument
+		if !querybuilder.IsZeroValue(opts[i].TasksRepo) {
+			q = q.Arg("tasksRepo", opts[i].TasksRepo)
+		}
+		// `tasksRef` optional argument
+		if !querybuilder.IsZeroValue(opts[i].TasksRef) {
+			q = q.Arg("tasksRef", opts[i].TasksRef)
+		}
+		// `tasksToken` optional argument
+		if !querybuilder.IsZeroValue(opts[i].TasksToken) {
+			q = q.Arg("tasksToken", opts[i].TasksToken)
+		}
+		// `tasksDir` optional argument
+		if !querybuilder.IsZeroValue(opts[i].TasksDir) {
+			q = q.Arg("tasksDir", opts[i].TasksDir)
+		}
+	}
+	q = q.Arg("taskName", taskName)
+
+	var response []string
+
+	q = q.Bind(&response)
+	return response, q.Execute(ctx)
 }
 
 func (r *Daggervals) TestCacheWrite(cacheDir *Directory) *Directory {

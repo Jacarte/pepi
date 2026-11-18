@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path"
 	"strconv"
 	"unicode/utf8"
 
@@ -33,6 +34,9 @@ type Engine struct {
 	Agent LLM
 	Cache Cache
 	Tasks []tasks.FixTask
+	// Skipped are valid tasks the harness cannot run (for example multi-session tasks).
+	// They are appended to the outcomes as Skipped entries so the run records them.
+	Skipped []TaskOutcome
 }
 
 type AgentStats struct {
@@ -125,6 +129,22 @@ type TaskOutcome struct {
 	Output      string
 	OutputError string
 
+	// TimedOut means the agent hit its time limit. The workspace was still graded and
+	// StatsError says why the agent stats are missing or partial, if they are.
+	TimedOut   bool   `json:",omitempty"`
+	StatsError string `json:",omitempty"`
+
+	// Milestone grading (tasks suite), set only by a MilestoneOracle. Score counts the
+	// passed milestones by Scoring (prefix|count); Valid means Score == MaxScore.
+	Milestones []tasks.MilestoneResult `json:",omitempty"`
+	Score      int                     `json:",omitempty"`
+	MaxScore   int                     `json:",omitempty"`
+	Scoring    string                  `json:",omitempty"`
+
+	// Skipped tasks were not run; SkipReason says why.
+	Skipped    bool   `json:",omitempty"`
+	SkipReason string `json:",omitempty"`
+
 	Profile string
 }
 
@@ -141,6 +161,11 @@ func tailBytes(s string, max int) string {
 		cut++
 	}
 	return "[... truncated " + strconv.Itoa(cut) + " bytes ...]\n" + s[cut:]
+}
+
+// SkippedOutcome records a task that was not run.
+func SkippedOutcome(name, reason, profile string) TaskOutcome {
+	return TaskOutcome{Task: name, Skipped: true, SkipReason: reason, Profile: profile}
 }
 
 func NewEngine(agent LLM, tasks []tasks.FixTask, cache Cache) *Engine {
@@ -164,7 +189,7 @@ func (e *Engine) Run(ctx context.Context, container *dagger.Container, runId str
 	}
 
 	if len(e.Tasks) == 0 {
-		return []TaskOutcome{}, nil
+		return append([]TaskOutcome{}, e.Skipped...), nil
 	}
 	// Pi provisioning and toolchains are outside the capture window.
 	setupFunc, err := e.Agent.Setup()(container).Sync(ctx)
@@ -202,6 +227,7 @@ func (e *Engine) Run(ctx context.Context, container *dagger.Container, runId str
 	if err != nil {
 		return outcomes, err
 	}
+	outcomes = append(outcomes, e.Skipped...)
 	return outcomes, e.saveCache(runId, outcomes)
 }
 
@@ -221,7 +247,7 @@ func (e *Engine) runTask(ctx context.Context, preparedEnv *dagger.Container, tas
 		}
 		testEnvScript = script
 	}
-	result, err := network.Measure(prepared, testEnvScript, e.Agent.TaskCommand(task))
+	result, err := network.Measure(prepared, testEnvScript, e.Agent.TaskCommand(task), task.TimeoutSeconds)
 	if err != nil {
 		return nil, err
 	}
@@ -232,19 +258,28 @@ func (e *Engine) runTask(ctx context.Context, preparedEnv *dagger.Container, tas
 	}
 	// The measured exec has stopped capture, parsed it, and removed raw data.
 	networkStats, networkErr := network.ReadStats(ctx, result)
+	// A task that hit its time limit is data for grading, not a failure of the harness:
+	// its stats may be partial.
+	timedOut, timeoutErr := result.Directory("/tmp").Exists(ctx, path.Base(network.TimeoutMarkerPath))
+	if timeoutErr != nil {
+		return nil, fmt.Errorf("task %s: read timeout marker: %w", task.Env.GetRepo(), timeoutErr)
+	}
 	// Extract and print stats before verification, even if verification fails.
 	agentStats, processStats, agentErr := e.Agent.GetStats(ctx, result)
 	statsErr := errors.Join(agentErr, networkErr)
+	statsError := ""
+	if timedOut && statsErr != nil {
+		statsError = statsErr.Error()
+		statsErr = nil
+	}
 	if agentErr == nil {
 		fmt.Printf("Task %s stats: %+v\n", task.Env.GetRepo(), agentStats)
 	}
-	// Verify the final answer even if stats extraction failed.
-	valid, validationErr := task.Oracle.ValidateFinalAnswer(ctx, result)
-	if validationErr != nil {
-		validationErr = fmt.Errorf("task %s validation: %w", task.Env.GetRepo(), validationErr)
-	} else if !valid {
-		validationErr = fmt.Errorf("task %s failed validation", task.Env.GetRepo())
+	if timedOut {
+		fmt.Printf("Task %s timed out after %d s\n", task.Env.GetRepo(), timeoutSeconds(task))
 	}
+	// Verify the final answer even if stats extraction failed.
+	valid, grade, validationErr := e.verify(ctx, task, result)
 	validationError := ""
 	if validationErr != nil {
 		validationError = validationErr.Error()
@@ -266,12 +301,80 @@ func (e *Engine) runTask(ctx context.Context, preparedEnv *dagger.Container, tas
 		FinalDiff:        task.Env.GetFinalDiff(ctx, result),
 		Output:           tailBytes(output, MaxOutputBytes),
 		OutputError:      outputError,
+		TimedOut:         timedOut,
+		StatsError:       statsError,
+		Milestones:       grade.results,
+		Score:            grade.score,
+		MaxScore:         grade.maxScore,
+		Scoring:          grade.scoring,
 		Profile:          profile,
 	}
-	if statsErr != nil {
-		return outcome, errors.Join(statsErr, validationErr)
+	return outcome, taskError(statsErr, validationErr)
+}
+
+func timeoutSeconds(task tasks.FixTask) int {
+	if task.TimeoutSeconds == 0 {
+		return tasks.DefaultTaskTimeoutSeconds
 	}
-	return outcome, nil
+	return task.TimeoutSeconds
+}
+
+// HarnessError is a failure of the grading harness itself (the grader container could not be
+// built, a script returned a usage error), not a verdict on the agent's work. It aborts the
+// run so that nothing is cached and a re-run grades again. By design one harness error aborts
+// the whole run, parallel tasks included (the errgroup cancels them): a half-graded run would
+// otherwise be cached or compared as if the grading had worked.
+type HarnessError struct{ Err error }
+
+func (e *HarnessError) Error() string { return "grading harness error: " + e.Err.Error() }
+func (e *HarnessError) Unwrap() error { return e.Err }
+
+// taskError is what runTask returns next to the outcome. Stats errors always abort the run;
+// a verdict that is not valid does not, unless it is a harness error.
+func taskError(statsErr, validationErr error) error {
+	var harness *HarnessError
+	if statsErr != nil || errors.As(validationErr, &harness) {
+		return errors.Join(statsErr, validationErr)
+	}
+	return nil
+}
+
+// milestoneGrade is the result of a MilestoneOracle; zero for other oracles.
+type milestoneGrade struct {
+	results  []tasks.MilestoneResult
+	score    int
+	maxScore int
+	scoring  string
+}
+
+// verify asks the task's oracle for the verdict. A MilestoneOracle grades every milestone
+// (valid when all pass); other oracles give pass/fail. The returned error is data about
+// the verdict, never a harness failure.
+func (e *Engine) verify(ctx context.Context, task tasks.FixTask, container *dagger.Container) (bool, milestoneGrade, error) {
+	repo := task.Env.GetRepo()
+	if oracle, ok := task.Oracle.(tasks.MilestoneOracle); ok {
+		results, err := oracle.GradeMilestones(ctx, container)
+		if err != nil {
+			return false, milestoneGrade{scoring: oracle.Scoring()}, &HarnessError{Err: fmt.Errorf("task %s grading: %w", repo, err)}
+		}
+		score, maxScore, err := tasks.ScoreMilestones(oracle.Scoring(), results)
+		grade := milestoneGrade{results: results, score: score, maxScore: maxScore, scoring: oracle.Scoring()}
+		if err != nil {
+			return false, grade, &HarnessError{Err: fmt.Errorf("task %s grading: %w", repo, err)}
+		}
+		if maxScore == 0 || score != maxScore {
+			return false, grade, fmt.Errorf("task %s failed validation: score %d/%d", repo, score, maxScore)
+		}
+		return true, grade, nil
+	}
+	valid, err := task.Oracle.ValidateFinalAnswer(ctx, container)
+	if err != nil {
+		return false, milestoneGrade{}, fmt.Errorf("task %s validation: %w", repo, err)
+	}
+	if !valid {
+		return false, milestoneGrade{}, fmt.Errorf("task %s failed validation", repo)
+	}
+	return true, milestoneGrade{}, nil
 }
 
 // saveCache stores a completed run (including failed validation) so it can be exported.

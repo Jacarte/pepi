@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"dagger/daggervals/internal/evals/engine"
+	tasks "dagger/daggervals/internal/evals/task"
 )
 
 func TestBuildReportsKeepsValidationError(t *testing.T) {
@@ -101,5 +102,87 @@ func TestSummarizeTokens(t *testing.T) {
 	}
 	if z := summarizeTokens(engine.AgentStats{}); z.CacheHitRatio != nil || z.CostPerTurn != nil {
 		t.Fatalf("zero: %+v", z)
+	}
+}
+
+func TestBuildReportsMilestonesAndSkipped(t *testing.T) {
+	results := []engine.TaskOutcome{
+		{
+			Task: "tasks/five-modules", Valid: false, ValidationError: "score 4/5", TimedOut: true,
+			Score: 4, MaxScore: 5, Scoring: "count",
+			Milestones: []tasks.MilestoneResult{{ID: "m1", Title: "One", Passed: true}, {ID: "m2", Title: "Two", Detail: "REJECT: m2"}},
+		},
+		{Task: "kv-database", Skipped: true, SkipReason: "multi-session not supported yet"},
+		{Task: "plain", Valid: true},
+	}
+	reports := buildReports(results)
+	if len(reports) != 2 {
+		t.Fatalf("skipped tasks must not reach the judge: %d reports", len(reports))
+	}
+	r := reports[0]
+	if r.Score == nil || *r.Score != 4 || r.MaxScore != 5 || r.Scoring != "count" || !r.TimedOut || len(r.Milestones) != 2 || r.Milestones[1].Detail != "REJECT: m2" {
+		t.Fatalf("milestone fields: %+v", r)
+	}
+	encoded, err := json.Marshal(reports[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"score", "maxScore", "scoring", "milestones", "timedOut"} {
+		if strings.Contains(string(encoded), `"`+key+`"`) {
+			t.Fatalf("%s must be omitted for non-milestone tasks: %s", key, encoded)
+		}
+	}
+}
+
+func TestPromptsDescribeMilestoneFields(t *testing.T) {
+	for name, prompt := range map[string]string{"JUDGE_PROMPT": JUDGE_PROMPT, "COMPARE_PROMPT": COMPARE_PROMPT} {
+		for _, want := range []string{"score", "maxScore", "scoring", "prefix", "count", "milestones", "passed", "detail", "timedOut", "skipped", "golden patch", "primary correctness signal", "cut short"} {
+			if !strings.Contains(prompt, want) {
+				t.Errorf("%s does not mention %q", name, want)
+			}
+		}
+	}
+	for _, want := range []string{"| Score (before -> after) |", "Milestones passed", "Score / max score", "Timed out runs"} {
+		if !strings.Contains(COMPARE_PROMPT, want) {
+			t.Errorf("COMPARE_PROMPT table lacks %q", want)
+		}
+	}
+}
+
+// Every JSON key the milestone fields add to a report must be named in both prompts.
+func TestPromptsNameEveryReportMilestoneKey(t *testing.T) {
+	encoded, err := json.Marshal(buildReports([]engine.TaskOutcome{{
+		Task: "t", Score: 1, MaxScore: 2, Scoring: "count", TimedOut: true,
+		Milestones: []tasks.MilestoneResult{{ID: "m1", Title: "T", Passed: true, Detail: "d"}},
+	}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reports []map[string]any
+	if err := json.Unmarshal(encoded, &reports); err != nil {
+		t.Fatal(err)
+	}
+	keys := []string{"score", "maxScore", "scoring", "milestones", "timedOut"}
+	for _, key := range keys {
+		if _, ok := reports[0][key]; !ok {
+			t.Fatalf("report lacks %s: %s", key, encoded)
+		}
+		for name, prompt := range map[string]string{"JUDGE_PROMPT": JUDGE_PROMPT, "COMPARE_PROMPT": COMPARE_PROMPT} {
+			if !strings.Contains(prompt, key) {
+				t.Errorf("%s does not name the report key %q", name, key)
+			}
+		}
+	}
+}
+
+// A score of 0 must reach the judge as 0, not be dropped like an absent field.
+func TestBuildReportsKeepsZeroScore(t *testing.T) {
+	reports := buildReports([]engine.TaskOutcome{{Task: "tasks/five-modules", Score: 0, MaxScore: 5, Scoring: "count"}})
+	encoded, err := json.Marshal(reports[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), `"score":0`) || !strings.Contains(string(encoded), `"maxScore":5`) {
+		t.Fatalf("zero score missing: %s", encoded)
 	}
 }

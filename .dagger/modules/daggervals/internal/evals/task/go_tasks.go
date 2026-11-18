@@ -51,19 +51,24 @@ func (c GoTask) GetFinalDiff(ctx context.Context, container *dagger.Container) s
 	return diff
 }
 
+// withGoToolchain installs this task's Go and the environment that makes go use exactly
+// that version. GOTOOLCHAIN=local never downloads another one.
+func (c GoTask) withGoToolchain(container *dagger.Container) *dagger.Container {
+	return container.
+		WithExec([]string{"sh", "-c", c.installGoScript()}).
+		WithEnvVariable("GOROOT", "/usr/local/go").
+		WithEnvVariable("GOPATH", "/root/go").
+		WithEnvVariable("PATH", "/usr/local/go/bin:/root/go/bin:$PATH", dagger.ContainerWithEnvVariableOpts{Expand: true}).
+		WithEnvVariable("GOTOOLCHAIN", "local").
+		WithEnvVariable("GOFLAGS", "-p=2").
+		WithEnvVariable("GOMAXPROCS", "2")
+}
+
 // PrepareEnvForTesting installs this task's Go and clones the repo at the task commit.
-// GOTOOLCHAIN=local makes go use exactly that version and never download another one.
 // The failing tests are applied later by GoTestEnv, inside the measured exec.
 func (c GoTask) PrepareEnvForTesting(ctx context.Context) dagger.WithContainerFunc {
 	return func(container *dagger.Container) *dagger.Container {
-		return container.
-			WithExec([]string{"sh", "-c", c.installGoScript()}).
-			WithEnvVariable("GOROOT", "/usr/local/go").
-			WithEnvVariable("GOPATH", "/root/go").
-			WithEnvVariable("PATH", "/usr/local/go/bin:/root/go/bin:$PATH", dagger.ContainerWithEnvVariableOpts{Expand: true}).
-			WithEnvVariable("GOTOOLCHAIN", "local").
-			WithEnvVariable("GOFLAGS", "-p=2").
-			WithEnvVariable("GOMAXPROCS", "2").
+		return c.withGoToolchain(container).
 			WithExec([]string{"git", "clone", c.Repo, goWorkdir}).
 			WithWorkdir(goWorkdir).
 			WithExec([]string{"git", "checkout", c.Commit, "--"})
