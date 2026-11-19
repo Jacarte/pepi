@@ -455,6 +455,7 @@ test("read-only entry blocks all writes and never drains an existing outbox", as
   await h.execute({ action: "search", query: "fact" }); await h.execute({ action: "get_all" });
   assert.deepEqual(h.backend.requests.map((r: any) => r.method), ["POST", "GET"]);
   assert.equal(h.backend.requests[0].url, "/search");
+  assert.equal(JSON.parse(h.backend.requests[0].body).project, "explicit:tests");
 });
 
 test("ambient writer is inert for both subprocess child markers", async (t) => {

@@ -190,7 +190,7 @@ export async function recall(config: Config, identity: Identity, query: string |
     const payload = query === undefined
       ? await requestJson(`${config.baseUrl}/memories?user_id=${encodeURIComponent(userId)}`, config.requestTimeoutMs, {}, fetcher)
       : await requestJson(`${config.baseUrl}/search`, config.requestTimeoutMs,
-        { method: "POST", body: JSON.stringify({ query: redact(query).slice(0, 4_000), user_id: userId }) }, fetcher);
+        { method: "POST", body: JSON.stringify({ query: redact(query).slice(0, 4_000), user_id: userId, project: identity.projectId }) }, fetcher);
     return { userId, payload };
   }));
   for (const { userId, payload } of scopes) {
