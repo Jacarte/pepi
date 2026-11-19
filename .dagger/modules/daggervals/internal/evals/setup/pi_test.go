@@ -88,3 +88,55 @@ func TestMemorySettingsScript(t *testing.T) {
 		t.Errorf("off must exclude the parent entry point: %s", extensions)
 	}
 }
+
+// The setup id must not move when the CI commits a baseline (.github, eval-baseline,
+// .eval.track) or another profile changes, and must move with AGENTS.md and the profile.
+func TestSetupFilesHashScript(t *testing.T) {
+	for _, tool := range []string{"bash", "sha256sum"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skip(tool + " is not installed")
+		}
+	}
+	dir := t.TempDir()
+	write := func(path, content string) {
+		t.Helper()
+		full := filepath.Join(dir, path)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	hash := func() string {
+		t.Helper()
+		cmd := exec.Command("bash", "-c", setupFilesHashScript, "_", "plain")
+		cmd.Dir = dir
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	write("AGENTS.md", "rules")
+	write("profiles/plain/settings.json", "{}")
+	write(".dagger/modules/daggervals/main.go", "package main")
+	base := hash()
+	if len(base) != 64 {
+		t.Fatalf("not a sha256: %q", base)
+	}
+	for _, path := range []string{".github/workflows/eval.yml", "eval-baseline/fast/ci-fast-rust", ".eval.track", "profiles/other/settings.json", "README.md", "evals_cache/x"} {
+		write(path, "new")
+		if got := hash(); got != base {
+			t.Fatalf("%s changed the setup hash", path)
+		}
+	}
+	for _, path := range []string{"AGENTS.md", "profiles/plain/settings.json", "profiles/plain/new.md", ".dagger/modules/daggervals/main.go"} {
+		write(path, "changed "+path)
+		got := hash()
+		if got == base {
+			t.Fatalf("%s did not change the setup hash", path)
+		}
+		base = got
+	}
+}

@@ -16,8 +16,9 @@ type Daggervals struct { // daggervals (../../../../../../:0:0)
 	// field again.
 	refetchID bool
 
-	hello *string
-	id    *ID
+	ciSetupHash *string
+	hello       *string
+	id          *ID
 }
 
 func (r *Daggervals) WithGraphQLQuery(q *querybuilder.Selection) *Daggervals {
@@ -36,6 +37,170 @@ func (r *Daggervals) Auth() *Secret {
 		query:     q,
 		refetchID: r.refetchID,
 	}
+}
+
+// DaggervalsCiBaselinePrepareOpts contains options for Daggervals.CiBaselinePrepare
+type DaggervalsCiBaselinePrepareOpts struct {
+	// The current .eval.track. Default: the workspace's, when it exists.
+	Track *File
+}
+
+// CiBaselinePrepare checks the results of a merged PR's eval and returns them laid out for
+// the repo root: eval-baseline/<tier>/<files> and .eval.track with this tier's entry
+// replaced. It takes no secret: the exact secret values are searched by ci-eval-run and
+// ci-eval-report, here only the secret shapes. results and status must come from the
+// approved eval run of the PR head: status.json is not signed. It refuses when the evaluated
+// head is not the PR head at merge time, the eval was incomplete, a file name, type or size
+// is not allowed, or a file looks like it holds a secret (the error names the file and the
+// rule only).
+func (r *Daggervals) CiBaselinePrepare(results *Directory, status *File, tier string, prNumber int, prHeadSha string, mergeSha string, date string, opts ...DaggervalsCiBaselinePrepareOpts) *Directory {
+	assertNotNil("results", results)
+	assertNotNil("status", status)
+	q := r.query.Select("ciBaselinePrepare")
+	for i := len(opts) - 1; i >= 0; i-- {
+		// `track` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Track) {
+			q = q.Arg("track", opts[i].Track)
+		}
+	}
+	q = q.Arg("results", results)
+	q = q.Arg("status", status)
+	q = q.Arg("tier", tier)
+	q = q.Arg("prNumber", prNumber)
+	q = q.Arg("prHeadSha", prHeadSha)
+	q = q.Arg("mergeSha", mergeSha)
+	q = q.Arg("date", date)
+
+	return &Directory{
+		query:     q,
+		refetchID: r.refetchID,
+	}
+}
+
+// DaggervalsCiEvalReportOpts contains options for Daggervals.CiEvalReport
+type DaggervalsCiEvalReportOpts struct {
+	Auth *Secret
+	// Git repo of the tasks suite. Default: https://github.com/Jacarte/pepi-eval-tasks.git
+	TasksRepo string
+	// URL of the workflow run, linked from the truncation notes.
+	RunURL string
+
+	DryRun bool
+}
+
+// CiEvalReport merges the result files of every shard of a tier per run, compares them with
+// the tier's baseline of the PR's base when they are comparable, and returns judge.md and
+// compare.md (the sticky PR comment bodies), summary.md (the job summary) and status.json.
+// The results, the compare-runs answer and the bodies are scanned for secrets (shapes and the
+// values of auth and agentEnv): on a hit the bodies are withheld and infra_ok is false. With
+// dryRun the comparison calls no model and auth is not needed.
+func (r *Daggervals) CiEvalReport(agentEnv *File, agentProfile string, results *Directory, baseSource *Directory, tier string, prNumber int, evaluatedSha string, tasksRef string, opts ...DaggervalsCiEvalReportOpts) *Directory {
+	assertNotNil("agentEnv", agentEnv)
+	assertNotNil("results", results)
+	assertNotNil("baseSource", baseSource)
+	q := r.query.Select("ciEvalReport")
+	for i := len(opts) - 1; i >= 0; i-- {
+		// `auth` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Auth) {
+			q = q.Arg("auth", opts[i].Auth)
+		}
+		// `tasksRepo` optional argument
+		if !querybuilder.IsZeroValue(opts[i].TasksRepo) {
+			q = q.Arg("tasksRepo", opts[i].TasksRepo)
+		}
+		// `runUrl` optional argument
+		if !querybuilder.IsZeroValue(opts[i].RunURL) {
+			q = q.Arg("runUrl", opts[i].RunURL)
+		}
+		// `dryRun` optional argument
+		if !querybuilder.IsZeroValue(opts[i].DryRun) {
+			q = q.Arg("dryRun", opts[i].DryRun)
+		}
+	}
+	q = q.Arg("agentEnv", agentEnv)
+	q = q.Arg("agentProfile", agentProfile)
+	q = q.Arg("results", results)
+	q = q.Arg("baseSource", baseSource)
+	q = q.Arg("tier", tier)
+	q = q.Arg("prNumber", prNumber)
+	q = q.Arg("evaluatedSha", evaluatedSha)
+	q = q.Arg("tasksRef", tasksRef)
+
+	return &Directory{
+		query:     q,
+		refetchID: r.refetchID,
+	}
+}
+
+// DaggervalsCiEvalRunOpts contains options for Daggervals.CiEvalRun
+type DaggervalsCiEvalRunOpts struct {
+	// Full commit sha of the tasks repo, required by the tasks-* shards; rust and go ignore it.
+	TasksRef string
+	// Git repo of the tasks suite. Default: https://github.com/Jacarte/pepi-eval-tasks.git
+	TasksRepo string
+}
+
+// CiEvalRun runs one shard of a CI eval tier (fast: rust, go, tasks-memory; full: the same
+// plus tasks-long) from an empty cache, with memory on, as often as the tier says (fast 1,
+// full 3). It returns the shard's result files, named <ci-tier-shard>[-<run>]<suffixes>
+// plus a .eval.md judge report each, for ci-eval-report. It fails instead when a file holds
+// a secret shape or a value of auth or of a secret-named variable of agentEnv or
+// hippocampusEnv (the error names the file and the rule only).
+func (r *Daggervals) CiEvalRun(auth *Secret, agentEnv *File, agentProfile string, hippocampusEnv *File, tier string, shard string, opts ...DaggervalsCiEvalRunOpts) *Directory {
+	assertNotNil("auth", auth)
+	assertNotNil("agentEnv", agentEnv)
+	assertNotNil("hippocampusEnv", hippocampusEnv)
+	q := r.query.Select("ciEvalRun")
+	for i := len(opts) - 1; i >= 0; i-- {
+		// `tasksRef` optional argument
+		if !querybuilder.IsZeroValue(opts[i].TasksRef) {
+			q = q.Arg("tasksRef", opts[i].TasksRef)
+		}
+		// `tasksRepo` optional argument
+		if !querybuilder.IsZeroValue(opts[i].TasksRepo) {
+			q = q.Arg("tasksRepo", opts[i].TasksRepo)
+		}
+	}
+	q = q.Arg("auth", auth)
+	q = q.Arg("agentEnv", agentEnv)
+	q = q.Arg("agentProfile", agentProfile)
+	q = q.Arg("hippocampusEnv", hippocampusEnv)
+	q = q.Arg("tier", tier)
+	q = q.Arg("shard", shard)
+
+	return &Directory{
+		query:     q,
+		refetchID: r.refetchID,
+	}
+}
+
+// DaggervalsCiSetupHashOpts contains options for Daggervals.CiSetupHash
+type DaggervalsCiSetupHashOpts struct {
+	Source *Directory
+}
+
+// CiSetupHash is the setup id that Evals uses as run id without --fixed, of source (default:
+// the workspace) with the same files left out. .github, eval-baseline and .eval.track are not
+// part of it; the content of agentEnv is.
+func (r *Daggervals) CiSetupHash(ctx context.Context, agentEnv *File, agentProfile string, opts ...DaggervalsCiSetupHashOpts) (string, error) {
+	assertNotNil("agentEnv", agentEnv)
+	if r.ciSetupHash != nil {
+		return *r.ciSetupHash, nil
+	}
+	q := r.query.Select("ciSetupHash")
+	for i := len(opts) - 1; i >= 0; i-- {
+		// `source` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Source) {
+			q = q.Arg("source", opts[i].Source)
+		}
+	}
+	q = q.Arg("agentEnv", agentEnv)
+	q = q.Arg("agentProfile", agentProfile)
+
+	var response string
+
+	q = q.Bind(&response)
+	return response, q.Execute(ctx)
 }
 
 func (r *Daggervals) CompareEvals(ctx context.Context, auth *Secret, agentEnv *File, agentProfile string, before *File, after *File) ([]string, error) {

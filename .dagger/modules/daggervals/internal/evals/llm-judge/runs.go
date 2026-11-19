@@ -279,9 +279,14 @@ func aggregateArms(runs []RunInput) armsReport {
 	taskSet := map[string]bool{}
 	for i, r := range runs {
 		reports[i] = map[string]taskReport{}
-		for _, report := range buildReports(r.Outcomes) {
-			reports[i][report.Task] = report
-			taskSet[report.Task] = true
+		built := buildReports(r.Outcomes)
+		names := make([]string, len(built))
+		for k, report := range built {
+			names[k] = report.Task
+		}
+		for k, name := range UniqueTaskNames(names) {
+			reports[i][name] = built[k]
+			taskSet[name] = true
 		}
 	}
 	tasks := sortedKeys(taskSet)
@@ -321,6 +326,21 @@ func aggregateArms(runs []RunInput) armsReport {
 	for _, a := range out.Arms {
 		if a.Runs < 3 {
 			out.Notes = append(out.Notes, fmt.Sprintf("arm %s has %d run(s): fewer than 3 repetitions, so differences cannot be told from noise", a.Label, a.Runs))
+		}
+	}
+	return out
+}
+
+// UniqueTaskNames appends " #2", " #3", ... to the repeats of a task name, in order of
+// appearance: Rust and Go tasks are named by their repo URL, and a repo can have several.
+func UniqueTaskNames(names []string) []string {
+	seen := map[string]int{}
+	out := make([]string, len(names))
+	for i, name := range names {
+		seen[name]++
+		out[i] = name
+		if seen[name] > 1 {
+			out[i] = fmt.Sprintf("%s #%d", name, seen[name])
 		}
 	}
 	return out

@@ -98,22 +98,24 @@ func (c *PiSetup) Setup() dagger.WithContainerFunc {
 	}
 }
 
-func (c *PiSetup) GetSetupId(ctx context.Context, container *dagger.Container) (string, error) {
-
-	withFilesContainer := container.WithDirectory("/root/.pi/agent", c.Workspace)
-
-	// Hash only the files that define the agent setup. Volatile workspace files
-	// (budget history, caches, run history, ...) must not change the run ID.
-	// Root settings.json/mcp.json/models-router.json are overlaid by the profile,
-	// so the profile directory is hashed instead.
-	shaFolder, err := withFilesContainer.WithExec([]string{"bash", "-c", `
-cd /root/.pi/agent || exit 1
+// setupFilesHashScript hashes, from the current directory, only the files that define the
+// agent setup; $1 is the profile. Volatile workspace files (budget history, caches, run
+// history, ...) and CI files (.github, eval-baseline, .eval.track) must not change the run ID.
+// Root settings.json/mcp.json/models-router.json are overlaid by the profile, so the profile
+// directory is hashed instead.
+const setupFilesHashScript = `
 paths=()
 for p in AGENTS.md profile.sh extensions skills prompts workflows "profiles/$1" .dagger; do
   [ -e "$p" ] && paths+=("$p")
 done
 find "${paths[@]}" -type f -not -path '*/node_modules/*' -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1
-`, "_", c.Profile}).Stdout(ctx)
+`
+
+func (c *PiSetup) GetSetupId(ctx context.Context, container *dagger.Container) (string, error) {
+
+	withFilesContainer := container.WithDirectory("/root/.pi/agent", c.Workspace)
+
+	shaFolder, err := withFilesContainer.WithWorkdir("/root/.pi/agent").WithExec([]string{"bash", "-c", setupFilesHashScript, "_", c.Profile}).Stdout(ctx)
 	if err != nil {
 		return "", err
 	}

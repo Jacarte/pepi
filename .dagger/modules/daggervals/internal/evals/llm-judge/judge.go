@@ -278,6 +278,16 @@ func summarizeTiming(ps engine.ProcessStats) timingSummary {
 	return t
 }
 
+// WallClockSec is timing.wallClockMs in seconds, nil when unknown.
+func WallClockSec(ps engine.ProcessStats) *float64 {
+	ms := summarizeTiming(ps).WallClockMs
+	if ms == nil {
+		return nil
+	}
+	sec := *ms / 1000
+	return &sec
+}
+
 func buildReports(results []engine.TaskOutcome) []taskReport {
 	reports := make([]taskReport, 0, len(results))
 	for _, r := range results {

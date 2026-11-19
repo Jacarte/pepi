@@ -266,6 +266,24 @@ func TestAggregateReportsMissingTasks(t *testing.T) {
 	}
 }
 
+// The Rust suite has three tokio tasks: each is its own task, numbered in order of appearance.
+func TestAggregateKeepsTasksOfTheSameRepo(t *testing.T) {
+	const tokio = "https://github.com/tokio-rs/tokio.git"
+	report := aggregateArms([]RunInput{
+		run("a", fake{task: tokio, score: 1, maxScore: 1}, fake{task: "other", score: 1, maxScore: 1}, fake{task: tokio, cost: 2}, fake{task: tokio, cost: 3}),
+	})
+	if want := []string{"https://github.com/tokio-rs/tokio.git", "https://github.com/tokio-rs/tokio.git #2", "https://github.com/tokio-rs/tokio.git #3", "other"}; !reflect.DeepEqual(report.Tasks, want) {
+		t.Fatalf("tasks: %v", report.Tasks)
+	}
+	a := findArm(t, report, "a")
+	if *findTask(t, a, tokio+" #2").CostUSD.Median != 2 || *findTask(t, a, tokio+" #3").CostUSD.Median != 3 || a.Total.Tasks != 4 {
+		t.Fatalf("arm: %+v", a)
+	}
+	if got := UniqueTaskNames([]string{"x", "y", "x"}); !reflect.DeepEqual(got, []string{"x", "y", "x #2"}) {
+		t.Fatalf("UniqueTaskNames: %v", got)
+	}
+}
+
 func num(v float64) *float64 { return &v }
 
 func memoryOn(fixture bool, adds, searches float64, stored int, latency float64) *engine.MemoryStats {
