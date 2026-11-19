@@ -4,6 +4,7 @@
 results in the PR, and commits them as the tier's baseline when the PR merges. The logic lives in
 the Dagger functions `ci-eval-run`, `ci-eval-report` and `ci-baseline-prepare` of
 `.dagger/modules/daggervals`. Only same-repo PRs against the default branch are evaluated.
+What each task measures and how an eval runs end to end are in [evals-tasks.md](evals-tasks.md).
 
 ## Use
 
