@@ -1,0 +1,19 @@
+{
+  "minConfidence": 0.4,
+  "LOCAL": {
+    "provider": "openai",
+    "id": "gpt-5.4-mini"
+  },
+  "CHEAP": {
+    "provider": "openai",
+    "id": "gpt-5.4"
+  },
+  "FRONTIER": {
+    "provider": "openai",
+    "id": "gpt-5.5"
+  },
+  "HUMAN": {
+    "provider": "human",
+    "id": "javi"
+  }
+}
