@@ -148,25 +148,56 @@ export class Evidence {
   }
 }
 
+export const OVERVIEW_HALF_LIFE_DAYS = 30;
+
+/** True when this project already has an overview memory. Fails closed (true) so errors never cause nagging. */
+export async function hasOverview(config: Config, identity: Identity, fetcher = fetch): Promise<boolean> {
+  try {
+    const payload = await requestJson(`${config.baseUrl}/retrieve`, config.requestTimeoutMs,
+      { method: "POST", body: JSON.stringify({ query: "project overview", scopes: ["project"], filters: { scope: null, capture_kind: "overview" }, limit: 1, user_id: identity.userId, project: identity.projectId }) }, fetcher);
+    return memoryRows(payload).length > 0;
+  } catch { return true; }
+}
+
 export interface Capture { captureId: string; destination: string; body: string; timeoutMs: number }
 export function createCapture(config: Config, identity: Identity, sessionId: string, content: string,
-  infer: boolean, observedAt: string, refs: string[] = []): Capture {
+  infer: boolean, observedAt: string, refs: string[] = [], kind?: "overview"): Capture {
   const captureId = `pepi-${randomUUID()}`;
   const body = JSON.stringify({
     messages: [{ role: "user", content: redact(content) }],
     user_id: identity.userId, infer, capture_id: captureId,
-    metadata: { source: "pepi", source_agent: "parent", project_id: identity.projectId,
-      session_id: sessionId, observed_at: observedAt, source_refs: refs, capture_kind: infer ? "completed_activity" : "explicit" },
+    metadata: {
+      source: "pepi", source_agent: "parent", project_id: identity.projectId,
+      session_id: sessionId, observed_at: observedAt, source_refs: refs, capture_kind: infer ? "completed_activity" : kind ?? "explicit",
+      // A project overview is a durable fact: label it and slow its decay so it outlives ordinary captures.
+      ...(kind === "overview" ? { type: "stable-fact", decay_half_life_days: OVERVIEW_HALF_LIFE_DAYS } : {})
+    },
   });
   return { captureId, destination: `${config.baseUrl}/memories`, body, timeoutMs: config.requestTimeoutMs };
 }
 
 export async function requestJson(url: string, timeoutMs: number, init: RequestInit = {}, fetcher = fetch): Promise<any> {
-  const response = await fetcher(url, { ...init, redirect: "error", signal: AbortSignal.timeout(timeoutMs),
-    headers: { "content-type": "application/json", ...init.headers } });
+  const response = await fetcher(url, {
+    ...init, redirect: "error", signal: AbortSignal.timeout(timeoutMs),
+    headers: { "content-type": "application/json", ...init.headers }
+  });
   if (!response.ok) throw new Error(`Hippocampus HTTP ${response.status}`);
   try { return await response.json(); }
   catch { throw new Error("Hippocampus returned invalid JSON"); }
+}
+
+/** Build the automatic-recall query from a prompt: long task briefs make poor search strings, so drop
+ *  boilerplate routing sentences, collapse whitespace and cap the length at a word boundary. */
+export function recallQuery(prompt: string, maxChars = 300): string {
+  const text = prompt.replace(/\s+/g, " ").trim()
+    .replace(/^task:\s*/i, "")
+    .replace(/(?:^|(?<=[.!?]\s))[^.!?]*\bjev_route\b[^.!?]*[.!?]\s*/gi, "")
+    .trim();
+  const base = text || prompt.replace(/\s+/g, " ").trim();
+  if (base.length <= maxChars) return base;
+  const cut = base.slice(0, maxChars);
+  const lastSpace = cut.lastIndexOf(" ");
+  return (lastSpace > maxChars * 0.6 ? cut.slice(0, lastSpace) : cut).trim();
 }
 
 export function memoryRows(payload: any): any[] {
@@ -185,19 +216,25 @@ function eligibleForRecall(record: any): boolean {
 }
 
 export async function recall(config: Config, identity: Identity, query: string | undefined, fetcher = fetch) {
-  const all: { id: string; memory: string; user_id: string }[] = [];
+  const all: { id: string; memory: string; user_id: string; type?: string; created_at?: string }[] = [];
   const scopes = await Promise.all(identity.readUserIds.map(async (userId) => {
     const payload = query === undefined
       ? await requestJson(`${config.baseUrl}/memories?user_id=${encodeURIComponent(userId)}`, config.requestTimeoutMs, {}, fetcher)
-      : await requestJson(`${config.baseUrl}/search`, config.requestTimeoutMs,
-        { method: "POST", body: JSON.stringify({ query: redact(query).slice(0, 4_000), user_id: userId, project: identity.projectId }) }, fetcher);
+      // /retrieve (hybrid + recency decay). `scopes` is required and becomes a metadata filter on `scope`,
+      // which most memories lack, so `filters.scope: null` disables that filter.
+      : await requestJson(`${config.baseUrl}/retrieve`, config.requestTimeoutMs,
+        { method: "POST", body: JSON.stringify({ query: redact(query).slice(0, 4_000), scopes: ["project"], filters: { scope: null }, limit: 20, user_id: userId, project: identity.projectId }) }, fetcher);
     return { userId, payload };
   }));
   for (const { userId, payload } of scopes) {
     for (const row of memoryRows(payload)) {
       if (!eligibleForRecall(row)) continue;
       if (!all.some((prior) => prior.id === row.id)) {
-        all.push({ id: row.id, memory: redact(row.memory).slice(0, 2_000), user_id: userId });
+        const type = [row.type, row.metadata?.type].find((value) => typeof value === "string" && value.trim());
+        all.push({
+          id: row.id, memory: redact(row.memory).slice(0, 2_000), user_id: userId, ...(type ? { type: type.trim().slice(0, 40) } : {}),
+          ...(typeof row.created_at === "string" && !Number.isNaN(Date.parse(row.created_at)) ? { created_at: row.created_at } : {})
+        });
       }
     }
   }
