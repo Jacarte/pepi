@@ -5,7 +5,6 @@
     "npm:pi-subagents@0.78.0",
     "npm:pi-mcp-adapter",
     "npm:@vndv/pi-codegraph",
-    "npm:@amaster.ai/pi-memory-mem0",
     "npm:pi-ketch",
     "npm:@dietrichgebert/ponytail"
   ],
@@ -45,7 +44,7 @@
         "subagentOnlyExtensions": [
           "/Users/javcab/.pi/agent/extensions/pi-typesafe-router.ts",
           "/Users/javcab/.pi/agent/extensions/prompt-logger.ts",
-          "/Users/javcab/.pi/agent/npm/node_modules/@amaster.ai/pi-memory-mem0/dist/index.js",
+          "/Users/javcab/.pi/agent/extensions/subagent-only/hippocampus-readonly.ts",
           "/Users/javcab/.pi/agent/extensions/subagent-only/mem0-fallback.ts",
           "/Users/javcab/.pi/agent/npm/node_modules/@vndv/pi-codegraph/extensions/codegraph.ts"
         ]
@@ -75,7 +74,7 @@
         "subagentOnlyExtensions": [
           "/Users/javcab/.pi/agent/extensions/pi-typesafe-router.ts",
           "/Users/javcab/.pi/agent/extensions/prompt-logger.ts",
-          "/Users/javcab/.pi/agent/npm/node_modules/@amaster.ai/pi-memory-mem0/dist/index.js",
+          "/Users/javcab/.pi/agent/extensions/subagent-only/hippocampus-readonly.ts",
           "/Users/javcab/.pi/agent/extensions/subagent-only/mem0-fallback.ts",
           "/Users/javcab/.pi/agent/npm/node_modules/@vndv/pi-codegraph/extensions/codegraph.ts"
         ]
@@ -119,7 +118,7 @@
         "subagentOnlyExtensions": [
           "/Users/javcab/.pi/agent/extensions/pi-typesafe-router.ts",
           "/Users/javcab/.pi/agent/extensions/prompt-logger.ts",
-          "/Users/javcab/.pi/agent/npm/node_modules/@amaster.ai/pi-memory-mem0/dist/index.js",
+          "/Users/javcab/.pi/agent/extensions/subagent-only/hippocampus-readonly.ts",
           "/Users/javcab/.pi/agent/extensions/subagent-only/mem0-fallback.ts",
           "/Users/javcab/.pi/agent/npm/node_modules/@vndv/pi-codegraph/extensions/codegraph.ts"
         ]
@@ -148,7 +147,7 @@
         "subagentOnlyExtensions": [
           "/Users/javcab/.pi/agent/extensions/pi-typesafe-router.ts",
           "/Users/javcab/.pi/agent/extensions/prompt-logger.ts",
-          "/Users/javcab/.pi/agent/npm/node_modules/@amaster.ai/pi-memory-mem0/dist/index.js",
+          "/Users/javcab/.pi/agent/extensions/subagent-only/hippocampus-readonly.ts",
           "/Users/javcab/.pi/agent/extensions/subagent-only/mem0-fallback.ts",
           "/Users/javcab/.pi/agent/npm/node_modules/@vndv/pi-codegraph/extensions/codegraph.ts"
         ]
@@ -176,7 +175,7 @@
         "subagentOnlyExtensions": [
           "/Users/javcab/.pi/agent/extensions/pi-typesafe-router.ts",
           "/Users/javcab/.pi/agent/extensions/prompt-logger.ts",
-          "/Users/javcab/.pi/agent/npm/node_modules/@amaster.ai/pi-memory-mem0/dist/index.js",
+          "/Users/javcab/.pi/agent/extensions/subagent-only/hippocampus-readonly.ts",
           "/Users/javcab/.pi/agent/extensions/subagent-only/mem0-fallback.ts",
           "/Users/javcab/.pi/agent/npm/node_modules/@vndv/pi-codegraph/extensions/codegraph.ts"
         ]
@@ -197,14 +196,19 @@
     "defaultSubagentOnlyExtensions": [
       "/Users/javcab/.pi/agent/extensions/pi-typesafe-router.ts",
       "/Users/javcab/.pi/agent/extensions/prompt-logger.ts",
-      "/Users/javcab/.pi/agent/npm/node_modules/@amaster.ai/pi-memory-mem0/dist/index.js",
+      "/Users/javcab/.pi/agent/extensions/subagent-only/hippocampus-readonly.ts",
       "/Users/javcab/.pi/agent/extensions/subagent-only/mem0-fallback.ts"
     ]
   },
-  "pi-memory-mem0": {
-    "mode": "self-hosted",
+  "hippocampus": {
+    "enabled": true,
     "baseUrl": "http://192.168.0.160:18000",
     "userId": "default-user",
-    "userIdScope": "userIdScope"
+    "autoCapture": true,
+    "autoRecall": true,
+    "requestTimeoutMs": 10000,
+    "recallLimit": 5,
+    "legacyUserIds": [],
+    "recallLegacyCwd": true
   }
 }
