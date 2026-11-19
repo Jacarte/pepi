@@ -2,15 +2,15 @@
   "minConfidence": 0.4,
   "LOCAL": {
     "provider": "openai",
-    "id": "gpt-5.4-mini"
+    "id": "gpt-6-luna"
   },
   "CHEAP": {
     "provider": "openai",
-    "id": "gpt-5.4"
+    "id": "gpt-6.1-sol"
   },
   "FRONTIER": {
     "provider": "openai",
-    "id": "gpt-5.5"
+    "id": "gpt-6-astra"
   },
   "HUMAN": {
     "provider": "human",

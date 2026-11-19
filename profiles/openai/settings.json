@@ -8,12 +8,12 @@
     "npm:pi-ketch",
     "npm:@dietrichgebert/ponytail"
   ],
-  "defaultModel": "gpt-5.5",
+  "defaultModel": "gpt-6.1-sol",
   "defaultProvider": "openai",
   "defaultThinkingLevel": "high",
   "subagents": {
     "projectRootResolution": "git-root",
-    "defaultModel": "gpt-5.5",
+    "defaultModel": "gpt-6.1-sol",
     "defaultProvider": "openai",
     "agentOverrides": {
       "claude-code": {
@@ -23,7 +23,7 @@
         "disabled": true
       },
       "oracle": {
-        "model": "gpt-5.5",
+        "model": "gpt-6-astra",
         "tools": [
           "jev_route",
           "read",
@@ -50,7 +50,7 @@
         ]
       },
       "delegate": {
-        "model": "gpt-5.4-mini",
+        "model": "gpt-6-luna",
         "tools": [
           "read",
           "grep",
@@ -80,7 +80,7 @@
         ]
       },
       "researcher": {
-        "model": "gpt-5.5",
+        "model": "gpt-6.1-sol",
         "tools": [
           "jev_route",
           "read",
@@ -94,7 +94,7 @@
         ]
       },
       "worker": {
-        "model": "gpt-5.4-mini",
+        "model": "gpt-6-luna",
         "tools": [
           "read",
           "grep",
@@ -124,7 +124,7 @@
         ]
       },
       "scout": {
-        "model": "gpt-5.4-mini",
+        "model": "gpt-6-luna",
         "tools": [
           "jev_route",
           "read",
@@ -153,7 +153,7 @@
         ]
       },
       "reviewer": {
-        "model": "gpt-5.5",
+        "model": "gpt-6-astra",
         "tools": [
           "jev_route",
           "read",
