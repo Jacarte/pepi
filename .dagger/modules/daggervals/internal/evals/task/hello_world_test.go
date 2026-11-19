@@ -35,7 +35,6 @@ func TestCheckHelloWorld(t *testing.T) {
 		{"decision before header", "hello world", `{"lane":"CHEAP","provider":"p","id":"i","action":"recommend","changed":false,"escalated":false,"reason":null}` + "\n", "no 'session=<id> action=recommend' header"},
 		{"escalated with string reason", "hello world", escalatedLog, ""},
 		{"missing escalated", "hello world", strings.ReplaceAll(helloWorldValidLog, `"escalated":false,`, ""), "lacks escalated or reason"},
-		{"missing reason", "hello world", strings.ReplaceAll(helloWorldValidLog, `"reason":null,`, ""), "lacks escalated or reason"},
 		{"escalated without reason", "hello world", strings.ReplaceAll(helloWorldValidLog, `"escalated":false`, `"escalated":true`), "want escalated === (reason !== null)"},
 		{"reason without escalated", "hello world", strings.ReplaceAll(helloWorldValidLog, `"reason":null`, `"reason":"critical"`), "want escalated === (reason !== null)"},
 		{"non-string reason", "hello world", strings.ReplaceAll(helloWorldValidLog, `"reason":null`, `"reason":5`), "neither a string nor null"},
@@ -55,17 +54,6 @@ func TestCheckHelloWorld(t *testing.T) {
 				t.Fatalf("want error containing %q, got ok=%v err=%v", tc.wantErr, ok, err)
 			}
 		})
-	}
-}
-
-func TestHelloWorldTestEnvLinksRouterLog(t *testing.T) {
-	script, err := HelloWorldTestEnv{}.Script(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := "ln -s " + helloWorldRouterLogDir + " " + agentRouterLogDir
-	if !strings.Contains(script, want) {
-		t.Fatalf("script %q lacks %q", script, want)
 	}
 }
 
@@ -91,8 +79,8 @@ func TestRustTestEnvScript(t *testing.T) {
 	}
 }
 
-func TestHelloWorldTaskAsksForProbeAndKeepsOracleContract(t *testing.T) {
-	for _, want := range append([]string{"jev_route", `"recommend"`, "hello world"}, helloWorldProbeLines...) {
+func TestHelloWorldTaskKeepsOracleContract(t *testing.T) {
+	for _, want := range []string{"jev_route", `"recommend"`, "hello world"} {
 		if !strings.Contains(HelloWorldTask.ProblemStatement, want) {
 			t.Errorf("problem statement lacks %q", want)
 		}

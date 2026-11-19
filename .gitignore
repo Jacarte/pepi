@@ -71,4 +71,5 @@ logs/
 /mcp.json
 /models-router.json
 litellm*
-
+.hippocampus.env
+evals_cache/

@@ -8,7 +8,31 @@ import (
 
 type Daggervals = core.Daggervals
 
+// DaggervalsCiBaselinePrepareOpts contains options for Daggervals.CiBaselinePrepare
+type DaggervalsCiBaselinePrepareOpts = core.DaggervalsCiBaselinePrepareOpts
+
+// DaggervalsCiEvalReportOpts contains options for Daggervals.CiEvalReport
+type DaggervalsCiEvalReportOpts = core.DaggervalsCiEvalReportOpts
+
+// DaggervalsCiEvalRunOpts contains options for Daggervals.CiEvalRun
+type DaggervalsCiEvalRunOpts = core.DaggervalsCiEvalRunOpts
+
+// DaggervalsCiSetupHashOpts contains options for Daggervals.CiSetupHash
+type DaggervalsCiSetupHashOpts = core.DaggervalsCiSetupHashOpts
+
+// DaggervalsCompareRunsOpts contains options for Daggervals.CompareRuns
+type DaggervalsCompareRunsOpts = core.DaggervalsCompareRunsOpts
+
 // DaggervalsEvalsOpts contains options for Daggervals.Evals
 type DaggervalsEvalsOpts = core.DaggervalsEvalsOpts
+
+// DaggervalsGradeTaskOpts contains options for Daggervals.GradeTask
+type DaggervalsGradeTaskOpts = core.DaggervalsGradeTaskOpts
+
+// DaggervalsHelloOpts contains options for Daggervals.Hello
+type DaggervalsHelloOpts = core.DaggervalsHelloOpts
+
+// DaggervalsTaskAgentFilesOpts contains options for Daggervals.TaskAgentFiles
+type DaggervalsTaskAgentFilesOpts = core.DaggervalsTaskAgentFilesOpts
 
 type DaggervalsEvalResult = core.DaggervalsEvalResult

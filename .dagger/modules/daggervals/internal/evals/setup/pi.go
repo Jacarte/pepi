@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"dagger/daggervals/internal/dagger"
+	"dagger/daggervals/internal/evals/memory"
 	"encoding/hex"
 	"strings"
 )
@@ -16,6 +17,42 @@ type PiSetup struct {
 	// Bake copies the workspace into the image filesystem (instead of mounting it)
 	// and skips the auth mount; Auth and Env may then be nil.
 	Bake bool
+	// Memory rewrites the hippocampus section (and, off, the extensions list) in the
+	// container's settings.json only; the profiles on disk are not touched.
+	Memory memory.Mode
+}
+
+// memorySettingsScript is run by node with the mode, the base URL and the project id. On needs
+// the profile's hippocampus section. The maximum timeout keeps a slow server LLM from cutting
+// the capture pi waits for before exiting, or the recall; legacy scopes are empty on a fresh
+// server, and one failed scope fails the whole recall. Off, enabled:false stops recall and
+// capture but leaves the parent's tool registered, so its auto-discovered entry point is
+// excluded; children keep the read-only tool, which pi-subagents requires.
+const memorySettingsScript = `
+const fs = require('fs');
+const [mode, baseUrl, projectId] = process.argv.slice(1);
+const file = '` + memory.SettingsPath + `';
+const settings = JSON.parse(fs.readFileSync(file, 'utf8'));
+const hippocampus = settings.hippocampus;
+if (mode === 'on') {
+  if (!hippocampus) {
+    console.error(file + ': no hippocampus section to use the memory service');
+    process.exit(1);
+  }
+  settings.hippocampus = { ...hippocampus, enabled: true, baseUrl, projectId, requestTimeoutMs: 30000, recallLegacyCwd: false, legacyUserIds: [] };
+} else {
+  settings.hippocampus = { ...hippocampus, enabled: false };
+  settings.extensions = [...(settings.extensions ?? []), '-extensions/hippocampus.ts'];
+}
+fs.writeFileSync(file, JSON.stringify(settings, null, 2) + '\n');
+`
+
+// memorySettingsCommand is the settings rewrite of mode, nil for memory.Untouched.
+func memorySettingsCommand(mode memory.Mode) []string {
+	if mode == memory.Untouched {
+		return nil
+	}
+	return []string{"node", "-e", memorySettingsScript, string(mode), memory.BaseURL, memory.ProjectID}
 }
 
 // Copy needed files, setup
@@ -46,6 +83,9 @@ func (c *PiSetup) Setup() dagger.WithContainerFunc {
 		container = container.WithExec([]string{"bash", "-c", `
 					sed -i 's|/Users/[^/]*/.pi|/root/.pi|g' /root/.pi/agent/settings.json
 			`})
+		if command := memorySettingsCommand(c.Memory); command != nil {
+			container = container.WithExec(command)
+		}
 
 		if c.Env != nil {
 			container = container.WithEnvFileVariables(c.Env)
@@ -58,22 +98,24 @@ func (c *PiSetup) Setup() dagger.WithContainerFunc {
 	}
 }
 
-func (c *PiSetup) GetSetupId(ctx context.Context, container *dagger.Container) (string, error) {
-
-	withFilesContainer := container.WithDirectory("/root/.pi/agent", c.Workspace)
-
-	// Hash only the files that define the agent setup. Volatile workspace files
-	// (budget history, caches, run history, ...) must not change the run ID.
-	// Root settings.json/mcp.json/models-router.json are overlaid by the profile,
-	// so the profile directory is hashed instead.
-	shaFolder, err := withFilesContainer.WithExec([]string{"bash", "-c", `
-cd /root/.pi/agent || exit 1
+// setupFilesHashScript hashes, from the current directory, only the files that define the
+// agent setup; $1 is the profile. Volatile workspace files (budget history, caches, run
+// history, ...) and CI files (.github, eval-baseline, .eval.track) must not change the run ID.
+// Root settings.json/mcp.json/models-router.json are overlaid by the profile, so the profile
+// directory is hashed instead.
+const setupFilesHashScript = `
 paths=()
 for p in AGENTS.md profile.sh extensions skills prompts workflows "profiles/$1" .dagger; do
   [ -e "$p" ] && paths+=("$p")
 done
 find "${paths[@]}" -type f -not -path '*/node_modules/*' -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1
-`, "_", c.Profile}).Stdout(ctx)
+`
+
+func (c *PiSetup) GetSetupId(ctx context.Context, container *dagger.Container) (string, error) {
+
+	withFilesContainer := container.WithDirectory("/root/.pi/agent", c.Workspace)
+
+	shaFolder, err := withFilesContainer.WithWorkdir("/root/.pi/agent").WithExec([]string{"bash", "-c", setupFilesHashScript, "_", c.Profile}).Stdout(ctx)
 	if err != nil {
 		return "", err
 	}

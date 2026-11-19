@@ -11,6 +11,10 @@ name: daggervals
 on:
   push:
     branches: [main]
+    # Eval baseline commits of eval.yml (see docs/ci-eval.md).
+    paths-ignore:
+      - eval-baseline/**
+      - .eval.track
   workflow_dispatch:
     inputs:
       profile:

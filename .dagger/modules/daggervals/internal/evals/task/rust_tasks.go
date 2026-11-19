@@ -14,9 +14,10 @@ import (
 // rustWorkdir is on the rootfs, so it survives the measured exec (unlike the mounted workspace).
 const rustWorkdir = "/testbed"
 
-// rustBaseTreeFile holds the tree of the repo right after the harness applied the test
-// patch. The final diff is taken against it, so it contains only the agent's changes.
-const rustBaseTreeFile = "/tmp/daggervals-base-tree"
+// BaseTreeFile holds the tree of the repo right after the harness applied the test
+// patch (or the seed). The final diff is taken against it, so it contains only the agent's
+// changes; it must survive between the sessions of a task.
+const BaseTreeFile = "/tmp/daggervals-base-tree"
 
 // RustTask is the Environment of a Rust repo pinned at a commit.
 type RustTask struct {
@@ -48,7 +49,7 @@ func (RustTask) PrepareEnv(ctx context.Context) dagger.WithContainerFunc {
 func (c RustTask) GetFinalDiff(ctx context.Context, container *dagger.Container) string {
 	diff, err := container.
 		WithWorkdir(rustWorkdir).
-		WithExec([]string{"bash", "-c", "git add -A && git diff --cached \"$(cat " + rustBaseTreeFile + ")\""}).
+		WithExec([]string{"bash", "-c", "git add -A && git diff --cached \"$(cat " + BaseTreeFile + ")\""}).
 		Stdout(ctx)
 	if err != nil {
 		return fmt.Sprintf("Error getting final diff: %v", err)
@@ -79,7 +80,7 @@ func (e RustTestEnv) Script(ctx context.Context) (string, error) {
 	}
 	patch := strings.TrimRight(e.TestPatch, "\n")
 	return fmt.Sprintf("cd %s\ngit apply -v - <<'%s'\n%s\n%s\ngit add -A\ngit write-tree > %s\n",
-		rustWorkdir, eof, patch, eof, rustBaseTreeFile), nil
+		rustWorkdir, eof, patch, eof, BaseTreeFile), nil
 }
 
 // RustTaskOracle re-runs the task's EvalTest script after the agent finished.
@@ -121,6 +122,7 @@ var RustTasks = []FixTask{
 	rustFixture("r5", "https://github.com/tokio-rs/tokio.git", "d6213594ca3767f182e8981fde7a119575e94c65"),     // tokio-6838 abstract UDS path
 	rustFixture("r6", "https://github.com/sharkdp/bat.git", "e2bf85e749d87459e3fced697af5cd9cc96eeb8c"),        // bat-2650 map-syntax case
 	rustFixture("r7", "https://github.com/BurntSushi/ripgrep.git", "fed4fea217abbc502f2e823465de903c8f2b623d"), // ripgrep-2576 --word-regexp
+	rustFixture("r8", "https://github.com/sharkdp/bat.git", "59d4cfb75c1a17a26b2b38956ee08d8c53f04e04"),        // bat-1892 --ignored-suffix
 }
 
 // rustFixture builds a FixTask from rust/<dir>/{problem.md,eval.sh,golden.patch,test.patch}.

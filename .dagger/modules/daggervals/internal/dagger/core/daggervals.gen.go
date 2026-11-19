@@ -16,8 +16,9 @@ type Daggervals struct { // daggervals (../../../../../../:0:0)
 	// field again.
 	refetchID bool
 
-	hello *string
-	id    *ID
+	ciSetupHash *string
+	hello       *string
+	id          *ID
 }
 
 func (r *Daggervals) WithGraphQLQuery(q *querybuilder.Selection) *Daggervals {
@@ -38,6 +39,170 @@ func (r *Daggervals) Auth() *Secret {
 	}
 }
 
+// DaggervalsCiBaselinePrepareOpts contains options for Daggervals.CiBaselinePrepare
+type DaggervalsCiBaselinePrepareOpts struct {
+	// The current .eval.track. Default: the workspace's, when it exists.
+	Track *File
+}
+
+// CiBaselinePrepare checks the results of a merged PR's eval and returns them laid out for
+// the repo root: eval-baseline/<tier>/<files> and .eval.track with this tier's entry
+// replaced. It takes no secret: the exact secret values are searched by ci-eval-run and
+// ci-eval-report, here only the secret shapes. results and status must come from the
+// approved eval run of the PR head: status.json is not signed. It refuses when the evaluated
+// head is not the PR head at merge time, the eval was incomplete, a file name, type or size
+// is not allowed, or a file looks like it holds a secret (the error names the file and the
+// rule only).
+func (r *Daggervals) CiBaselinePrepare(results *Directory, status *File, tier string, prNumber int, prHeadSha string, mergeSha string, date string, opts ...DaggervalsCiBaselinePrepareOpts) *Directory {
+	assertNotNil("results", results)
+	assertNotNil("status", status)
+	q := r.query.Select("ciBaselinePrepare")
+	for i := len(opts) - 1; i >= 0; i-- {
+		// `track` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Track) {
+			q = q.Arg("track", opts[i].Track)
+		}
+	}
+	q = q.Arg("results", results)
+	q = q.Arg("status", status)
+	q = q.Arg("tier", tier)
+	q = q.Arg("prNumber", prNumber)
+	q = q.Arg("prHeadSha", prHeadSha)
+	q = q.Arg("mergeSha", mergeSha)
+	q = q.Arg("date", date)
+
+	return &Directory{
+		query:     q,
+		refetchID: r.refetchID,
+	}
+}
+
+// DaggervalsCiEvalReportOpts contains options for Daggervals.CiEvalReport
+type DaggervalsCiEvalReportOpts struct {
+	Auth *Secret
+	// Git repo of the tasks suite. Default: https://github.com/Jacarte/pepi-eval-tasks.git
+	TasksRepo string
+	// URL of the workflow run, linked from the truncation notes.
+	RunURL string
+
+	DryRun bool
+}
+
+// CiEvalReport merges the result files of every shard of a tier per run, compares them with
+// the tier's baseline of the PR's base when they are comparable, and returns judge.md and
+// compare.md (the sticky PR comment bodies), summary.md (the job summary) and status.json.
+// The results, the compare-runs answer and the bodies are scanned for secrets (shapes and the
+// values of auth and agentEnv): on a hit the bodies are withheld and infra_ok is false. With
+// dryRun the comparison calls no model and auth is not needed.
+func (r *Daggervals) CiEvalReport(agentEnv *File, agentProfile string, results *Directory, baseSource *Directory, tier string, prNumber int, evaluatedSha string, tasksRef string, opts ...DaggervalsCiEvalReportOpts) *Directory {
+	assertNotNil("agentEnv", agentEnv)
+	assertNotNil("results", results)
+	assertNotNil("baseSource", baseSource)
+	q := r.query.Select("ciEvalReport")
+	for i := len(opts) - 1; i >= 0; i-- {
+		// `auth` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Auth) {
+			q = q.Arg("auth", opts[i].Auth)
+		}
+		// `tasksRepo` optional argument
+		if !querybuilder.IsZeroValue(opts[i].TasksRepo) {
+			q = q.Arg("tasksRepo", opts[i].TasksRepo)
+		}
+		// `runUrl` optional argument
+		if !querybuilder.IsZeroValue(opts[i].RunURL) {
+			q = q.Arg("runUrl", opts[i].RunURL)
+		}
+		// `dryRun` optional argument
+		if !querybuilder.IsZeroValue(opts[i].DryRun) {
+			q = q.Arg("dryRun", opts[i].DryRun)
+		}
+	}
+	q = q.Arg("agentEnv", agentEnv)
+	q = q.Arg("agentProfile", agentProfile)
+	q = q.Arg("results", results)
+	q = q.Arg("baseSource", baseSource)
+	q = q.Arg("tier", tier)
+	q = q.Arg("prNumber", prNumber)
+	q = q.Arg("evaluatedSha", evaluatedSha)
+	q = q.Arg("tasksRef", tasksRef)
+
+	return &Directory{
+		query:     q,
+		refetchID: r.refetchID,
+	}
+}
+
+// DaggervalsCiEvalRunOpts contains options for Daggervals.CiEvalRun
+type DaggervalsCiEvalRunOpts struct {
+	// Full commit sha of the tasks repo, required by the tasks-* shards; rust and go ignore it.
+	TasksRef string
+	// Git repo of the tasks suite. Default: https://github.com/Jacarte/pepi-eval-tasks.git
+	TasksRepo string
+}
+
+// CiEvalRun runs one shard of a CI eval tier (fast: rust, go, tasks-memory; full: the same
+// plus tasks-long) from an empty cache, with memory on, as often as the tier says (fast 1,
+// full 3). It returns the shard's result files, named <ci-tier-shard>[-<run>]<suffixes>
+// plus a .eval.md judge report each, for ci-eval-report. It fails instead when a file holds
+// a secret shape or a value of auth or of a secret-named variable of agentEnv or
+// hippocampusEnv (the error names the file and the rule only).
+func (r *Daggervals) CiEvalRun(auth *Secret, agentEnv *File, agentProfile string, hippocampusEnv *File, tier string, shard string, opts ...DaggervalsCiEvalRunOpts) *Directory {
+	assertNotNil("auth", auth)
+	assertNotNil("agentEnv", agentEnv)
+	assertNotNil("hippocampusEnv", hippocampusEnv)
+	q := r.query.Select("ciEvalRun")
+	for i := len(opts) - 1; i >= 0; i-- {
+		// `tasksRef` optional argument
+		if !querybuilder.IsZeroValue(opts[i].TasksRef) {
+			q = q.Arg("tasksRef", opts[i].TasksRef)
+		}
+		// `tasksRepo` optional argument
+		if !querybuilder.IsZeroValue(opts[i].TasksRepo) {
+			q = q.Arg("tasksRepo", opts[i].TasksRepo)
+		}
+	}
+	q = q.Arg("auth", auth)
+	q = q.Arg("agentEnv", agentEnv)
+	q = q.Arg("agentProfile", agentProfile)
+	q = q.Arg("hippocampusEnv", hippocampusEnv)
+	q = q.Arg("tier", tier)
+	q = q.Arg("shard", shard)
+
+	return &Directory{
+		query:     q,
+		refetchID: r.refetchID,
+	}
+}
+
+// DaggervalsCiSetupHashOpts contains options for Daggervals.CiSetupHash
+type DaggervalsCiSetupHashOpts struct {
+	Source *Directory
+}
+
+// CiSetupHash is the setup id that Evals uses as run id without --fixed, of source (default:
+// the workspace) with the same files left out. .github, eval-baseline and .eval.track are not
+// part of it; the content of agentEnv is.
+func (r *Daggervals) CiSetupHash(ctx context.Context, agentEnv *File, agentProfile string, opts ...DaggervalsCiSetupHashOpts) (string, error) {
+	assertNotNil("agentEnv", agentEnv)
+	if r.ciSetupHash != nil {
+		return *r.ciSetupHash, nil
+	}
+	q := r.query.Select("ciSetupHash")
+	for i := len(opts) - 1; i >= 0; i-- {
+		// `source` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Source) {
+			q = q.Arg("source", opts[i].Source)
+		}
+	}
+	q = q.Arg("agentEnv", agentEnv)
+	q = q.Arg("agentProfile", agentProfile)
+
+	var response string
+
+	q = q.Bind(&response)
+	return response, q.Execute(ctx)
+}
+
 func (r *Daggervals) CompareEvals(ctx context.Context, auth *Secret, agentEnv *File, agentProfile string, before *File, after *File) ([]string, error) {
 	assertNotNil("auth", auth)
 	assertNotNil("agentEnv", agentEnv)
@@ -56,9 +221,84 @@ func (r *Daggervals) CompareEvals(ctx context.Context, auth *Secret, agentEnv *F
 	return response, q.Execute(ctx)
 }
 
+// DaggervalsCompareRunsOpts contains options for Daggervals.CompareRuns
+type DaggervalsCompareRunsOpts struct {
+	Auth *Secret
+
+	AgentEnv *File
+
+	AgentProfile string
+
+	Labels string
+
+	DryRun bool
+}
+
+// CompareRuns compares two or more eval cache files, as CompareEvals does for two. labels
+// names the arm of each file, comma-separated, one per file; files with the same label are
+// repetitions of one arm, and the first label is the baseline. Empty labels name the files
+// run1, run2, ... The aggregation is done in Go (see judge.PrepareCompareRuns). With dryRun
+// the model is not called: the result is the aggregate and the full prompt, and auth,
+// agentEnv and agentProfile are not needed.
+func (r *Daggervals) CompareRuns(ctx context.Context, files []*File, opts ...DaggervalsCompareRunsOpts) ([]string, error) {
+	q := r.query.Select("compareRuns")
+	for i := len(opts) - 1; i >= 0; i-- {
+		// `auth` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Auth) {
+			q = q.Arg("auth", opts[i].Auth)
+		}
+		// `agentEnv` optional argument
+		if !querybuilder.IsZeroValue(opts[i].AgentEnv) {
+			q = q.Arg("agentEnv", opts[i].AgentEnv)
+		}
+		// `agentProfile` optional argument
+		if !querybuilder.IsZeroValue(opts[i].AgentProfile) {
+			q = q.Arg("agentProfile", opts[i].AgentProfile)
+		}
+		// `labels` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Labels) {
+			q = q.Arg("labels", opts[i].Labels)
+		}
+		// `dryRun` optional argument
+		if !querybuilder.IsZeroValue(opts[i].DryRun) {
+			q = q.Arg("dryRun", opts[i].DryRun)
+		}
+	}
+	q = q.Arg("files", files)
+
+	var response []string
+
+	q = q.Bind(&response)
+	return response, q.Execute(ctx)
+}
+
 // DaggervalsEvalsOpts contains options for Daggervals.Evals
 type DaggervalsEvalsOpts struct {
 	Fixed string
+	// Task suite to run: rust (default), go, all or tasks. tasks cannot be combined with the others.
+	Suite string
+	// Git repo of the tasks suite (suite=tasks). Default: https://github.com/Jacarte/pepi-eval-tasks.git
+	TasksRepo string
+	// Branch or commit sha of the tasks repo; required with suite=tasks. The resolved sha is part of the run id.
+	TasksRef string
+	// Comma-separated names of the tasks to run (suite=tasks). Empty means every supported task.
+	TaskNames string
+	// Token to fetch a private tasks repo (suite=tasks). Unset means an anonymous clone. Only the git fetch uses it.
+	TasksToken *Secret
+	// How many times to run the whole eval, one after the other (1 to 20). Run i is cached as <id>-<i><suffixes>, so the runs plug into compare-runs.
+	//
+	// Default: 1
+	Runs int
+	// Env file of the Hippocampus memory server (LLM gateway credentials); only that server gets it. Default: the workspace's .hippocampus.env when it exists, else no memory service.
+	HippocampusEnv *File
+	// Run with the memory disabled in the agent (no mem0 tool, no automatic recall or capture) and no memory service. The run id gets @nomem.
+	NoHippocampus bool
+	// Image tag of jacarte/mem0server. Default: the pinned c8f33b2. The tag and the image digest are part of the run id.
+	HippocampusRef string
+	// Seed the task's memory/fixture.json into the memory server before the agent starts. false adds @nofx to the run id.
+	//
+	// Default: true
+	MemoryFixture bool
 }
 
 func (r *Daggervals) Evals(auth *Secret, agentEnv *File, agentProfile string, cacheDir *Directory, opts ...DaggervalsEvalsOpts) *DaggervalsEvalResult {
@@ -70,6 +310,46 @@ func (r *Daggervals) Evals(auth *Secret, agentEnv *File, agentProfile string, ca
 		// `fixed` optional argument
 		if !querybuilder.IsZeroValue(opts[i].Fixed) {
 			q = q.Arg("fixed", opts[i].Fixed)
+		}
+		// `suite` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Suite) {
+			q = q.Arg("suite", opts[i].Suite)
+		}
+		// `tasksRepo` optional argument
+		if !querybuilder.IsZeroValue(opts[i].TasksRepo) {
+			q = q.Arg("tasksRepo", opts[i].TasksRepo)
+		}
+		// `tasksRef` optional argument
+		if !querybuilder.IsZeroValue(opts[i].TasksRef) {
+			q = q.Arg("tasksRef", opts[i].TasksRef)
+		}
+		// `taskNames` optional argument
+		if !querybuilder.IsZeroValue(opts[i].TaskNames) {
+			q = q.Arg("taskNames", opts[i].TaskNames)
+		}
+		// `tasksToken` optional argument
+		if !querybuilder.IsZeroValue(opts[i].TasksToken) {
+			q = q.Arg("tasksToken", opts[i].TasksToken)
+		}
+		// `runs` optional argument
+		if !querybuilder.IsZeroValue(opts[i].Runs) {
+			q = q.Arg("runs", opts[i].Runs)
+		}
+		// `hippocampusEnv` optional argument
+		if !querybuilder.IsZeroValue(opts[i].HippocampusEnv) {
+			q = q.Arg("hippocampusEnv", opts[i].HippocampusEnv)
+		}
+		// `noHippocampus` optional argument
+		if !querybuilder.IsZeroValue(opts[i].NoHippocampus) {
+			q = q.Arg("noHippocampus", opts[i].NoHippocampus)
+		}
+		// `hippocampusRef` optional argument
+		if !querybuilder.IsZeroValue(opts[i].HippocampusRef) {
+			q = q.Arg("hippocampusRef", opts[i].HippocampusRef)
+		}
+		// `memoryFixture` optional argument
+		if !querybuilder.IsZeroValue(opts[i].MemoryFixture) {
+			q = q.Arg("memoryFixture", opts[i].MemoryFixture)
 		}
 	}
 	q = q.Arg("auth", auth)
@@ -96,13 +376,82 @@ func (r *Daggervals) GenerateImage(agentProfile string) *Container {
 	}
 }
 
-func (r *Daggervals) Hello(ctx context.Context, auth *Secret, agentEnv *File, agentProfile string) (string, error) {
+// DaggervalsGradeTaskOpts contains options for Daggervals.GradeTask
+type DaggervalsGradeTaskOpts struct {
+	TasksRepo string
+	// Branch or commit sha of the tasks repo. Required unless tasksDir is set.
+	TasksRef string
+	// Token for a private tasks repo; unset means an anonymous clone.
+	TasksToken *Secret
+	// A local checkout of the tasks repo to use instead of cloning, for developing tasks before they are pushed.
+	TasksDir *Directory
+}
+
+// GradeTask grades a workspace with the hidden milestones of one task, without an agent
+// or an LLM, using the grader of the tasks suite. testbed plays the role of the agent's
+// /testbed. It returns one line per milestone ("m1-x PASS" or "m1-x FAIL: detail"), a score
+// line and the tasks commit.
+func (r *Daggervals) GradeTask(ctx context.Context, taskName string, testbed *Directory, opts ...DaggervalsGradeTaskOpts) ([]string, error) {
+	assertNotNil("testbed", testbed)
+	q := r.query.Select("gradeTask")
+	for i := len(opts) - 1; i >= 0; i-- {
+		// `tasksRepo` optional argument
+		if !querybuilder.IsZeroValue(opts[i].TasksRepo) {
+			q = q.Arg("tasksRepo", opts[i].TasksRepo)
+		}
+		// `tasksRef` optional argument
+		if !querybuilder.IsZeroValue(opts[i].TasksRef) {
+			q = q.Arg("tasksRef", opts[i].TasksRef)
+		}
+		// `tasksToken` optional argument
+		if !querybuilder.IsZeroValue(opts[i].TasksToken) {
+			q = q.Arg("tasksToken", opts[i].TasksToken)
+		}
+		// `tasksDir` optional argument
+		if !querybuilder.IsZeroValue(opts[i].TasksDir) {
+			q = q.Arg("tasksDir", opts[i].TasksDir)
+		}
+	}
+	q = q.Arg("taskName", taskName)
+	q = q.Arg("testbed", testbed)
+
+	var response []string
+
+	q = q.Bind(&response)
+	return response, q.Execute(ctx)
+}
+
+// DaggervalsHelloOpts contains options for Daggervals.Hello
+type DaggervalsHelloOpts struct {
+	// Env file of the Hippocampus memory server (LLM gateway credentials); only that server gets it. Default: the workspace's .hippocampus.env when it exists, else no memory service.
+	HippocampusEnv *File
+	// Run with the memory disabled in the agent (no mem0 tool, no automatic recall or capture) and no memory service.
+	NoHippocampus bool
+	// Image tag of jacarte/mem0server. Default: the pinned c8f33b2.
+	HippocampusRef string
+}
+
+func (r *Daggervals) Hello(ctx context.Context, auth *Secret, agentEnv *File, agentProfile string, opts ...DaggervalsHelloOpts) (string, error) {
 	assertNotNil("auth", auth)
 	assertNotNil("agentEnv", agentEnv)
 	if r.hello != nil {
 		return *r.hello, nil
 	}
 	q := r.query.Select("hello")
+	for i := len(opts) - 1; i >= 0; i-- {
+		// `hippocampusEnv` optional argument
+		if !querybuilder.IsZeroValue(opts[i].HippocampusEnv) {
+			q = q.Arg("hippocampusEnv", opts[i].HippocampusEnv)
+		}
+		// `noHippocampus` optional argument
+		if !querybuilder.IsZeroValue(opts[i].NoHippocampus) {
+			q = q.Arg("noHippocampus", opts[i].NoHippocampus)
+		}
+		// `hippocampusRef` optional argument
+		if !querybuilder.IsZeroValue(opts[i].HippocampusRef) {
+			q = q.Arg("hippocampusRef", opts[i].HippocampusRef)
+		}
+	}
 	q = q.Arg("auth", auth)
 	q = q.Arg("agentEnv", agentEnv)
 	q = q.Arg("agentProfile", agentProfile)
@@ -175,6 +524,47 @@ func (r *Daggervals) Source() *Directory {
 		query:     q,
 		refetchID: r.refetchID,
 	}
+}
+
+// DaggervalsTaskAgentFilesOpts contains options for Daggervals.TaskAgentFiles
+type DaggervalsTaskAgentFilesOpts struct {
+	TasksRepo string
+	// Branch or commit sha of the tasks repo. Required unless tasksDir is set.
+	TasksRef string
+	// Token for a private tasks repo; unset means an anonymous clone.
+	TasksToken *Secret
+	// A local checkout of the tasks repo to use instead of cloning.
+	TasksDir *Directory
+}
+
+// TaskAgentFiles lists the files a task puts in the agent's /testbed (the seed), to check
+// that hidden/, task.yaml and milestones.yaml never reach the agent.
+func (r *Daggervals) TaskAgentFiles(ctx context.Context, taskName string, opts ...DaggervalsTaskAgentFilesOpts) ([]string, error) {
+	q := r.query.Select("taskAgentFiles")
+	for i := len(opts) - 1; i >= 0; i-- {
+		// `tasksRepo` optional argument
+		if !querybuilder.IsZeroValue(opts[i].TasksRepo) {
+			q = q.Arg("tasksRepo", opts[i].TasksRepo)
+		}
+		// `tasksRef` optional argument
+		if !querybuilder.IsZeroValue(opts[i].TasksRef) {
+			q = q.Arg("tasksRef", opts[i].TasksRef)
+		}
+		// `tasksToken` optional argument
+		if !querybuilder.IsZeroValue(opts[i].TasksToken) {
+			q = q.Arg("tasksToken", opts[i].TasksToken)
+		}
+		// `tasksDir` optional argument
+		if !querybuilder.IsZeroValue(opts[i].TasksDir) {
+			q = q.Arg("tasksDir", opts[i].TasksDir)
+		}
+	}
+	q = q.Arg("taskName", taskName)
+
+	var response []string
+
+	q = q.Bind(&response)
+	return response, q.Execute(ctx)
 }
 
 func (r *Daggervals) TestCacheWrite(cacheDir *Directory) *Directory {

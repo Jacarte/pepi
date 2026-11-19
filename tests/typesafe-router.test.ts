@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { stripTypeScriptTypes } from "node:module";
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
@@ -676,4 +676,44 @@ test("profile.sh preserves each tracked router config when applying profiles", (
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("profile.sh overlays AGENTS.md only when the profile has one, and the plain profile has none of the subagent setup", () => {
+  const dir = mkdtempSync(join(tmpdir(), "profile-agents-"));
+  try {
+    copyFileSync(join(root, "profile.sh"), join(dir, "profile.sh"));
+    writeFileSync(join(dir, "AGENTS.md"), "root rules\n");
+    writeFileSync(join(dir, "settings.json"), "{}\n");
+    // a profile with settings only leaves the root AGENTS.md alone (bedrock and codex)
+    mkdirSync(join(dir, "profiles", "settings-only"), { recursive: true });
+    writeFileSync(join(dir, "profiles", "settings-only", "settings.json"), '{"a": 1}\n');
+    execFileSync("bash", [join(dir, "profile.sh"), "settings-only"]);
+    assert.equal(readFileSync(join(dir, "AGENTS.md"), "utf8"), "root rules\n");
+    assert.equal(readFileSync(join(dir, "settings.json"), "utf8"), '{"a": 1}\n');
+    // a profile with AGENTS.md replaces it, also when the profile's file is empty
+    for (const name of ["plain"]) {
+      mkdirSync(join(dir, "profiles", name), { recursive: true });
+      for (const file of ["settings.json", "AGENTS.md"]) copyFileSync(join(root, "profiles", name, file), join(dir, "profiles", name, file));
+    }
+    execFileSync("bash", [join(dir, "profile.sh"), "plain"]);
+    assert.equal(statSync(join(dir, "AGENTS.md")).size, 0);
+    const plain = JSON.parse(readFileSync(join(dir, "settings.json"), "utf8"));
+    assert.ok(!("subagents" in plain));
+    assert.ok(plain.packages.length > 0 && plain.packages.every((entry: string) => !entry.startsWith("npm:pi-subagents")));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("plain profile is bedrock minus pi-subagents and the subagents key", () => {
+  const bedrock = readConfig("profiles/bedrock/settings.json");
+  const plain = readConfig("profiles/plain/settings.json");
+  const expected = { ...bedrock, packages: bedrock.packages.filter((entry: string) => !entry.startsWith("npm:pi-subagents")) };
+  delete expected.subagents;
+  assert.deepEqual(plain, expected);
+  assert.deepEqual(Object.keys(plain), Object.keys(expected)); // key order kept
+  for (const file of ["mcp.json", "models-router.json"]) {
+    assert.equal(readFileSync(join(root, "profiles/plain", file), "utf8"), readFileSync(join(root, "profiles/bedrock", file), "utf8"));
+  }
+  assert.equal(statSync(join(root, "profiles/plain/AGENTS.md")).size, 0);
 });

@@ -1,0 +1,738 @@
+# PR evals started by a label (see docs/ci-eval.md).
+#   eval       fast tier: rust, go, tasks-memory, 1 run
+#   eval-full  full tier: rust, go, tasks-memory, tasks-long, 3 runs
+# pull_request_target: the workflow logic always comes from the base branch, never from the PR.
+# Only same-repo PRs; fork PRs do nothing. Only the eval and report jobs check out the PR head and
+# run its Dagger module, with the secrets of the `eval-pr` environment (required reviewer approval)
+# and a read-only token. The jobs that write to GitHub run no PR code and hold no secrets.
+# Environment secrets/variables: PI_AUTH, TYPESAFE_API_KEY, HIPPOCAMPUS_ENV; optional JEV_MODEL, PROFILE.
+# Never put GitHub expressions inside `run:` scripts; pass values through `env:`.
+# Never print text written by an agent or the PR's module outside the `dagger call` steps
+# (those stop workflow commands): comment bodies go through files.
+
+name: eval
+# The approver sees the PR and the exact head sha the approval runs.
+run-name: eval #${{ github.event.pull_request.number }} ${{ github.event.pull_request.head.sha }}
+
+on:
+  pull_request_target:
+    types: [labeled, synchronize, closed]
+
+permissions: {}
+
+# Only eval label events of same-repo PRs into the default branch queue in the repo-wide `eval` group (one eval at a
+# time). GitHub keeps one pending run per group: a third label event replaces the second
+# (shown as cancelled). Everything else runs in its own group.
+concurrency:
+  group: ${{ github.event.action == 'labeled' && (github.event.label.name == 'eval' || github.event.label.name == 'eval-full') && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.ref == github.event.repository.default_branch && 'eval' || format('eval-run-{0}', github.run_id) }}
+  cancel-in-progress: false
+
+env:
+  DAGGER_VERSION: 1.0.0-beta.24
+
+jobs:
+  # Any push invalidates an eval: remove the labels, one line in the PR.
+  invalidate:
+    if: github.event.action == 'synchronize' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pull-requests: write
+      issues: write
+    steps:
+      - name: Remove eval labels
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HAS_EVAL: ${{ contains(github.event.pull_request.labels.*.name, 'eval') }}
+          HAS_EVAL_FULL: ${{ contains(github.event.pull_request.labels.*.name, 'eval-full') }}
+        run: |
+          set -euo pipefail
+          [[ "$PR_NUMBER" =~ ^[1-9][0-9]{0,9}$ ]] || { echo "::error::Unexpected PR number."; exit 1; }
+          [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::Unexpected head sha."; exit 1; }
+          # A label already gone (HTTP 404) counts as removed.
+          remove_label() {
+            local err
+            if ! err=$(gh api -X DELETE "repos/$REPO/issues/$PR_NUMBER/labels/$1" 2>&1 > /dev/null); then
+              [[ "$err" == *"HTTP 404"* ]] || { echo "::error::Could not remove the $1 label."; exit 1; }
+            fi
+          }
+          removed=false
+          if [[ "$HAS_EVAL" == true ]]; then
+            remove_label eval
+            removed=true
+          fi
+          if [[ "$HAS_EVAL_FULL" == true ]]; then
+            remove_label eval-full
+            removed=true
+          fi
+          # Only a push that ends an eval label says so.
+          if [[ "$removed" != true ]]; then
+            exit 0
+          fi
+          marker='<!-- pepi-eval:invalidated -->'
+          ids=$(gh api --paginate "repos/$REPO/issues/$PR_NUMBER/comments" \
+            --jq ".[] | select(.user.login == \"github-actions[bot]\" and (.body | startswith(\"$marker\"))) | .id")
+          id=${ids%%$'\n'*}
+          printf "%s\neval invalidated by \`%s\`: add the \`eval\` or \`eval-full\` label again to rerun.\n" "$marker" "${HEAD_SHA::7}" > "$RUNNER_TEMP/body.md"
+          jq -n --rawfile body "$RUNNER_TEMP/body.md" '{body: $body}' > "$RUNNER_TEMP/comment.json"
+          if [[ "$id" =~ ^[0-9]+$ ]]; then
+            gh api -X PATCH "repos/$REPO/issues/comments/$id" --input "$RUNNER_TEMP/comment.json" > /dev/null
+          else
+            gh api -X POST "repos/$REPO/issues/$PR_NUMBER/comments" --input "$RUNNER_TEMP/comment.json" > /dev/null
+          fi
+
+  # Checks the labeler and the PR, picks the tier. No secrets, no PR checkout.
+  gate:
+    if: >-
+      github.event.action == 'labeled' &&
+      (github.event.label.name == 'eval' || github.event.label.name == 'eval-full') &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.base.ref == github.event.repository.default_branch
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+      statuses: write
+    outputs:
+      tier: ${{ steps.gate.outputs.tier }}
+      shards: ${{ steps.gate.outputs.shards }}
+      head_sha: ${{ steps.gate.outputs.head_sha }}
+      base_sha: ${{ steps.gate.outputs.base_sha }}
+      pr_number: ${{ steps.gate.outputs.pr_number }}
+    steps:
+      - name: Check labeler, PR and tier
+        id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          LABEL: ${{ github.event.label.name }}
+          SENDER: ${{ github.event.sender.login }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$1"; exit 1; }
+          login_pattern='^[A-Za-z0-9][A-Za-z0-9-]{0,38}(\[bot\])?$'
+          [[ "$PR_NUMBER" =~ ^[1-9][0-9]{0,9}$ ]] || fail "Unexpected PR number."
+          [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] || fail "Unexpected head sha."
+          [[ "$BASE_REF" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$ && "$BASE_REF" != *..* ]] || fail "Unexpected base ref."
+          [[ "$SENDER" =~ $login_pattern ]] || fail "Unexpected labeler login."
+          case "$LABEL" in
+            eval) tier=fast ;;
+            eval-full) tier=full ;;
+            *) fail "Unexpected label." ;;
+          esac
+
+          # Sticky gate note: the bot comment starting with the marker, updated in place.
+          gate_comment() {
+            local marker='<!-- pepi-eval:gate -->' ids id
+            printf '%s\n%s\n' "$marker" "$1" > "$RUNNER_TEMP/body.md"
+            ids=$(gh api --paginate "repos/$REPO/issues/$PR_NUMBER/comments" \
+              --jq ".[] | select(.user.login == \"github-actions[bot]\" and (.body | startswith(\"$marker\"))) | .id")
+            id=${ids%%$'\n'*}
+            jq -n --rawfile body "$RUNNER_TEMP/body.md" '{body: $body}' > "$RUNNER_TEMP/comment.json"
+            if [[ "$id" =~ ^[0-9]+$ ]]; then
+              gh api -X PATCH "repos/$REPO/issues/comments/$id" --input "$RUNNER_TEMP/comment.json" > /dev/null
+            else
+              gh api -X POST "repos/$REPO/issues/$PR_NUMBER/comments" --input "$RUNNER_TEMP/comment.json" > /dev/null
+            fi
+          }
+
+          # Only users with write, maintain or admin access (permission write or admin) start evals.
+          permission=$(gh api "repos/$REPO/collaborators/$SENDER/permission" --jq .permission) || permission=none
+          if [[ "$permission" != admin && "$permission" != write ]]; then
+            echo "::notice::The labeler has no write access; removing the $LABEL label."
+            # A label already gone (HTTP 404) counts as removed.
+            if ! err=$(gh api -X DELETE "repos/$REPO/issues/$PR_NUMBER/labels/$LABEL" 2>&1 > /dev/null); then
+              [[ "$err" == *"HTTP 404"* ]] || fail "Could not remove the $LABEL label."
+            fi
+            gate_comment "The \`$LABEL\` label was removed: only users with write access can start an eval."
+            exit 0
+          fi
+
+          # The run may have waited in the concurrency queue: check the PR as it is now.
+          pr_now=$(gh api "repos/$REPO/pulls/$PR_NUMBER" \
+            --jq '[.state, .head.sha, ([.labels[].name] | (index("eval") != null), (index("eval-full") != null))] | @tsv')
+          IFS=$'\t' read -r state current_head has_eval has_eval_full <<< "$pr_now"
+          if [[ "$state" != open ]]; then
+            echo "::notice::The PR is not open; no eval."
+            exit 0
+          fi
+          if [[ "$current_head" != "$HEAD_SHA" ]]; then
+            echo "::notice::The PR head moved since the label was added; no eval."
+            exit 0
+          fi
+          if [[ ( "$LABEL" == eval && "$has_eval" != true ) || ( "$LABEL" == eval-full && "$has_eval_full" != true ) ]]; then
+            echo "::notice::The $LABEL label is no longer on the PR; no eval."
+            exit 0
+          fi
+          # Both labels: the eval-full event runs the full tier, the eval event does nothing. If
+          # the queue replaced the pending eval-full run with this one, nothing runs: say so.
+          if [[ "$tier" == fast && "$has_eval_full" == true ]]; then
+            echo "::notice::The PR also carries eval-full; the eval event yields to it."
+            gate_comment "The \`eval\` label yields to \`eval-full\` on head \`${HEAD_SHA::7}\`. If no full eval run starts, remove and add \`eval-full\` again."
+            exit 0
+          fi
+
+          base_sha=$(gh api "repos/$REPO/compare/$BASE_REF...$HEAD_SHA" --jq .merge_base_commit.sha)
+          [[ "$base_sha" =~ ^[0-9a-f]{40}$ ]] || fail "Could not read the merge base."
+          case "$tier" in
+            fast) shards='["rust","go","tasks-memory"]' ;;
+            full) shards='["rust","go","tasks-memory","tasks-long"]' ;;
+          esac
+          {
+            echo "tier=$tier"
+            echo "shards=$shards"
+            echo "head_sha=$HEAD_SHA"
+            echo "base_sha=$base_sha"
+            echo "pr_number=$PR_NUMBER"
+          } >> "$GITHUB_OUTPUT"
+          gh api -X POST "repos/$REPO/statuses/$HEAD_SHA" \
+            -f state=pending -f "context=pepi-eval/$tier" \
+            -f "description=Waiting for approval of the eval-pr environment" \
+            -f "target_url=$RUN_URL" > /dev/null
+
+  # One job per shard. Runs the PR head's Dagger module with the secrets, after approval.
+  eval:
+    needs: gate
+    if: needs.gate.outputs.tier != ''
+    name: eval ${{ needs.gate.outputs.tier }} ${{ matrix.shard }}
+    runs-on: ubuntu-latest
+    environment: eval-pr
+    timeout-minutes: ${{ matrix.shard == 'tasks-long' && 330 || 120 }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.gate.outputs.shards) }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.gate.outputs.head_sha }}
+          persist-credentials: false
+
+      - name: Install Dagger
+        run: |
+          set -euo pipefail
+          curl -fsSL https://dl.dagger.io/dagger/install.sh | DAGGER_VERSION="v${DAGGER_VERSION}" BIN_DIR="$HOME/.local/bin" sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Write secrets
+        env:
+          PI_AUTH: ${{ secrets.PI_AUTH }}
+          TYPESAFE_API_KEY: ${{ secrets.TYPESAFE_API_KEY }}
+          HIPPOCAMPUS_ENV: ${{ secrets.HIPPOCAMPUS_ENV }}
+          JEV_MODEL: ${{ vars.JEV_MODEL }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$PI_AUTH" ]]; then
+            echo "::error::Secret PI_AUTH is not set in the eval-pr environment."
+            exit 1
+          fi
+          if [[ -z "$TYPESAFE_API_KEY" ]]; then
+            echo "::error::Secret TYPESAFE_API_KEY is not set in the eval-pr environment."
+            exit 1
+          fi
+          if [[ -z "$HIPPOCAMPUS_ENV" ]]; then
+            echo "::error::Secret HIPPOCAMPUS_ENV is not set in the eval-pr environment."
+            exit 1
+          fi
+          # GitHub masks a multi-line or JSON secret only as a whole: mask each value before
+          # anything else (% is the workflow-command escape).
+          echo "::add-mask::${TYPESAFE_API_KEY//%/%25}"
+          if ! auth_strings=$(jq -r '.. | strings | select(length >= 8) | gsub("%"; "%25") | gsub("\r"; "%0D") | gsub("\n"; "%0A")' <<< "$PI_AUTH"); then
+            echo "::error::Secret PI_AUTH is not valid JSON."
+            exit 1
+          fi
+          while IFS= read -r value; do
+            if [[ -n "$value" ]]; then echo "::add-mask::$value"; fi
+          done <<< "$auth_strings"
+          # Dagger's env-file parser strips quotes and expands variables, so only allow
+          # characters it passes through unchanged. Never echo the values.
+          safe_env_value='^[A-Za-z0-9._~+/=-]+$'
+          if [[ ! "$TYPESAFE_API_KEY" =~ $safe_env_value ]]; then
+            echo "::error::Secret TYPESAFE_API_KEY contains characters outside [A-Za-z0-9._~+/=-]."
+            exit 1
+          fi
+          if [[ -n "$JEV_MODEL" && ! "$JEV_MODEL" =~ $safe_env_value ]]; then
+            echo "::error::Variable JEV_MODEL contains characters outside [A-Za-z0-9._~+/=-]."
+            exit 1
+          fi
+          # HIPPOCAMPUS_ENV: KEY=VALUE lines only (blank lines allowed), URL-safe values.
+          env_line='^[A-Za-z_][A-Za-z0-9_]*=[A-Za-z0-9._~+/=:@%?&,!*-]*$'
+          line_number=0
+          while IFS= read -r line || [[ -n "$line" ]]; do
+            line_number=$((line_number + 1))
+            if [[ -n "$line" && ! "$line" =~ $env_line ]]; then
+              echo "::error::Secret HIPPOCAMPUS_ENV line $line_number is not KEY=VALUE with value characters [A-Za-z0-9._~+/=:@%?&,!*-]."
+              exit 1
+            fi
+            value=${line#*=}
+            if [[ ${#value} -ge 8 ]]; then echo "::add-mask::${value//%/%25}"; fi
+          done <<< "$HIPPOCAMPUS_ENV"
+          umask 077
+          mkdir -p "$RUNNER_TEMP/secrets"
+          printf '%s' "$PI_AUTH" > "$RUNNER_TEMP/secrets/auth.json"
+          {
+            printf 'TYPESAFE_API_KEY=%s\n' "$TYPESAFE_API_KEY"
+            if [[ -n "$JEV_MODEL" ]]; then printf 'JEV_MODEL=%s\n' "$JEV_MODEL"; fi
+          } > "$RUNNER_TEMP/secrets/agent.env"
+          printf '%s\n' "$HIPPOCAMPUS_ENV" > "$RUNNER_TEMP/secrets/hippocampus.env"
+
+      - name: Dagger ci-eval-run
+        env:
+          TIER: ${{ needs.gate.outputs.tier }}
+          SHARD: ${{ matrix.shard }}
+          PROFILE_VAR: ${{ vars.PROFILE }}
+        run: |
+          set -euo pipefail
+          [[ "$TIER" =~ ^(fast|full)$ ]] || { echo "::error::Unexpected tier."; exit 1; }
+          [[ "$SHARD" =~ ^(rust|go|tasks-memory|tasks-long)$ ]] || { echo "::error::Unexpected shard."; exit 1; }
+          profile="${PROFILE_VAR:-plain}"
+          if [[ ! "$profile" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$ ]]; then
+            echo "::error::Profile has unsafe characters."
+            exit 1
+          fi
+          tasks_ref=""
+          read -r tasks_ref < eval-tasks.ref || true
+          if [[ ! "$tasks_ref" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::eval-tasks.ref must hold one full 40-hex commit sha of the tasks repo."
+            exit 1
+          fi
+          # Agent text in the Dagger log must not run workflow commands.
+          stop_token=$(openssl rand -hex 16)
+          echo "::stop-commands::$stop_token"
+          trap 'echo "::$stop_token::"' EXIT
+          dagger call daggervals ci-eval-run \
+            --auth "file://$RUNNER_TEMP/secrets/auth.json" \
+            --agent-env "file://$RUNNER_TEMP/secrets/agent.env" \
+            --agent-profile "$profile" \
+            --hippocampus-env "file://$RUNNER_TEMP/secrets/hippocampus.env" \
+            --tier "$TIER" \
+            --shard "$SHARD" \
+            --tasks-ref "$tasks_ref" \
+            export --path "$RUNNER_TEMP/out"
+
+      - name: Remove secrets
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/secrets"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: eval-${{ needs.gate.outputs.tier }}-${{ matrix.shard }}
+          path: ${{ runner.temp }}/out
+          if-no-files-found: error
+          retention-days: 30
+          overwrite: true
+
+  # Merges the shards, judges and compares with the base's baseline. Runs only when every shard
+  # succeeded; needs the secrets (compare-runs calls a model), so it waits for approval again.
+  report:
+    needs: [gate, eval]
+    if: needs.eval.result == 'success'
+    runs-on: ubuntu-latest
+    environment: eval-pr
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.gate.outputs.head_sha }}
+          path: head
+          persist-credentials: false
+
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.gate.outputs.base_sha }}
+          path: base
+          persist-credentials: false
+
+      - name: Install Dagger
+        run: |
+          set -euo pipefail
+          curl -fsSL https://dl.dagger.io/dagger/install.sh | DAGGER_VERSION="v${DAGGER_VERSION}" BIN_DIR="$HOME/.local/bin" sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: eval-${{ needs.gate.outputs.tier }}-*
+          path: ${{ runner.temp }}/eval/results
+          merge-multiple: true
+
+      - name: Write secrets
+        env:
+          PI_AUTH: ${{ secrets.PI_AUTH }}
+          TYPESAFE_API_KEY: ${{ secrets.TYPESAFE_API_KEY }}
+          JEV_MODEL: ${{ vars.JEV_MODEL }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$PI_AUTH" ]]; then
+            echo "::error::Secret PI_AUTH is not set in the eval-pr environment."
+            exit 1
+          fi
+          if [[ -z "$TYPESAFE_API_KEY" ]]; then
+            echo "::error::Secret TYPESAFE_API_KEY is not set in the eval-pr environment."
+            exit 1
+          fi
+          # GitHub masks a multi-line or JSON secret only as a whole: mask each value before
+          # anything else (% is the workflow-command escape).
+          echo "::add-mask::${TYPESAFE_API_KEY//%/%25}"
+          if ! auth_strings=$(jq -r '.. | strings | select(length >= 8) | gsub("%"; "%25") | gsub("\r"; "%0D") | gsub("\n"; "%0A")' <<< "$PI_AUTH"); then
+            echo "::error::Secret PI_AUTH is not valid JSON."
+            exit 1
+          fi
+          while IFS= read -r value; do
+            if [[ -n "$value" ]]; then echo "::add-mask::$value"; fi
+          done <<< "$auth_strings"
+          # Same agent env file as the shards: its content is part of the setup hash.
+          safe_env_value='^[A-Za-z0-9._~+/=-]+$'
+          if [[ ! "$TYPESAFE_API_KEY" =~ $safe_env_value ]]; then
+            echo "::error::Secret TYPESAFE_API_KEY contains characters outside [A-Za-z0-9._~+/=-]."
+            exit 1
+          fi
+          if [[ -n "$JEV_MODEL" && ! "$JEV_MODEL" =~ $safe_env_value ]]; then
+            echo "::error::Variable JEV_MODEL contains characters outside [A-Za-z0-9._~+/=-]."
+            exit 1
+          fi
+          umask 077
+          mkdir -p "$RUNNER_TEMP/secrets"
+          printf '%s' "$PI_AUTH" > "$RUNNER_TEMP/secrets/auth.json"
+          {
+            printf 'TYPESAFE_API_KEY=%s\n' "$TYPESAFE_API_KEY"
+            if [[ -n "$JEV_MODEL" ]]; then printf 'JEV_MODEL=%s\n' "$JEV_MODEL"; fi
+          } > "$RUNNER_TEMP/secrets/agent.env"
+
+      # The workspace is the evaluated head (its setup hash); the base checkout is a sibling.
+      - name: Dagger ci-eval-report
+        working-directory: head
+        env:
+          TIER: ${{ needs.gate.outputs.tier }}
+          PR_NUMBER: ${{ needs.gate.outputs.pr_number }}
+          HEAD_SHA: ${{ needs.gate.outputs.head_sha }}
+          PROFILE_VAR: ${{ vars.PROFILE }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          [[ "$TIER" =~ ^(fast|full)$ ]] || { echo "::error::Unexpected tier."; exit 1; }
+          [[ "$PR_NUMBER" =~ ^[1-9][0-9]{0,9}$ ]] || { echo "::error::Unexpected PR number."; exit 1; }
+          [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::Unexpected head sha."; exit 1; }
+          profile="${PROFILE_VAR:-plain}"
+          if [[ ! "$profile" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$ ]]; then
+            echo "::error::Profile has unsafe characters."
+            exit 1
+          fi
+          tasks_ref=""
+          read -r tasks_ref < eval-tasks.ref || true
+          if [[ ! "$tasks_ref" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::eval-tasks.ref must hold one full 40-hex commit sha of the tasks repo."
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/eval/results"
+          # Agent text in the Dagger log must not run workflow commands.
+          stop_token=$(openssl rand -hex 16)
+          echo "::stop-commands::$stop_token"
+          trap 'echo "::$stop_token::"' EXIT
+          dagger call daggervals ci-eval-report \
+            --auth "file://$RUNNER_TEMP/secrets/auth.json" \
+            --agent-env "file://$RUNNER_TEMP/secrets/agent.env" \
+            --agent-profile "$profile" \
+            --results "$RUNNER_TEMP/eval/results" \
+            --base-source ../base \
+            --tier "$TIER" \
+            --pr-number "$PR_NUMBER" \
+            --evaluated-sha "$HEAD_SHA" \
+            --tasks-ref "$tasks_ref" \
+            --run-url "$RUN_URL" \
+            export --path "$RUNNER_TEMP/eval/report"
+
+      - name: Remove secrets
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/secrets"
+
+      # report/ (comment bodies, status.json) and results/ (the shard files): the baseline job
+      # commits from this artifact after the merge.
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: eval-report-${{ needs.gate.outputs.tier }}-${{ needs.gate.outputs.head_sha }}
+          path: ${{ runner.temp }}/eval
+          if-no-files-found: error
+          retention-days: 30
+          overwrite: true
+
+  # Posts the comments and the commit status. Runs no PR code and holds no secrets; status.json
+  # and the bodies are untrusted data: only infra_ok and the verdict are read, and validated.
+  publish:
+    needs: [gate, eval, report]
+    if: always() && needs.gate.result == 'success' && needs.gate.outputs.tier != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      pull-requests: write
+      issues: write
+      statuses: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        if: needs.report.result == 'success'
+        with:
+          name: eval-report-${{ needs.gate.outputs.tier }}-${{ needs.gate.outputs.head_sha }}
+          path: ${{ runner.temp }}/eval
+
+      - name: Post comments and status
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TIER: ${{ needs.gate.outputs.tier }}
+          PR_NUMBER: ${{ needs.gate.outputs.pr_number }}
+          HEAD_SHA: ${{ needs.gate.outputs.head_sha }}
+          EVAL_RESULT: ${{ needs.eval.result }}
+          REPORT_RESULT: ${{ needs.report.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$1"; exit 1; }
+          [[ "$TIER" =~ ^(fast|full)$ ]] || fail "Unexpected tier."
+          [[ "$PR_NUMBER" =~ ^[1-9][0-9]{0,9}$ ]] || fail "Unexpected PR number."
+          [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] || fail "Unexpected head sha."
+          [[ "$EVAL_RESULT" =~ ^[a-z]+$ && "$REPORT_RESULT" =~ ^[a-z]+$ ]] || fail "Unexpected job result."
+
+          # Sticky comment: the bot comment whose body starts with the marker, updated in place.
+          # gh api output goes to /dev/null: the responses repeat the body.
+          upsert_comment() {
+            local marker=$1 body_file=$2 ids id
+            ids=$(gh api --paginate "repos/$REPO/issues/$PR_NUMBER/comments" \
+              --jq ".[] | select(.user.login == \"github-actions[bot]\" and (.body | startswith(\"$marker\"))) | .id")
+            id=${ids%%$'\n'*}
+            jq -n --rawfile body "$body_file" '{body: $body}' > "$RUNNER_TEMP/comment.json"
+            if [[ "$id" =~ ^[0-9]+$ ]]; then
+              gh api -X PATCH "repos/$REPO/issues/comments/$id" --input "$RUNNER_TEMP/comment.json" > /dev/null
+            else
+              gh api -X POST "repos/$REPO/issues/$PR_NUMBER/comments" --input "$RUNNER_TEMP/comment.json" > /dev/null
+            fi
+          }
+
+          report="$RUNNER_TEMP/eval/report"
+          state=failure
+          report_complete=false
+          if [[ "$REPORT_RESULT" == success && -f "$report/judge.md" && -f "$report/compare.md" && -f "$report/summary.md" && -f "$report/status.json" ]]; then
+            report_complete=true
+          fi
+          if [[ "$report_complete" == true ]]; then
+            upsert_comment '<!-- pepi-eval:judge -->' "$report/judge.md"
+            upsert_comment '<!-- pepi-eval:compare -->' "$report/compare.md"
+            cat "$report/summary.md" >> "$GITHUB_STEP_SUMMARY"
+            infra_ok=$(jq -r 'if .infra_ok == true then "true" else "false" end' "$report/status.json")
+            verdict=$(jq -r 'if (.verdict | type) == "string" then .verdict else "" end' "$report/status.json")
+            [[ "$verdict" =~ ^(WIN|REGRESSION|NO\ CHANGE|INCONCLUSIVE)?$ ]] || verdict=""
+            if [[ "$infra_ok" == true ]]; then
+              state=success
+              description="Eval ran${verdict:+, verdict: $verdict}"
+            else
+              description="Infrastructure failure: see the judge comment"
+            fi
+          else
+            description="Eval did not complete (shards: $EVAL_RESULT, report: $REPORT_RESULT)"
+            {
+              echo '<!-- pepi-eval:judge -->'
+              echo "### pepi eval \`$TIER\`: infrastructure failure"
+              echo "Head \`${HEAD_SHA::12}\`: the eval did not complete (shards: $EVAL_RESULT, report: $REPORT_RESULT, report files complete: $report_complete): not approved, cancelled, timed out or crashed. No results; see the [run]($RUN_URL)."
+            } > "$RUNNER_TEMP/failure.md"
+            upsert_comment '<!-- pepi-eval:judge -->' "$RUNNER_TEMP/failure.md"
+            cat "$RUNNER_TEMP/failure.md" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          gh api -X POST "repos/$REPO/statuses/$HEAD_SHA" \
+            -f "state=$state" -f "context=pepi-eval/$TIER" \
+            -f "description=$description" -f "target_url=$RUN_URL" > /dev/null
+          [[ "$state" == success ]] || fail "$description"
+
+  # After a merge with a surviving tier label (any push removes the labels, so the evaluated head
+  # is the merged head): commit that eval's results as the tier's baseline. No secrets; runs only
+  # the merged code of the base branch.
+  baseline:
+    if: >-
+      github.event.action == 'closed' && github.event.pull_request.merged &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.base.ref == github.event.repository.default_branch &&
+      (contains(github.event.pull_request.labels.*.name, 'eval') || contains(github.event.pull_request.labels.*.name, 'eval-full'))
+    name: baseline ${{ matrix.tier }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Two quick merges must not race on .eval.track.
+    concurrency:
+      group: eval-baseline
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      actions: read
+    strategy:
+      # One tier after the other: both write .eval.track.
+      max-parallel: 1
+      fail-fast: false
+      matrix:
+        tier: [fast, full]
+    steps:
+      # Trust chain: the report artifact of a pull_request_target run of eval.yml (base-branch
+      # logic) whose eval-pr environment was approved; never an artifact of another workflow.
+      - name: Find the approved eval run
+        id: find
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TIER: ${{ matrix.tier }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          LABELED: ${{ (matrix.tier == 'fast' && contains(github.event.pull_request.labels.*.name, 'eval')) || (matrix.tier == 'full' && contains(github.event.pull_request.labels.*.name, 'eval-full')) }}
+        run: |
+          set -euo pipefail
+          [[ "$TIER" =~ ^(fast|full)$ ]] || { echo "::error::Unexpected tier."; exit 1; }
+          [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::Unexpected head sha."; exit 1; }
+          [[ "$PR_NUMBER" =~ ^[1-9][0-9]{0,9}$ ]] || { echo "::error::Unexpected PR number."; exit 1; }
+          if [[ "$LABELED" != true ]]; then
+            echo "::notice::No $TIER label at merge: no $TIER baseline."
+            exit 0
+          fi
+          artifact="eval-report-$TIER-$HEAD_SHA"
+          run_ids=$(gh api "repos/$REPO/actions/artifacts?name=$artifact&per_page=100" \
+            --jq '[.artifacts[] | select(.expired | not)] | sort_by(.created_at) | reverse | .[].workflow_run.id')
+          for run_id in $run_ids; do
+            [[ "$run_id" =~ ^[0-9]+$ ]] || continue
+            # The run of this PR: its run-name, and its pull_requests when GitHub fills them in.
+            run=$(gh api "repos/$REPO/actions/runs/$run_id" \
+              --jq "[.path, .event, .conclusion, .display_title, (if all(.pull_requests[]; .number == $PR_NUMBER) then \"this-pr\" else \"other-pr\" end)] | @tsv")
+            approvals=$(gh api "repos/$REPO/actions/runs/$run_id/approvals" \
+              --jq '[.[] | select(.state == "approved" and any(.environments[]; .name == "eval-pr"))] | length')
+            expected=$'.github/workflows/eval.yml\tpull_request_target\tsuccess\t'"eval #$PR_NUMBER $HEAD_SHA"$'\tthis-pr'
+            if [[ "$run" == "$expected" && "$approvals" =~ ^[1-9][0-9]*$ ]]; then
+              echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+              echo "artifact=$artifact" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          done
+          echo "::notice::No successful approved $TIER eval of ${HEAD_SHA::12}: no $TIER baseline."
+
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        if: steps.find.outputs.run_id != ''
+        with:
+          ref: ${{ github.event.pull_request.base.ref }}
+          persist-credentials: false
+
+      - name: Download the eval report artifact
+        if: steps.find.outputs.run_id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ steps.find.outputs.run_id }}
+          ARTIFACT: ${{ steps.find.outputs.artifact }}
+        run: gh run download "$RUN_ID" --repo "$REPO" --name "$ARTIFACT" --dir "$RUNNER_TEMP/eval"
+
+      - name: Install Dagger
+        if: steps.find.outputs.run_id != ''
+        run: |
+          set -euo pipefail
+          curl -fsSL https://dl.dagger.io/dagger/install.sh | DAGGER_VERSION="v${DAGGER_VERSION}" BIN_DIR="$HOME/.local/bin" sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      # The baseline folder is replaced wholesale: drop stale file names first.
+      - name: Remove the old baseline
+        if: steps.find.outputs.run_id != ''
+        env:
+          TIER: ${{ matrix.tier }}
+        run: rm -rf "eval-baseline/$TIER"
+
+      - name: Dagger ci-baseline-prepare
+        if: steps.find.outputs.run_id != ''
+        env:
+          TIER: ${{ matrix.tier }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$PR_NUMBER" =~ ^[1-9][0-9]{0,9}$ ]] || { echo "::error::Unexpected PR number."; exit 1; }
+          [[ "$MERGE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::Unexpected merge sha."; exit 1; }
+          baseline_date=$(date -u +%F)
+          # Errors quote problems found in PR-produced files: they must not run workflow commands.
+          stop_token=$(openssl rand -hex 16)
+          echo "::stop-commands::$stop_token"
+          trap 'echo "::$stop_token::"' EXIT
+          dagger call daggervals ci-baseline-prepare \
+            --results "$RUNNER_TEMP/eval/results" \
+            --status "$RUNNER_TEMP/eval/report/status.json" \
+            --tier "$TIER" \
+            --pr-number "$PR_NUMBER" \
+            --pr-head-sha "$HEAD_SHA" \
+            --merge-sha "$MERGE_SHA" \
+            --date "$baseline_date" \
+            export --path .
+
+      - name: Commit and push the baseline
+        if: steps.find.outputs.run_id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TIER: ${{ matrix.tier }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          set -euo pipefail
+          [[ "$BASE_REF" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$ && "$BASE_REF" != *..* ]] || { echo "::error::Unexpected base ref."; exit 1; }
+          git add -A eval-baseline .eval.track
+          if git diff --cached --quiet; then
+            echo "::notice::The $TIER baseline is unchanged; nothing to commit."
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit --quiet -m "eval baseline for #$PR_NUMBER ($TIER)"
+          # The token is configured only now, after the Dagger call.
+          basic_auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+          echo "::add-mask::$basic_auth"
+          git config http.https://github.com/.extraheader "AUTHORIZATION: basic $basic_auth"
+          for attempt in 1 2 3; do
+            if git push origin "HEAD:refs/heads/$BASE_REF"; then
+              exit 0
+            fi
+            if [[ "$attempt" -lt 3 ]]; then
+              if ! git pull --rebase origin "$BASE_REF"; then
+                git rebase --abort || true
+                echo "::error::The $TIER baseline commit conflicts with $BASE_REF; not pushed."
+                exit 1
+              fi
+              sleep $((attempt * 10))
+            fi
+          done
+          echo "::error::Could not push the $TIER baseline after 3 attempts."
+          exit 1
+
+  # A refused or failed baseline: say so in the PR, without repeating any matched text.
+  baseline-failed:
+    needs: baseline
+    if: failure()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pull-requests: write
+      issues: write
+    steps:
+      - name: Comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          [[ "$PR_NUMBER" =~ ^[1-9][0-9]{0,9}$ ]] || { echo "::error::Unexpected PR number."; exit 1; }
+          {
+            echo '<!-- pepi-eval:baseline -->'
+            echo "The eval baseline of this PR was not committed: ci-baseline-prepare refused it (evaluated head is not the merged head, incomplete eval, file rules or the secret scan) or the push failed. The reason is only in the [run log]($RUN_URL)."
+          } > "$RUNNER_TEMP/body.md"
+          jq -n --rawfile body "$RUNNER_TEMP/body.md" '{body: $body}' > "$RUNNER_TEMP/comment.json"
+          gh api -X POST "repos/$REPO/issues/$PR_NUMBER/comments" --input "$RUNNER_TEMP/comment.json" > /dev/null

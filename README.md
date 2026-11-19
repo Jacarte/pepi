@@ -403,11 +403,25 @@ When upgrading an existing installation:
 | `prompts/` | Prompt templates, including `/pr-review` |
 | `workflows/` | Subagent workflow scripts |
 | `skills/kanllo-board/SKILL.md` | The only tracked skill; internal Kanllo board workflow (requires its API, bash, curl, jq) |
-| `.dagger/` | Evaluation harnesses written in Go with dagger |
+| `.dagger/` | Evaluation harnesses written in Go with dagger (see [Evals](#evals)) |
 
 Other locally installed or untracked skill directories are not part of a fresh
 clone. In particular, `go-reviewer` is referenced by the profiles but not supplied
 here. Do not move or overwrite local skills just to match this repository.
+
+## Evals
+
+The `daggervals` Dagger module in `.dagger/modules/daggervals` runs this setup (profile,
+`AGENTS.md`, extensions, memory) on fixed tasks and grades the result by tests:
+
+- Rust and Go bug fixes from open source repos, and a `hello` smoke test, live in this repo.
+- Long, parallel and memory tasks live in the cross-reference repo
+  [pepi-eval-tasks](https://github.com/Jacarte/pepi-eval-tasks). The evals fetch it at a pinned
+  commit (`eval-tasks.ref`).
+- [docs/evals-tasks.md](docs/evals-tasks.md) explains each task, what it measures, the results
+  so far, and how an eval runs end to end (architecture diagrams).
+- [docs/ci-eval.md](docs/ci-eval.md) covers the PR labels `eval` and `eval-full`, the approval,
+  and the baselines.
 
 ## What is deliberately not tracked
 

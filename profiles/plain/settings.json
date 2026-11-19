@@ -1,0 +1,26 @@
+{
+  "lastChangelogVersion": "1.1.0",
+  "theme": "dark",
+  "packages": [
+    "npm:pi-provider-litellm",
+    "npm:pi-web-access",
+    "npm:pi-mcp-adapter",
+    "npm:@vndv/pi-codegraph",
+    "npm:@dietrichgebert/ponytail",
+    "npm:pi-ketch"
+  ],
+  "defaultModel": "bedrock-claude-sonnet-5-5",
+  "defaultProvider": "litellm",
+  "defaultThinkingLevel": "high",
+  "hippocampus": {
+    "enabled": true,
+    "baseUrl": "http://localhost:8000",
+    "userId": "default-user",
+    "autoCapture": true,
+    "autoRecall": true,
+    "requestTimeoutMs": 10000,
+    "recallLimit": 5,
+    "legacyUserIds": [],
+    "recallLegacyCwd": true
+  }
+}
