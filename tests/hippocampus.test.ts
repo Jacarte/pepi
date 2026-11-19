@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { createServer } from "node:http";
 import { once } from "node:events";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
@@ -90,7 +90,104 @@ test("remote identity is stable across protocols, credentials, working directori
   assert.equal(normalizeRemote("ssh://git@github.com:22/Jacarte/pepi.git"), "github.com/jacarte/pepi");
   assert.notEqual(resolveIdentity(settings, repo, () => "git@github.com:Jacarte/hippocampus.git").userId, a.userId);
   assert.equal(normalizeRemote("/local/repo"), undefined);
-  assert.throws(() => resolveIdentity(settings, directory, () => ""), /explicit hippocampus.projectId/);
+  assert.throws(() => resolveIdentity(settings, directory, () => "", () => ""), /explicit hippocampus.projectId/);
+});
+
+test("resolveIdentity preserves explicit and Git precedence without consulting jj", () => {
+  let gitCalls = 0, jjCalls = 0;
+  const readGit = () => { gitCalls++; return "git@github.com:Jacarte/pepi.git"; };
+  const readJj = () => { jjCalls++; return "origin https://github.com/other/repo.git\n"; };
+  assert.equal(resolveIdentity(config(), "/repo", readGit, readJj).projectId, "explicit:tests");
+  assert.equal(gitCalls, 0); assert.equal(jjCalls, 0);
+  const settings = { ...config(), projectId: undefined };
+  const gitIdentity = resolveIdentity(settings, "/repo", readGit, readJj);
+  assert.equal(gitCalls, 1); assert.equal(jjCalls, 0);
+  const jjIdentity = resolveIdentity(settings, "/another-workspace", () => "", () => "origin https://github.com/Jacarte/pepi.git\n");
+  assert.deepEqual(jjIdentity, gitIdentity);
+});
+
+test("resolveIdentity falls back to the exact jj origin when Git is missing or unusable", () => {
+  const settings = { ...config(), projectId: undefined };
+  const expected = resolveIdentity(settings, "/git", () => "git@github.com:Jacarte/pepi.git", () => "");
+  const gitReaders = [() => "", () => "/local/repo", () => { throw new Error("git unavailable"); }];
+  for (const readGit of gitReaders) {
+    for (const remote of ["https://user:private@GitHub.com/Jacarte/pepi.git", "ssh://git@github.com:22/Jacarte/pepi.git", "git@github.com:Jacarte/pepi.git"]) {
+      let jjCalls = 0;
+      const actual = resolveIdentity(settings, "/nested/workspace", readGit, () => {
+        jjCalls++;
+        return `upstream https://github.com/other/repo.git\norigin2 https://github.com/other/repo.git\norigin ${remote}\n`;
+      });
+      assert.deepEqual(actual, expected); assert.equal(jjCalls, 1);
+    }
+  }
+});
+
+test("resolveIdentity fails closed for absent, malformed or ambiguous jj origins and discovery failures", () => {
+  const settings = { ...config(), projectId: undefined };
+  const outputs = ["", "\n", "origin", "origin\n", "origin \n", "origin /local/repo\n", "origin file:///local/repo\n",
+    "origin https://github.com/owner/repo.git extra\n", " origin https://github.com/owner/repo.git\n",
+    "origin https://github.com/owner/repo.git\norigin https://github.com/owner/repo.git\n",
+    "origin https://github.com/owner/repo.git\norigin /local/repo\n",
+    "upstream https://github.com/owner/repo.git\norigin2 https://github.com/owner/repo.git\n",
+    '{"origin":"https://github.com/owner/repo.git"}', "origin https://user:private@\n"];
+  const readers = [...outputs.map((output) => () => output),
+    ...["ENOENT", "EIO", "ETIMEDOUT"].map((code) => () => {
+      throw Object.assign(new Error("https://user:private@github.com/owner/repo.git"), { code });
+    })];
+  for (const readJj of readers) {
+    assert.throws(() => resolveIdentity(settings, "/unrelated/workspace", () => "", readJj), (error: any) => {
+      assert.equal(error.message, "Hippocampus needs a Git origin or an explicit hippocampus.projectId");
+      assert.equal(error.cause, undefined);
+      return true;
+    });
+  }
+});
+
+test("resolveIdentity jj subprocess uses the workspace cwd, safe argv, hidden stderr and a bounded timeout", (t) => {
+  const directory = temporary(t), bin = join(directory, "bin"), cwd = join(directory, "workspace with spaces");
+  mkdirSync(bin); mkdirSync(cwd);
+  const executable = join(bin, "jj"), invocation = join(directory, "invocation.json");
+  const settings = { ...config(), projectId: undefined };
+  const priorPath = process.env.PATH;
+  try {
+    process.env.PATH = bin;
+    assert.throws(() => resolveIdentity(settings, cwd, () => ""), /explicit hippocampus.projectId/);
+    writeFileSync(executable, `#!${process.execPath}\nrequire('node:fs').writeFileSync(${JSON.stringify(invocation)}, JSON.stringify({ args: process.argv.slice(2), cwd: process.cwd() }));\nprocess.stdout.write('origin https://github.com/Jacarte/pepi.git\\n');\n`, { mode: 0o755 });
+    assert.equal(resolveIdentity(settings, cwd, () => "").projectId, "git:github.com/jacarte/pepi");
+    assert.deepEqual(JSON.parse(readFileSync(invocation, "utf8")), { args: ["--ignore-working-copy", "git", "remote", "list"], cwd: realpathSync(cwd) });
+    writeFileSync(executable, `#!${process.execPath}\nprocess.stderr.write('https://user:private@github.com/owner/repo.git');\nsetTimeout(() => {}, 10000);\n`);
+    const start = Date.now();
+    assert.throws(() => resolveIdentity(settings, cwd, () => ""), (error: any) => {
+      assert.equal(error.message, "Hippocampus needs a Git origin or an explicit hippocampus.projectId");
+      return true;
+    });
+    assert.ok(Date.now() - start >= 1800, "discovery reached its two-second timeout");
+    assert.ok(Date.now() - start < 8000, "discovery did not wait for the child to finish");
+  } finally {
+    if (priorPath === undefined) delete process.env.PATH;
+    else process.env.PATH = priorPath;
+  }
+});
+
+test("resolveIdentity discovers a real non-colocated jj origin from root and nested cwd without snapshotting", (t) => {
+  const available = spawnSync("jj", ["--ignore-working-copy", "--version"], { stdio: "pipe" });
+  if ((available.error as NodeJS.ErrnoException)?.code === "ENOENT") { t.skip("jj is not installed"); return; }
+  assert.equal(available.status, 0);
+  const directory = temporary(t), repo = join(directory, "repo"), nested = join(repo, "nested", "deep");
+  // init rejects --ignore-working-copy; only this new temporary repository may omit it.
+  execFileSync("jj", ["git", "init", "--no-colocate", repo], { stdio: "pipe" });
+  const jj = (args: string[]) => execFileSync("jj", ["--ignore-working-copy", "-R", repo, ...args], { encoding: "utf8", stdio: "pipe" });
+  jj(["git", "remote", "add", "origin", "https://github.com/Jacarte/pepi.git"]);
+  jj(["git", "remote", "add", "upstream", "https://github.com/other/repo.git"]);
+  const state = () => [jj(["op", "log", "--limit", "1", "--no-graph", "-T", "id"]), jj(["log", "-r", "@", "--no-graph", "-T", "commit_id"])];
+  const before = state();
+  mkdirSync(nested, { recursive: true }); writeFileSync(join(nested, "unsnapshotted.txt"), "dirty fixture\n");
+  assert.equal(spawnSync("git", ["-C", repo, "rev-parse", "--show-toplevel"], { stdio: "pipe" }).status, 128);
+  const settings = { ...config(), projectId: undefined };
+  const expected = resolveIdentity(settings, "/git", () => "git@github.com:Jacarte/pepi.git", () => "");
+  assert.deepEqual(resolveIdentity(settings, repo), expected);
+  assert.deepEqual(resolveIdentity(settings, nested), expected);
+  assert.deepEqual(state(), before, "origin discovery must not snapshot the dirty working copy");
 });
 
 test("legacy recall uses only exact configured IDs and the old cwd hash", (t) => {

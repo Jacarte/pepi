@@ -74,7 +74,7 @@ export function normalizeRemote(remote: string): string | undefined {
 }
 
 export interface Identity { projectId: string; userId: string; readUserIds: string[] }
-export function resolveIdentity(config: Config, cwd: string, readRemote?: () => string): Identity {
+export function resolveIdentity(config: Config, cwd: string, readRemote?: () => string, readJjRemotes?: () => string): Identity {
   let projectId = config.projectId ? `explicit:${config.projectId}` : undefined;
   if (!projectId) {
     try {
@@ -82,6 +82,18 @@ export function resolveIdentity(config: Config, cwd: string, readRemote?: () => 
         encoding: "utf8", timeout: 2_000, stdio: ["ignore", "pipe", "ignore"],
       });
       const normalized = normalizeRemote(remote);
+      if (normalized) projectId = `git:${normalized}`;
+    } catch { /* No identity is safer than mixing unrelated projects. */ }
+  }
+  if (!projectId) {
+    try {
+      // Let jj find the enclosing workspace: -R requires its root, not a nested cwd.
+      const remotes = readJjRemotes ? readJjRemotes() : execFileSync("jj", ["--ignore-working-copy", "git", "remote", "list"], {
+        cwd, encoding: "utf8", timeout: 2_000, stdio: ["ignore", "pipe", "ignore"],
+      });
+      const origins = remotes.split(/\r?\n/).filter((line) => /^\s*origin(?:\s|$)/.test(line));
+      const origin = origins.length === 1 ? /^origin[ \t]+(\S+)$/.exec(origins[0]) : undefined;
+      const normalized = origin ? normalizeRemote(origin[1]) : undefined;
       if (normalized) projectId = `git:${normalized}`;
     } catch { /* No identity is safer than mixing unrelated projects. */ }
   }

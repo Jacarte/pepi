@@ -8,12 +8,12 @@
     "npm:pi-ketch",
     "npm:@dietrichgebert/ponytail"
   ],
-  "defaultModel": "gemini-2.5-flash",
+  "defaultModel": "gemini-3.8-flash",
   "defaultProvider": "google",
   "defaultThinkingLevel": "high",
   "subagents": {
     "projectRootResolution": "git-root",
-    "defaultModel": "gemini-2.5-flash",
+    "defaultModel": "gemini-3.8-flash",
     "defaultProvider": "google",
     "agentOverrides": {
       "claude-code": {
@@ -80,7 +80,7 @@
         ]
       },
       "researcher": {
-        "model": "gemini-2.5-flash",
+        "model": "gemini-3.8-flash",
         "tools": [
           "jev_route",
           "read",

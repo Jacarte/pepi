@@ -73,3 +73,5 @@ logs/
 litellm*
 .hippocampus.env
 evals_cache/
+
+worktrees/
