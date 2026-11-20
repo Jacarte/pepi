@@ -10,6 +10,7 @@ export function installHippocampus(pi: ExtensionAPI, readOnly: boolean) {
       query: { type: "string", description: "Required for search." },
       content: { type: "string", description: "Selected durable text; required for add." },
       memory_id: { type: "string", description: "Required for delete." },
+      kind: { type: "string", enum: ["overview"], description: "Only with add: store a short project overview (purpose, stack, key paths, how to test) as a long-lived stable-fact." },
     } },
   }, readOnly);
 }
