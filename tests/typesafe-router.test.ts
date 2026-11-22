@@ -661,6 +661,50 @@ test("tracked profiles preserve router tool and effective extension access for a
   }
 });
 
+test("Codex reapplication resets expensive defaults while keeping task-local effort routing", () => {
+  const dir = mkdtempSync(join(tmpdir(), "codex-routing-profile-"));
+  try {
+    mkdirSync(join(dir, "profiles", "codex"), { recursive: true });
+    copyFileSync(join(root, "profile.sh"), join(dir, "profile.sh"));
+    const settingsPath = join("profiles", "codex", "settings.json");
+    copyFileSync(join(root, settingsPath), join(dir, settingsPath));
+
+    // Model selections in a running session are not persisted by this test.
+    // Exercise the real profile overlay over previously edited disk defaults.
+    const stale = structuredClone(readConfig(settingsPath));
+    stale.defaultModel = "gpt-6-astra";
+    stale.defaultThinkingLevel = "high";
+    stale.subagents.defaultModel = "gpt-6-astra";
+    stale.subagents.defaultThinking = "high";
+    for (const override of Object.values(stale.subagents.agentOverrides) as any[]) {
+      if (!override.disabled) Object.assign(override, { model: "gpt-6-astra", thinking: "high", fast: true });
+    }
+    writeFileSync(join(dir, "settings.json"), JSON.stringify(stale));
+    execFileSync("bash", [join(dir, "profile.sh"), "codex"], { cwd: dir, stdio: "pipe" });
+
+    const applied = JSON.parse(readFileSync(join(dir, "settings.json"), "utf8"));
+    assert.equal(applied.defaultProvider, "openai-codex");
+    assert.equal(applied.defaultModel, "gpt-6.1-sol");
+    assert.equal(applied.defaultThinkingLevel, "medium");
+    assert.equal(applied.subagents.defaultModel, "gpt-6.1-sol");
+    assert.equal(applied.subagents.defaultThinking, "medium");
+    for (const role of roles.filter((role) => role !== "parent")) {
+      const override = applied.subagents.agentOverrides[role];
+      const mechanical = role === "scout" || role === "delegate";
+      assert.equal(override.model, mechanical ? "gpt-6-luna" : "gpt-6.1-sol", role);
+      assert.equal(override.thinking, mechanical ? "low"
+        : role === "reviewer" || role === "oracle" ? "high" : "medium", role);
+      assert.equal(override.fast, false, `${role}: standard service tier`);
+      assert.ok(override.tools.includes("jev_route"), `${role}: effort switching retained`);
+    }
+    const reviewerTools = applied.subagents.agentOverrides.reviewer.tools;
+    for (const tool of ["write", "edit", "bash"]) assert.ok(!reviewerTools.includes(tool), tool);
+    assert.equal(applied.subagents.projectRootResolution, "git-root");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("profile.sh preserves each tracked router config when applying profiles", () => {
   const dir = mkdtempSync(join(tmpdir(), "typesafe-router-profile-"));
   try {

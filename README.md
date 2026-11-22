@@ -121,18 +121,45 @@ LiteLLM is specific to Bedrock here; it is not required by every profile.
 ### Model settings
 
 Model names below are configured IDs, not a guarantee of provider availability.
-Both profiles set thinking level `high` and subagent project-root resolution
-`git-root`.
+Both profiles use subagent project-root resolution `git-root`. Codex starts the
+parent at `medium` thinking; Bedrock keeps its profile-owned `high` default.
 
-| Setting / agent | Codex (`openai-codex`) | Bedrock (`litellm`) |
-|---|---|---|
-| Main default | `gpt-6-luna` | `bedrock-claude-sonnet-5-5` |
-| Subagent default | `gpt-6.1-sol` | `bedrock-claude-sonnet-5-5` |
-| `oracle`, `reviewer` | `gpt-6-astra` | `bedrock-claude-opus-5-5` |
-| `worker`, `scout` | `gpt-6-luna` | `bedrock-claude-haiku-4-5` |
-| `delegate` | `gpt-6-luna` | inherits subagent default |
-| `researcher` | `gpt-6.1-sol` | inherits subagent default |
-| `claude-code`, `claude-code-writer` | disabled | disabled |
+| Setting / agent | Codex model (`openai-codex`) | Codex initial effort | Bedrock model (`litellm`) |
+|---|---|---|---|
+| Main default | `gpt-6.1-sol` | medium | `bedrock-claude-sonnet-5-5` |
+| Subagent default | `gpt-6.1-sol` | medium when no role effort is set | `bedrock-claude-sonnet-5-5` |
+| `worker` | `gpt-6.1-sol` | medium | `bedrock-claude-haiku-4-5` |
+| `oracle`, `reviewer` | `gpt-6.1-sol` | high | `bedrock-claude-opus-5-5` |
+| `scout` | `gpt-6-luna` | low | `bedrock-claude-haiku-4-5` |
+| `delegate` | `gpt-6-luna` | low | inherits subagent default |
+| `researcher`, `evidence-auditor` | `gpt-6.1-sol` | medium | inherits subagent default |
+| `claude-code`, `claude-code-writer` | disabled | — | disabled |
+
+Codex role `thinking` settings establish the listed initial effort; task-local
+`switch_effort` can adjust it. A bounded mechanical writer can launch with
+`model: "openai-codex/gpt-6-luna:low"`; exploratory or coupled discovery can use
+`model: "openai-codex/gpt-6.1-sol:medium"` when needed. Regular implementation
+stays on Sol. Per-run model overrides take precedence over role pins, so use
+explicit models deliberately. For one launch, put effort in the model suffix
+(`:low`, `:medium`, `:high`): the dispatch `thinking` field is ignored by pinned
+`pi-subagents@0.78.0`. Role-level `thinking` is supported. See the pinned
+[model settings](https://github.com/nicobailon/pi-subagents/blob/v0.78.0/docs/models.md)
+and [dispatch reference](https://github.com/nicobailon/pi-subagents/blob/v0.78.0/docs/tool-reference.md).
+
+Astra is reserved for a user-authorized named, bounded assignment. An existing
+authorization applies only within its stated scope; a previous Astra task or
+failed worker does not authorize later Astra launches. In Codex, keep the parent
+on Sol 6.1 and make exceptions per launch without writing global defaults. Other
+profiles retain their own model choices.
+
+After changing tracked Codex settings, run `./profile.sh codex` and start a fresh
+Pi session so startup defaults apply; a resumed session may keep its selected
+model. Check `/subagents-models` to inspect the live role mapping. Codex native
+roles explicitly set `fast: false`, choosing standard child service by default.
+A per-run `fast: true` can override this and requests priority service. These
+child settings make no claim about the parent service tier. This configuration
+and instruction trial does not enforce a runtime
+model scope; authorized task-local Astra remains possible.
 
 `models-router.json` is a separate mapping for the local `jev_route` tool:
 
@@ -180,19 +207,29 @@ reads back and reports `requestedEffort`, `actualEffort`, and `changed`. It neve
 switches models. Stale session/model decisions and invalid responses fail explicitly.
 
 Before substantive work, the native Pi parent and every native Pi subagent role
-must call `switch_effort` for their own assignment, even after a delegation
-recommendation.
+must call `switch_effort` for their own actual assignment. A parent's call does
+not replace the child's. Classify the reasoning required for that assignment:
+a known-file read or bounded code exploration does not inherit the entire
+project's implementation risk. Higher effort is not automatically more useful.
 This is instruction-based policy, not runtime blocking. The requirement is also
 in the tool description because children may not inherit global `AGENTS.md`.
-`recommend` remains required before authorized implementation delegation; pass
-its model ID unchanged when launching the child. Reclassify only when the
-assignment or evidence changes materially, and report classification failures.
+
+`recommend` is optional advisory model advice. Operator/profile choices take
+precedence over the tool description's generic hint to pass its returned model
+when launching. Its lane escalation rules above describe the tool's result;
+they do not authorize changing a session, replacing a
+profile pin, or automatically launching Astra. The parent chooses an authorized
+model for each task. A failed attempt calls for evidence of the missing
+capability and a corrected brief or explicit task-local choice, with no automatic
+FRONTIER retry. Reclassify effort or seek advice only when the assignment or
+evidence changes materially, and report classification failures.
+
 The tracked Bedrock, Codex, and Cloud profiles preserve router availability for
-all eight native Pi subagent roles through `jev_route` allowlists and
-explicit/default `subagentOnlyExtensions`, including when reapplying a profile.
-Existing capability restrictions still apply; adapt the absolute extension paths
-to your machine. External CLI runtimes (`claude-code`, `claude-code-writer`) are
-outside this Pi extension's scope.
+all native Pi subagent roles through `jev_route` allowlists and explicit/default
+`subagentOnlyExtensions`, including when reapplying a profile. No router extension
+or child tool is removed. Existing capability restrictions still apply; adapt the
+absolute extension paths to your machine. External CLI runtimes (`claude-code`,
+`claude-code-writer`) are outside this Pi extension's scope.
 
 ### Subagent workflows
 
@@ -203,6 +240,36 @@ these workflow scripts:
 |---|---|
 | `workflows/pr-review.ts` | PR context → parallel reviews → synthesis. Never publishes; the parent owns user ACK. |
 | `workflows/implement.ts` | T1 worker → verifier; T1R bounded repair; T2/T3 add planning, approval, and reviews. |
+
+The shared scripts use the active profile's role defaults. For newly written
+Codex workflows, specify the model on every child launch. A mechanical edit and
+an ordinary review can use these options with complete, bounded task briefs:
+
+```js
+const edit = await runs.run("mechanical-edit", {
+  agent: "worker",
+  model: "openai-codex/gpt-6-luna:low",
+  context: "fresh",
+  task: mechanicalTask
+});
+if (!edit.ok) return { edit };
+
+const review = await runs.run("review-edit", {
+  agent: "reviewer",
+  model: "openai-codex/gpt-6.1-sol:high",
+  context: "fresh",
+  task: reviewTask
+});
+return { edit, review };
+```
+
+Here `mechanicalTask` and `reviewTask` are briefs supplied by the caller. Include
+the task-local `switch_effort` instruction, exact source/scope, acceptance checks,
+and applicable permissions; give the reviewer the completed diff and check
+evidence. Check its actual verdict before integration or publication. For normal
+implementation use `openai-codex/gpt-6.1-sol:medium`. An authorized Astra exception
+belongs on its one named launch; later tasks select their own model and do not
+resume that child for unrelated work.
 
 `extensions/subagent/config.json` holds display settings (fleet view above the
 editor, inline tool summaries) and model-response aliases.
