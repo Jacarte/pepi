@@ -8,12 +8,12 @@
     "npm:pi-ketch",
     "npm:@dietrichgebert/ponytail"
   ],
-  "defaultModel": "gpt-6.1-sol",
+  "defaultModel": "gpt-6-astra",
   "defaultProvider": "openai-codex",
   "defaultThinkingLevel": "high",
   "subagents": {
     "projectRootResolution": "git-root",
-    "defaultModel": "gpt-6.1-sol",
+    "defaultModel": "gpt-6-astra",
     "defaultProvider": "openai-codex",
     "agentOverrides": {
       "claude-code": {
