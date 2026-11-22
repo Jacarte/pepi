@@ -11,12 +11,13 @@ import { test } from "node:test";
 const root = fileURLToPath(new URL("../", import.meta.url));
 const source = readFileSync(join(root, "extensions/pi-typesafe-router.ts"), "utf8");
 const readConfig = (path: string) => JSON.parse(readFileSync(join(root, path), "utf8"));
-const profiles = Object.fromEntries(["codex", "bedrock"].map((name) => [name,
+const profiles = Object.fromEntries(["codex", "bedrock", "gemini"].map((name) => [name,
   readConfig(join("profiles", name, "models-router.json")),
 ]));
 const configFiles = {
   bedrock: "profiles/bedrock/models-router.json",
   codex: "profiles/codex/models-router.json",
+  gemini: "profiles/gemini/models-router.json",
 };
 const lanes = ["LOCAL", "CHEAP", "FRONTIER"];
 const laneOptions = ["local", "cheap", "frontier"];
@@ -34,6 +35,7 @@ function choice(options: string[], selected: string, confidence = 1) {
 const laneAnswer = (selected: string, confidence = 1) => choice(laneOptions, selected, confidence);
 const blastAnswer = (selected: string, confidence = 1) => choice(blastRadiusOptions, selected, confidence);
 const activityNames = ["exploration", "research", "performance", "debugging"];
+const geminiResearchModels = ["gemini-3.8-flash", "gemini-3.1-flash-lite", "gemini-3.1-pro-preview"];
 const activityAnswers = (activities: string[] = []) => Object.fromEntries(activityNames.map((activity) =>
   [activity, choice(["yes", "no"], activities.includes(activity) ? "yes" : "no")]));
 // Objects created inside the vm realm have a different Object.prototype.
@@ -127,6 +129,8 @@ for (const child of [false, true]) {
     assert.equal(h.tool.executionMode, "sequential");
     assert.match(h.tool.description, /Pass role/);
     assert.match(h.tool.description, /parent and EVERY subagent role MUST call switch_effort/);
+    for (const id of geminiResearchModels) assert.ok(h.tool.description.includes(`google/${id}`));
+    assert.match(h.tool.description, /Pi readback must exactly match the resolved target/);
     assert.doesNotMatch(h.tool.description, /switch_self/);
     const [properties, schemaOptions] = h.tool.parameters.args;
     assert.deepEqual(plain(schemaOptions), { additionalProperties: false });
@@ -357,7 +361,8 @@ test("model mapping validation and HUMAN-ignore behavior remain intact", async (
   h.config.FRONTIER.id = ` ${h.config.FRONTIER.id} `;
   for (const human of [undefined, null, [], { threshold: "invalid", provider: "human" }]) {
     h.config.HUMAN = human;
-    assert.equal((await h.run()).details.model, "openai-codex/gpt-6-astra");
+    assert.equal((await h.run()).details.model,
+      `${profiles.codex.FRONTIER.provider}/${profiles.codex.FRONTIER.id}`);
   }
 });
 
@@ -493,10 +498,12 @@ test("explicit activities enforce the model/activity matrix locally for every ro
         const other = setup();
         const model = h.ctx.model;
         const result = await h.run({ action: "switch_effort", role, activities: [activity] });
+        assert.equal(result.details.policyEffort, expected);
         assert.equal(result.details.requiredEffort, expected, `${id} ${role} ${activity}`);
         assert.equal(result.details.requestedEffort, expected);
         assert.equal(result.details.actualEffort, expected);
         assert.equal(result.details.activitySource, "explicit");
+        assert.equal(result.details.mappingReason, null);
         assert.equal(result.details.classifier, undefined);
         assert.equal(result.details.changed, expected !== "medium");
         assert.equal(h.ctx.model, model);
@@ -517,6 +524,125 @@ test("mixed activities use research then performance/debugging then exploration 
   ] as const) {
     const h = setup(); h.ctx.model.id = "gpt-6-astra";
     assert.equal((await h.run({ action: "switch_effort", activities })).details.actualEffort, expected);
+  }
+});
+
+test("configured Gemini research keeps xhigh intent and explicitly requests Pi high", async () => {
+  for (const id of geminiResearchModels) {
+    for (const classified of [false, true]) {
+      for (const activities of [["research"], ["default", "exploration", "debugging", "performance", "research"]]) {
+        const h = setup({ config: profiles.gemini, answers: activityAnswers(activities),
+          env: { TYPESAFE_API_KEY: classified ? "offline-test" : "" },
+          clampEffort: (level: string) => level === "xhigh" ? "high" : level });
+        h.ctx.model.id = id;
+        const model = h.ctx.model;
+        const { details } = await h.run({ action: "switch_effort", role: "scout",
+          ...(classified ? {} : { activities }) });
+        assert.equal(details.policy, "research", id);
+        assert.equal(details.policyEffort, "xhigh", id);
+        assert.equal(details.requiredEffort, "high", id);
+        assert.equal(details.requestedEffort, "high", id);
+        assert.equal(details.actualEffort, "high", id);
+        assert.equal(details.mappingReason, "gemini_native_max_high", id);
+        assert.equal(details.activitySource, classified ? "jev" : "explicit");
+        assert.equal(details.changed, true);
+        assert.deepEqual(h.efforts, ["high"]); // Never request xhigh and accept its clamp.
+        assert.equal(h.requests.length, classified ? 1 : 0);
+        assert.equal(h.ctx.model, model);
+        assert.equal(h.selected.length, 0);
+      }
+    }
+  }
+});
+
+test("configured Gemini retains the other activity policies", async () => {
+  for (const id of geminiResearchModels) {
+    for (const [activities, expected] of [
+      [["exploration"], "medium"], [["default"], "medium"], [["debugging"], "high"],
+      [["performance"], "high"], [["exploration", "performance"], "high"],
+    ] as const) {
+      const h = setup({ config: profiles.gemini }); h.ctx.model.id = id;
+      const { details } = await h.run({ action: "switch_effort", activities });
+      assert.equal(details.policyEffort, expected, id);
+      assert.equal(details.requiredEffort, expected, id);
+      assert.equal(details.actualEffort, expected, id);
+      assert.equal(details.mappingReason, null, id);
+    }
+  }
+});
+
+test("Gemini research mapping is limited to the exact Google provider and known IDs", async () => {
+  for (const [provider, id] of [
+    ["google", "gemini-unknown"], ["google", "gemini-3.8-flash-preview"],
+    ["google", "gemini-4-flash"], ["google-vertex", "gemini-3.8-flash"],
+    ["openai-codex", "gemini-3.1-flash-lite"], ["litellm", "gemini-3.1-pro-preview"],
+  ]) {
+    const h = setup(); Object.assign(h.ctx.model, { provider, id });
+    const { details } = await h.run({ action: "switch_effort", activities: ["research"] });
+    assert.equal(details.policyEffort, "xhigh");
+    assert.equal(details.requiredEffort, "xhigh");
+    assert.equal(details.requestedEffort, "xhigh");
+    assert.equal(details.actualEffort, "xhigh");
+    assert.equal(details.mappingReason, null);
+    const clamped = setup({ clampEffort: () => "high" });
+    Object.assign(clamped.ctx.model, { provider, id });
+    await assert.rejects(clamped.run({ action: "switch_effort", activities: ["research"] }), /requires xhigh, actual high/);
+    assert.deepEqual(clamped.efforts, ["xhigh"]);
+    assert.equal(clamped.selected.length, 0);
+  }
+});
+
+test("Gemini research rejects nonreasoning, disabled high, and contradictory high mappings before mutation", async () => {
+  for (const id of geminiResearchModels) {
+    for (const descriptor of [
+      { reasoning: false }, { reasoning: undefined },
+      ...[null, "LOW", "medium", "off", "xhigh", 128, false].map((high) => ({ thinkingLevelMap: { high } })),
+    ]) {
+      for (const classified of [false, true]) {
+        const h = setup({ config: profiles.gemini, answers: activityAnswers(["research"]) });
+        Object.assign(h.ctx.model, { id, ...descriptor });
+        await assert.rejects(h.run({ action: "switch_effort", ...(classified ? {} : { activities: ["research"] }) }),
+          /research policy xhigh resolves to high.*gemini_native_max_high.*unsupported Gemini research mapping/);
+        assert.deepEqual(h.efforts, []);
+        assert.equal(h.getThinking(), "medium");
+        assert.equal(h.selected.length, 0);
+      }
+    }
+  }
+});
+
+test("Gemini research accepts native high identities and still explicitly resolves any xhigh alias", async () => {
+  for (const id of geminiResearchModels) {
+    for (const thinkingLevelMap of [undefined, {}, { high: "high" }, { high: "HIGH" }, { xhigh: "high" }]) {
+      const h = setup({ config: profiles.gemini });
+      Object.assign(h.ctx.model, { id, thinkingLevelMap });
+      const { details } = await h.run({ action: "switch_effort", activities: ["research"] });
+      assert.equal(details.policyEffort, "xhigh");
+      assert.equal(details.requiredEffort, "high");
+      assert.equal(details.actualEffort, "high");
+      assert.deepEqual(h.efforts, ["high"]);
+    }
+  }
+});
+
+test("Gemini research requires exact high Pi readback and logs any mismatch", async () => {
+  for (const id of geminiResearchModels) {
+    for (const actual of ["medium", "off", "xhigh"]) {
+      const h = setup({ config: profiles.gemini, clampEffort: () => actual });
+      h.ctx.model.id = id;
+      await assert.rejects(h.run({ action: "switch_effort", activities: ["research"] }),
+        new RegExp(`requires high, actual ${actual} on google/${id}; policy xhigh, mapping gemini_native_max_high`));
+      assert.deepEqual(h.efforts, ["high"]);
+      assert.equal(h.getThinking(), actual);
+      assert.equal(h.selected.length, 0);
+      const decision = JSON.parse(h.logs.at(-1).data.split("\n").find((line: string) => line.startsWith("{"))!);
+      assert.equal(decision.policyEffort, "xhigh");
+      assert.equal(decision.requiredEffort, "high");
+      assert.equal(decision.requestedEffort, "high");
+      assert.equal(decision.actualEffort, actual);
+      assert.equal(decision.mappingReason, "gemini_native_max_high");
+      assert.equal(decision.error, "unsupported effort");
+    }
   }
 });
 
@@ -557,14 +683,33 @@ test("policy results rendering and logs expose activity and exact applied effort
   const d = result.details;
   assert.deepEqual(plain(d.activities), ["debugging"]);
   assert.equal(d.policy, "performance_or_debugging");
+  assert.equal(d.policyEffort, "high");
   assert.equal(d.requiredEffort, "high");
   assert.equal(d.actualEffort, "high");
+  assert.equal(d.mappingReason, null);
   const theme = { fg: (_color: string, text: string) => text };
   assert.equal(h.tool.renderResult(result, { isPartial: false }, theme).text,
-    `Jev effort: high → high (changed; model unchanged: ${d.model})`);
-  assert.match(result.content[0].text, /requested high, actual high/);
+    `Jev effort: policy high, required high, requested high, applied Pi high (changed; model unchanged: ${d.model})`);
+  assert.match(result.content[0].text, /policy high, required high, requested high, applied Pi high/);
   assert.deepEqual(JSON.parse(h.logs.at(-1).data.split("\n").find((line: string) => line.startsWith("{"))!),
     { ...plain(d), role: "deep-worker" });
+});
+
+test("Gemini results and rendering distinguish policy intent, applied Pi level, and mapping reason", async () => {
+  const h = setup({ config: profiles.gemini });
+  const result = await h.run({ action: "switch_effort", role: "researcher", activities: ["research"] });
+  const theme = { fg: (_color: string, text: string) => text };
+  const expected = `Jev effort: policy xhigh, required high, requested high, applied Pi high ` +
+    `(changed; model unchanged: ${result.details.model}; mapping: gemini_native_max_high)`;
+  assert.equal(h.tool.renderResult(result, { isPartial: false }, theme).text, expected);
+  assert.ok(result.content[0].text.startsWith(expected));
+  assert.deepEqual(JSON.parse(h.logs.at(-1).data.split("\n").find((line: string) => line.startsWith("{"))!),
+    { ...plain(result.details), role: "researcher" });
+  const legacy = { details: { action: "switch_effort", requestedEffort: "xhigh", actualEffort: "xhigh",
+    model: "openai-codex/gpt-6.1-sol", changed: false } };
+  assert.equal(h.tool.renderResult(legacy, { isPartial: false }, theme).text,
+    "Jev effort: requested xhigh, applied Pi xhigh " +
+    "(unchanged; model unchanged: openai-codex/gpt-6.1-sol)");
 });
 
 test("switch_effort is independent of lane mappings, model registry, and context window", async () => {
@@ -583,7 +728,11 @@ test("recommend registry, authentication and image guards remain enforced", asyn
   for (const [mutate, error] of [
     [(h: any) => { h.ctx.modelRegistry.find = () => undefined; }, /model not registered/],
     [(h: any) => { h.ctx.modelRegistry.getAvailable = () => []; }, /no configured authentication/],
-    [(h: any) => { h.models[2].input = ["text"]; }, /does not support images/],
+    [(h: any) => {
+      // Several lanes may share one registry model (Codex CHEAP/FRONTIER).
+      const { provider, id } = h.config.FRONTIER;
+      h.ctx.modelRegistry.find(provider, id).input = ["text"];
+    }, /does not support images/],
   ] as const) {
     const h = setup();
     mutate(h);
@@ -697,7 +846,7 @@ test("explicit activity path preserves cancellation, model/session guards and se
 
 test("tracked profiles preserve router tool and effective extension access for all native subagent roles", () => {
   for (const [name, home] of [["bedrock", "/Users/javier.cabrera"], ["codex", "/Users/javcab"],
-    ["cloud", "/root"]]) {
+    ["cloud", "/root"], ["gemini", "/Users/javier.cabrera"]]) {
     const { subagents } = readConfig(join("profiles", name, "settings.json"));
     const router = `${home}/.pi/agent/extensions/pi-typesafe-router.ts`;
     assert.ok(subagents.defaultSubagentOnlyExtensions.includes(router), `${name}: default router extension`);
@@ -713,7 +862,7 @@ test("tracked profiles preserve router tool and effective extension access for a
 });
 
 test("every profile reapplies medium startup effort without changing its other configuration", () => {
-  for (const name of ["codex", "cloud", "openai", "plain", "bedrock", "bedrock-sonnet"]) {
+  for (const name of ["codex", "cloud", "openai", "plain", "bedrock", "bedrock-sonnet", "gemini"]) {
     const dir = mkdtempSync(join(tmpdir(), "effort-default-profile-"));
     try {
       mkdirSync(join(dir, "profiles", name), { recursive: true });
@@ -791,6 +940,56 @@ test("Codex reapplication restores configured model pins while keeping task-loca
   }
 });
 
+test("Gemini reapplication restores its own models, router, and MCP without replacing auth or instructions", () => {
+  const dir = mkdtempSync(join(tmpdir(), "gemini-routing-profile-"));
+  try {
+    mkdirSync(join(dir, "profiles", "gemini"), { recursive: true });
+    copyFileSync(join(root, "profile.sh"), join(dir, "profile.sh"));
+    const profileFiles = ["settings.json", "models-router.json", "mcp.json"];
+    for (const file of profileFiles) {
+      copyFileSync(join(root, "profiles", "gemini", file), join(dir, "profiles", "gemini", file));
+    }
+    writeFileSync(join(dir, "settings.json"), JSON.stringify(readConfig("profiles/codex/settings.json")));
+    writeFileSync(join(dir, "models-router.json"), JSON.stringify(profiles.codex));
+    writeFileSync(join(dir, "mcp.json"), '{"mcpServers":{"stale":{}}}\n');
+    writeFileSync(join(dir, "AGENTS.md"), "existing instructions\n");
+    writeFileSync(join(dir, "auth.json"), "local auth sentinel\n");
+    writeFileSync(join(dir, "models.json"), "existing model overrides\n");
+
+    execFileSync("bash", [join(dir, "profile.sh"), "gemini"], { cwd: dir, stdio: "pipe" });
+
+    const applied = JSON.parse(readFileSync(join(dir, "settings.json"), "utf8"));
+    assert.equal(applied.defaultProvider, "google");
+    assert.equal(applied.defaultModel, "gemini-3.8-flash");
+    assert.equal(applied.subagents.defaultProvider, "google");
+    assert.equal(applied.subagents.defaultModel, "gemini-3.8-flash");
+    const expected = {
+      oracle: "gemini-3.1-pro-preview", reviewer: "gemini-3.1-pro-preview",
+      worker: "gemini-3.1-flash-lite", scout: "gemini-3.1-flash-lite", delegate: "gemini-3.1-flash-lite",
+      researcher: "gemini-3.8-flash", "evidence-auditor": "gemini-3.8-flash",
+    };
+    for (const [role, model] of Object.entries(expected)) {
+      assert.equal(applied.subagents.agentOverrides[role].model ?? applied.subagents.defaultModel, model, role);
+      assert.ok(applied.subagents.agentOverrides[role].tools.includes("jev_route"), `${role}: effort tool`);
+    }
+    const router = JSON.parse(readFileSync(join(dir, "models-router.json"), "utf8"));
+    assert.deepEqual([router.LOCAL, router.CHEAP, router.FRONTIER], [
+      { provider: "google", id: "gemini-3.1-flash-lite" },
+      { provider: "google", id: "gemini-3.8-flash" },
+      { provider: "google", id: "gemini-3.1-pro-preview" },
+    ]);
+    for (const file of profileFiles) {
+      assert.equal(readFileSync(join(dir, file), "utf8"),
+        readFileSync(join(root, "profiles", "gemini", file), "utf8"), `${file}: complete overlay`);
+    }
+    assert.equal(readFileSync(join(dir, "AGENTS.md"), "utf8"), "existing instructions\n");
+    assert.equal(readFileSync(join(dir, "auth.json"), "utf8"), "local auth sentinel\n");
+    assert.equal(readFileSync(join(dir, "models.json"), "utf8"), "existing model overrides\n");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("profile.sh preserves each tracked router config when applying profiles", () => {
   const dir = mkdtempSync(join(tmpdir(), "typesafe-router-profile-"));
   try {
@@ -799,7 +998,7 @@ test("profile.sh preserves each tracked router config when applying profiles", (
       mkdirSync(join(dir, "profiles", name), { recursive: true });
       copyFileSync(join(root, "profiles", name, "models-router.json"), join(dir, "profiles", name, "models-router.json"));
     }
-    for (const name of ["codex", "bedrock", "codex"]) {
+    for (const name of ["codex", "bedrock", "gemini", "codex"]) {
       execFileSync("bash", [join(dir, "profile.sh"), name]);
       assert.deepEqual(JSON.parse(readFileSync(join(dir, "models-router.json"), "utf8")), profiles[name]);
     }

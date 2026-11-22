@@ -107,13 +107,21 @@ orchestrates and integrates.
   a mixed assignment merely because it also involves reading files.
 - `switch_effort` enforces this policy for the current model:
 
-  | Actual activity | Required effort |
-  | --- | --- |
-  | Research, on any model | `xhigh` |
-  | Performance or debugging checks, on any model | `high` |
-  | Exploration on Astra | `low` |
-  | Exploration on Sol, Luna, or another model | `medium` |
-  | Everything else | `medium` |
+  | Actual activity | Policy effort | Required Pi effort |
+  | --- | --- | --- |
+  | Research, on the three Google models below | `xhigh` | `high` |
+  | Research, on other models | `xhigh` | `xhigh` |
+  | Performance or debugging checks, on any model | `high` | `high` |
+  | Exploration on Astra | `low` | `low` |
+  | Exploration on Sol, Luna, or another model | `medium` | `medium` |
+  | Everything else | `medium` | `medium` |
+
+  The research exception is limited to provider `google` with exact IDs
+  `gemini-3.8-flash`, `gemini-3.1-flash-lite`, and `gemini-3.1-pro-preview`, whose
+  highest native level is `high`. It reports `gemini_native_max_high` as the
+  mapping reason and requires reasoning enabled with no disabled or contradictory
+  `thinkingLevelMap.high`. Unknown models and other providers retain `xhigh`.
+  This translation does not imply equal reasoning budgets across providers.
 
   Mixed assignments use research first, then performance/debugging, then
   exploration, then default. Performance/debugging includes tracking multiple
@@ -123,11 +131,14 @@ orchestrates and integrates.
   `defaultThinking` and enabled role `thinking` to `medium`, overriding bundled
   role defaults. These are startup values; call `switch_effort` for the actual
   assignment before work. A role name alone does not determine effort.
-- The tool reads back actual effort after applying the required value. A clamp
-  or unsupported level is an error, including research below `xhigh`; report
-  the required/actual levels and stop that assignment until resolved. Do not
-  silently downgrade or switch models. The tool never changes models, other
-  sessions, tools, permissions, or global settings.
+- The tool reports generic `policyEffort`, resolved `requiredEffort`, the actual
+  setter target `requestedEffort`, Pi readback `actualEffort`, and `mappingReason`.
+  Readback must exactly match the resolved target; a clamp or unsupported level
+  is an error. Research must read back `high` for the three configured Google
+  models and `xhigh` elsewhere. Report a mismatch and stop that assignment until
+  resolved. Pi readback is session state, not provider acknowledgement or proof
+  of executed reasoning. Do not silently downgrade or switch models. The tool
+  never changes models, other sessions, tools, permissions, or global settings.
 - Enforcement applies when `switch_effort` is called. The requirement to call
   it before work remains instruction-based, not a continuous runtime guard.
   The tool description carries that requirement into children even when global
