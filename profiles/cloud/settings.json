@@ -10,7 +10,7 @@
   ],
   "defaultModel": "gpt-6.1-sol",
   "defaultProvider": "openai-codex",
-  "defaultThinkingLevel": "high",
+  "defaultThinkingLevel": "medium",
   "subagents": {
     "projectRootResolution": "git-root",
     "defaultModel": "gpt-6.1-sol",
@@ -47,7 +47,8 @@
           "/root/.pi/agent/extensions/subagent-only/hippocampus-readonly.ts",
           "/root/.pi/agent/extensions/subagent-only/mem0-fallback.ts",
           "/root/.pi/agent/npm/node_modules/@vndv/pi-codegraph/extensions/codegraph.ts"
-        ]
+        ],
+        "thinking": "medium"
       },
       "delegate": {
         "model": "gpt-6-luna",
@@ -77,7 +78,8 @@
           "/root/.pi/agent/extensions/subagent-only/hippocampus-readonly.ts",
           "/root/.pi/agent/extensions/subagent-only/mem0-fallback.ts",
           "/root/.pi/agent/npm/node_modules/@vndv/pi-codegraph/extensions/codegraph.ts"
-        ]
+        ],
+        "thinking": "medium"
       },
       "researcher": {
         "model": "gpt-6.1-sol",
@@ -91,7 +93,8 @@
           "ketch_docs",
           "ketch_crawl",
           "mem0_memory"
-        ]
+        ],
+        "thinking": "medium"
       },
       "worker": {
         "model": "gpt-6-luna",
@@ -121,7 +124,8 @@
           "/root/.pi/agent/extensions/subagent-only/hippocampus-readonly.ts",
           "/root/.pi/agent/extensions/subagent-only/mem0-fallback.ts",
           "/root/.pi/agent/npm/node_modules/@vndv/pi-codegraph/extensions/codegraph.ts"
-        ]
+        ],
+        "thinking": "medium"
       },
       "scout": {
         "model": "gpt-6-luna",
@@ -150,7 +154,8 @@
           "/root/.pi/agent/extensions/subagent-only/hippocampus-readonly.ts",
           "/root/.pi/agent/extensions/subagent-only/mem0-fallback.ts",
           "/root/.pi/agent/npm/node_modules/@vndv/pi-codegraph/extensions/codegraph.ts"
-        ]
+        ],
+        "thinking": "medium"
       },
       "reviewer": {
         "model": "gpt-6-astra",
@@ -178,7 +183,8 @@
           "/root/.pi/agent/extensions/subagent-only/hippocampus-readonly.ts",
           "/root/.pi/agent/extensions/subagent-only/mem0-fallback.ts",
           "/root/.pi/agent/npm/node_modules/@vndv/pi-codegraph/extensions/codegraph.ts"
-        ]
+        ],
+        "thinking": "medium"
       },
       "deep-worker": {
         "model": "gpt-6-astra",
@@ -208,7 +214,8 @@
           "/root/.pi/agent/extensions/subagent-only/hippocampus-readonly.ts",
           "/root/.pi/agent/extensions/subagent-only/mem0-fallback.ts",
           "/root/.pi/agent/npm/node_modules/@vndv/pi-codegraph/extensions/codegraph.ts"
-        ]
+        ],
+        "thinking": "medium"
       },
       "evidence-auditor": {
         "tools": [
@@ -220,7 +227,8 @@
           "ketch_docs",
           "ketch_crawl",
           "mem0_memory"
-        ]
+        ],
+        "thinking": "medium"
       }
     },
     "defaultSubagentOnlyExtensions": [
@@ -228,7 +236,8 @@
       "/root/.pi/agent/extensions/prompt-logger.ts",
       "/root/.pi/agent/extensions/subagent-only/hippocampus-readonly.ts",
       "/root/.pi/agent/extensions/subagent-only/mem0-fallback.ts"
-    ]
+    ],
+    "defaultThinking": "medium"
   },
   "hippocampus": {
     "enabled": true,

@@ -48,7 +48,7 @@
           "/Users/javcab/.pi/agent/extensions/subagent-only/mem0-fallback.ts",
           "/Users/javcab/.pi/agent/npm/node_modules/@vndv/pi-codegraph/extensions/codegraph.ts"
         ],
-        "thinking": "high",
+        "thinking": "medium",
         "fast": false
       },
       "delegate": {
@@ -80,7 +80,7 @@
           "/Users/javcab/.pi/agent/extensions/subagent-only/mem0-fallback.ts",
           "/Users/javcab/.pi/agent/npm/node_modules/@vndv/pi-codegraph/extensions/codegraph.ts"
         ],
-        "thinking": "low",
+        "thinking": "medium",
         "fast": false
       },
       "researcher": {
@@ -159,7 +159,7 @@
           "/Users/javcab/.pi/agent/extensions/subagent-only/mem0-fallback.ts",
           "/Users/javcab/.pi/agent/npm/node_modules/@vndv/pi-codegraph/extensions/codegraph.ts"
         ],
-        "thinking": "low",
+        "thinking": "medium",
         "fast": false
       },
       "reviewer": {
@@ -189,7 +189,7 @@
           "/Users/javcab/.pi/agent/extensions/subagent-only/mem0-fallback.ts",
           "/Users/javcab/.pi/agent/npm/node_modules/@vndv/pi-codegraph/extensions/codegraph.ts"
         ],
-        "thinking": "high",
+        "thinking": "medium",
         "fast": false
       },
       "evidence-auditor": {

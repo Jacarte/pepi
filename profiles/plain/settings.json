@@ -11,7 +11,7 @@
   ],
   "defaultModel": "bedrock-claude-sonnet-5-5",
   "defaultProvider": "litellm",
-  "defaultThinkingLevel": "high",
+  "defaultThinkingLevel": "medium",
   "hippocampus": {
     "enabled": true,
     "baseUrl": "http://localhost:8000",

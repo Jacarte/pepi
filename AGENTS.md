@@ -92,47 +92,65 @@ orchestrates and integrates.
 - Choose models explicitly for the actual assignment, following operator scope
   and the active profile. Jev model advice is optional: `jev_route` action
   `recommend` returns advice, not authority to replace a profile pin or switch
-  the parent. Operator/profile choices take precedence over the generic tool
-  description hint to pass its returned model when launching. Do not
-  automatically pass its returned model to a child.
+  the parent. Treat the returned model as a proposal; adopt it only when it fits
+  the authorized assignment. Never automatically pass it to later children.
 - Before substantive work, the parent and **every subagent role** MUST call
   `jev_route` with action `switch_effort` for its own assignment, passing its
   own `role`, actual task, relevant context, and file paths. This includes
   scout, worker, deep-worker, reviewer, oracle, researcher, evidence-auditor,
   and delegate. A parent's effort call does not replace the child's own call.
-- Classify the reasoning the assignment actually needs. Reading a known file or
-  exploring a bounded code path does not inherit the whole project's risk or
-  require high effort merely because later implementation may be consequential.
-  Supply enough relevant evidence for the assignment without copying unrelated
-  project history. Higher effort is not automatically more useful.
-- `switch_effort` makes a separate Jev request with a thinking-effort question,
-  not the model-lane or blast-radius questions. Pi clamps the requested level
-  to the current model's capabilities and reports requested/actual effort and
-  whether it changed. It never changes a model, another session, tools, role,
-  or permissions. It does not write global model or thinking defaults.
-- This is mandatory instruction-based effort policy, **not a runtime blocking
-  gate**. The tool description carries it into children even when global
-  `AGENTS.md` is not inherited. Each role must load the router extension and
-  allow `jev_route`; inherited tool and extension restrictions still apply.
-- For the Codex profile, use these model/initial-effort defaults:
+- Supply all applicable `activities`: `exploration`, `research`, `performance`,
+  `debugging`, or `default`. These describe the actual assignment, not its role
+  or the whole project's risk. If uncertain, omit `activities` and let Jev
+  classify the supplied task/context. Explicit activities apply the policy
+  locally without a classifier request. Do not omit research or debugging from
+  a mixed assignment merely because it also involves reading files.
+- `switch_effort` enforces this policy for the current model:
 
-  | Assignment | Model | Initial effort |
-  | --- | --- | --- |
-  | Parent and unpinned subagents | `gpt-6.1-sol` | medium |
-  | Regular worker | `gpt-6.1-sol` | medium |
-  | Reviewer or oracle judgment | `gpt-6.1-sol` | high |
-  | Researcher or evidence-auditor | `gpt-6.1-sol` | medium |
-  | Bounded scout or delegate | `gpt-6-luna` | low |
-  | Mechanical writer | explicit `openai-codex/gpt-6-luna:low` | low |
-  | Exploratory or coupled discovery when needed | explicit `openai-codex/gpt-6.1-sol:medium` | medium |
+  | Actual activity | Required effort |
+  | --- | --- |
+  | Research, on any model | `xhigh` |
+  | Performance or debugging checks, on any model | `high` |
+  | Exploration on Astra | `low` |
+  | Exploration on Sol, Luna, or another model | `medium` |
+  | Everything else | `medium` |
+
+  Mixed assignments use research first, then performance/debugging, then
+  exploration, then default. Performance/debugging includes tracking multiple
+  interacting states or hypotheses; retain high effort through that check.
+  A routine read or review is not automatically research or debugging.
+- Every profile starts at `medium`; profiles with subagents also set
+  `defaultThinking` and enabled role `thinking` to `medium`, overriding bundled
+  role defaults. These are startup values; call `switch_effort` for the actual
+  assignment before work. A role name alone does not determine effort.
+- The tool reads back actual effort after applying the required value. A clamp
+  or unsupported level is an error, including research below `xhigh`; report
+  the required/actual levels and stop that assignment until resolved. Do not
+  silently downgrade or switch models. The tool never changes models, other
+  sessions, tools, permissions, or global settings.
+- Enforcement applies when `switch_effort` is called. The requirement to call
+  it before work remains instruction-based, not a continuous runtime guard.
+  The tool description carries that requirement into children even when global
+  `AGENTS.md` is not inherited. Keep the router extension and `jev_route`
+  available subject to inherited capability restrictions.
+- For the Codex profile, keep these model defaults:
+
+  | Assignment | Model |
+  | --- | --- |
+  | Parent and unpinned subagents | `gpt-6.1-sol` |
+  | Regular worker, reviewer, or oracle | `gpt-6.1-sol` |
+  | Researcher or evidence-auditor | `gpt-6.1-sol` |
+  | Bounded scout or delegate | `gpt-6-luna` |
+  | Mechanical writer | explicit `openai-codex/gpt-6-luna:medium` |
+  | Exploratory or coupled discovery when needed | explicit `openai-codex/gpt-6.1-sol:medium` |
 
   Other profiles own their model defaults; do not impose Codex IDs on them.
   Codex native roles set `fast: false` for standard child service by default;
   an explicit per-run `fast: true` overrides that setting. This does not
   establish the parent service tier.
-  Role `thinking` settings establish initial effort; `switch_effort` may adjust
-  the calling session for its actual task. For one launch, use a supported model
-  suffix such as `:low`, `:medium`, or `:high`; dispatch `thinking` is ignored.
+  For one launch, an effort suffix can match the policy (`:low`, `:medium`,
+  `:high`, or `:xhigh`); dispatch `thinking` is ignored. A suffix does not
+  replace the mandatory task-local `switch_effort` call.
 - In newly written Codex workflows, include the full provider/model on each
   child launch, including reviewers. Select it anew for that assignment; do not
   copy the last child's model or use a mutable shared "current model". Existing

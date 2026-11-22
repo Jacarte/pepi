@@ -121,27 +121,31 @@ LiteLLM is specific to Bedrock here; it is not required by every profile.
 ### Model settings
 
 Model names below are configured IDs, not a guarantee of provider availability.
-Both profiles use subagent project-root resolution `git-root`. Codex starts the
-parent at `medium` thinking; Bedrock keeps its profile-owned `high` default.
+All six tracked profiles (`codex`, `cloud`, `openai`, `bedrock`, `bedrock-sonnet`,
+and `plain`) set parent startup thinking to `medium`. Profiles with subagents
+also set `defaultThinking` and each enabled role's `thinking` to `medium`, so
+bundled role defaults cannot retain an old high/low setting. The plain profile
+still has no subagent configuration. Task-specific effort is applied separately.
+Codex and Bedrock use subagent project-root resolution `git-root`.
 
 | Setting / agent | Codex model (`openai-codex`) | Codex initial effort | Bedrock model (`litellm`) |
 |---|---|---|---|
 | Main default | `gpt-6.1-sol` | medium | `bedrock-claude-sonnet-5-5` |
 | Subagent default | `gpt-6.1-sol` | medium when no role effort is set | `bedrock-claude-sonnet-5-5` |
 | `worker` | `gpt-6.1-sol` | medium | `bedrock-claude-haiku-4-5` |
-| `oracle`, `reviewer` | `gpt-6.1-sol` | high | `bedrock-claude-opus-5-5` |
-| `scout` | `gpt-6-luna` | low | `bedrock-claude-haiku-4-5` |
-| `delegate` | `gpt-6-luna` | low | inherits subagent default |
+| `oracle`, `reviewer` | `gpt-6.1-sol` | medium | `bedrock-claude-opus-5-5` |
+| `scout` | `gpt-6-luna` | medium | `bedrock-claude-haiku-4-5` |
+| `delegate` | `gpt-6-luna` | medium | inherits subagent default |
 | `researcher`, `evidence-auditor` | `gpt-6.1-sol` | medium | inherits subagent default |
 | `claude-code`, `claude-code-writer` | disabled | — | disabled |
 
 Codex role `thinking` settings establish the listed initial effort; task-local
-`switch_effort` can adjust it. A bounded mechanical writer can launch with
-`model: "openai-codex/gpt-6-luna:low"`; exploratory or coupled discovery can use
+`switch_effort` enforces the activity policy below. A mechanical writer can use
+`model: "openai-codex/gpt-6-luna:medium"`; exploratory or coupled discovery can use
 `model: "openai-codex/gpt-6.1-sol:medium"` when needed. Regular implementation
 stays on Sol. Per-run model overrides take precedence over role pins, so use
 explicit models deliberately. For one launch, put effort in the model suffix
-(`:low`, `:medium`, `:high`): the dispatch `thinking` field is ignored by pinned
+(`:low`, `:medium`, `:high`, `:xhigh`): the dispatch `thinking` field is ignored by pinned
 `pi-subagents@0.78.0`. Role-level `thinking` is supported. See the pinned
 [model settings](https://github.com/nicobailon/pi-subagents/blob/v0.78.0/docs/models.md)
 and [dispatch reference](https://github.com/nicobailon/pi-subagents/blob/v0.78.0/docs/tool-reference.md).
@@ -152,14 +156,14 @@ failed worker does not authorize later Astra launches. In Codex, keep the parent
 on Sol 6.1 and make exceptions per launch without writing global defaults. Other
 profiles retain their own model choices.
 
-After changing tracked Codex settings, run `./profile.sh codex` and start a fresh
-Pi session so startup defaults apply; a resumed session may keep its selected
-model. Check `/subagents-models` to inspect the live role mapping. Codex native
+After changing tracked settings, run `./profile.sh <profile>` (for example,
+`./profile.sh codex`) and start a fresh Pi session so startup defaults apply;
+a resumed session may retain its previous model or effort. Check
+`/subagents-models` to inspect the live role mapping. Codex native
 roles explicitly set `fast: false`, choosing standard child service by default.
 A per-run `fast: true` can override this and requests priority service. These
-child settings make no claim about the parent service tier. This configuration
-and instruction trial does not enforce a runtime
-model scope; authorized task-local Astra remains possible.
+child settings make no claim about the parent service tier. Model selection is
+not a runtime allowlist; authorized task-local Astra remains possible.
 
 `models-router.json` is a separate mapping for the local `jev_route` tool:
 
@@ -198,31 +202,63 @@ The Bedrock router's `LOCAL` ID differs from the worker/scout override. Both rou
 files also contain `HUMAN`, which the extension deliberately ignores; routing is
 not approval.
 
-`jev_route` action `switch_effort` makes another Jev call with a separate `effort`
-Choice question about the supplied task/role/context/files. It does not reuse the
-lane decision or read `models-router.json`. Jev selects `off`, `minimal`, `low`,
-`medium`, `high`, `xhigh`, or `max`; Pi's `setThinkingLevel` clamps that request to
-the current model's supported levels (non-reasoning models use `off`). The tool
-reads back and reports `requestedEffort`, `actualEffort`, and `changed`. It never
-switches models. Stale session/model decisions and invalid responses fail explicitly.
+`recommend` returns a **model proposal**. It never changes the caller's model or
+effort and does not require adopting the returned ID. The lane rules above shape
+that proposal; they do not authorize overriding a profile pin or launching Astra.
+The parent chooses a model within the assignment's authorization. A failed
+attempt calls for evidence and a corrected brief or explicit task-local choice,
+with no automatic FRONTIER retry.
 
-Before substantive work, the native Pi parent and every native Pi subagent role
-must call `switch_effort` for their own actual assignment. A parent's call does
-not replace the child's. Classify the reasoning required for that assignment:
-a known-file read or bounded code exploration does not inherit the entire
-project's implementation risk. Higher effort is not automatically more useful.
-This is instruction-based policy, not runtime blocking. The requirement is also
-in the tool description because children may not inherit global `AGENTS.md`.
+### Effort policy
 
-`recommend` is optional advisory model advice. Operator/profile choices take
-precedence over the tool description's generic hint to pass its returned model
-when launching. Its lane escalation rules above describe the tool's result;
-they do not authorize changing a session, replacing a
-profile pin, or automatically launching Astra. The parent chooses an authorized
-model for each task. A failed attempt calls for evidence of the missing
-capability and a corrected brief or explicit task-local choice, with no automatic
-FRONTIER retry. Reclassify effort or seek advice only when the assignment or
-evidence changes materially, and report classification failures.
+Before substantive work, the native Pi parent and every native Pi child must call
+`jev_route` with `action: "switch_effort"` for its own assignment. The tool applies
+a fixed policy, rather than asking Jev to choose an arbitrary effort level:
+
+| Activity | Astra | Sol / Luna | Other models |
+|---|---|---|---|
+| Research | `xhigh` | `xhigh` | `xhigh` |
+| Performance or debugging checks | `high` | `high` | `high` |
+| Exploration / known-file reading | `low` | `medium` | `medium` |
+| Everything else | `medium` | `medium` | `medium` |
+
+For mixed tasks, research wins over performance/debugging, which wins over
+exploration, then default. Performance/debugging checks retain high effort while
+tracking interacting states or hypotheses. Routine acceptance checks and ordinary
+reviews use medium unless their actual assignment includes one of those activities.
+
+Pass all applicable `activities` explicitly to apply the policy locally without a
+Jev request or API key. For example, a bounded code lookup can call the tool with:
+
+```json
+{
+  "action": "switch_effort",
+  "role": "scout",
+  "task": "Read the named entry point and identify its direct callers.",
+  "activities": ["exploration"]
+}
+```
+
+Allowed tags are `exploration`, `research`, `performance`, `debugging`, and
+`default`. Describe the actual task; role names and the surrounding project's
+risk do not determine its activity. Include research or debugging tags even when
+those tasks also involve file reading. When `activities` is omitted, existing
+callers still work: Jev classifies activities from the supplied task/context using
+separate yes/no Choice questions, then the same local policy selects effort.
+Invalid tags or classifier responses fail explicitly.
+
+The tool reads back the applied effort and reports `requestedEffort`,
+`actualEffort`, and whether it changed. Success requires an exact match. If Pi
+clamps an unsupported level (for example, research `xhigh` to `high` or `off`), the
+tool errors with the required and actual levels; the caller must stop that
+assignment and report the mismatch. It does not silently downgrade research or
+switch to another model. The reported actual effort may remain applied after an
+error. Cancellation and stale session/model decisions also fail explicitly.
+
+The effort mapping is enforced inside the tool. Calling it before work remains
+an instruction requirement, carried in the tool description for children that do
+not inherit global `AGENTS.md`; it is not a continuous guard against later manual
+effort changes. Reapply it when the actual assignment changes materially.
 
 The tracked Bedrock, Codex, and Cloud profiles preserve router availability for
 all native Pi subagent roles through `jev_route` allowlists and explicit/default
@@ -248,7 +284,7 @@ an ordinary review can use these options with complete, bounded task briefs:
 ```js
 const edit = await runs.run("mechanical-edit", {
   agent: "worker",
-  model: "openai-codex/gpt-6-luna:low",
+  model: "openai-codex/gpt-6-luna:medium",
   context: "fresh",
   task: mechanicalTask
 });
@@ -256,7 +292,7 @@ if (!edit.ok) return { edit };
 
 const review = await runs.run("review-edit", {
   agent: "reviewer",
-  model: "openai-codex/gpt-6.1-sol:high",
+  model: "openai-codex/gpt-6.1-sol:medium",
   context: "fresh",
   task: reviewTask
 });
@@ -310,7 +346,7 @@ Local TypeScript extension entry points are tracked under `extensions/`:
 | `extensions/codex-usage-bar.ts` | Codex usage-window status via `codex app-server`; requires the Codex CLI for that status query |
 | `extensions/litellm-budget.ts` | LiteLLM spend status and `/budget` |
 | `extensions/hippocampus.ts` | Project-scoped recall and durable completed-work capture through `mem0_memory`; children load `extensions/subagent-only/hippocampus-readonly.ts` |
-| `extensions/pi-typesafe-router.ts` | `jev_route`: model recommendation using `models-router.json`, or separate thinking-effort classification/application without changing models; calls `https://api.typesafe.ai/v1/systemone` with `TYPESAFE_API_KEY` (`JEV_MODEL` optionally selects classifier) |
+| `extensions/pi-typesafe-router.ts` | `jev_route`: advisory model proposals using `models-router.json` and a fixed activity-to-effort policy without changing models. Explicit activities apply locally; model proposals or omitted-activity classification call `https://api.typesafe.ai/v1/systemone` with `TYPESAFE_API_KEY` (`JEV_MODEL` optionally selects classifier) |
 | `extensions/prompt-logger.ts` | Provider-request JSONL logging, including prompts/messages/tools; defaults to `logs/prompts.jsonl`. Disable with `PROMPT_LOG=0`, override with `PROMPT_LOG_FILE` |
 | `extensions/top-status.ts` | Status widget above the editor and `/topbar` layout toggle |
 

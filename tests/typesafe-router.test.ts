@@ -21,9 +21,8 @@ const configFiles = {
 const lanes = ["LOCAL", "CHEAP", "FRONTIER"];
 const laneOptions = ["local", "cheap", "frontier"];
 const blastRadiusOptions = ["contained", "cross_cutting", "critical"];
-const effortOptions = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 const roles = ["parent", "scout", "worker", "reviewer", "oracle",
-  "researcher", "evidence-auditor", "delegate"];
+  "researcher", "evidence-auditor", "delegate", "deep-worker"];
 const js = stripTypeScriptTypes(source)
   .replace(/^import .* from ".*";\s*$/gm, "")
   .replace("export default function", "function register");
@@ -34,7 +33,9 @@ function choice(options: string[], selected: string, confidence = 1) {
 }
 const laneAnswer = (selected: string, confidence = 1) => choice(laneOptions, selected, confidence);
 const blastAnswer = (selected: string, confidence = 1) => choice(blastRadiusOptions, selected, confidence);
-const effortAnswers = (selected: string, confidence = 1) => ({ effort: choice(effortOptions, selected, confidence) });
+const activityNames = ["exploration", "research", "performance", "debugging"];
+const activityAnswers = (activities: string[] = []) => Object.fromEntries(activityNames.map((activity) =>
+  [activity, choice(["yes", "no"], activities.includes(activity) ? "yes" : "no")]));
 // Objects created inside the vm realm have a different Object.prototype.
 const plain = (value: unknown) => JSON.parse(JSON.stringify(value));
 const answersFor = (lane: string, blastRadius = "contained", confidence = 1, blastConfidence = 1) =>
@@ -132,8 +133,8 @@ for (const child of [false, true]) {
     assert.deepEqual(plain(properties.action.args[0].map((literal: any) => literal.args[0])),
       ["recommend", "switch_effort"]);
     assert.deepEqual(Object.keys(properties).sort(),
-      ["action", "context", "files", "requiresImages", "role", "task"]);
-    for (const name of ["context", "files", "requiresImages", "role"]) {
+      ["action", "activities", "context", "files", "requiresImages", "role", "task"]);
+    for (const name of ["activities", "context", "files", "requiresImages", "role"]) {
       assert.equal(properties[name].name, "Optional", name);
     }
     const role = properties.role.args[0];
@@ -363,7 +364,7 @@ test("model mapping validation and HUMAN-ignore behavior remain intact", async (
 test("invalid classifier answers fail explicitly without switching", async () => {
   const invalid: [string, (answers: any) => void, RegExp][] = [];
   for (const [name, options] of [["lane", laneOptions], ["blast_radius", blastRadiusOptions],
-    ["effort", effortOptions]] as const) {
+    ["debugging", ["yes", "no"]]] as const) {
     for (const answer of [undefined, null, [], "local"]) {
       invalid.push([name, (a) => { a[name] = answer; }, new RegExp(`invalid answer for ${name}`)]);
     }
@@ -384,10 +385,10 @@ test("invalid classifier answers fail explicitly without switching", async () =>
       new RegExp(`unexpected probability option for ${name}`)]);
   }
   for (const [name, mutate, error] of invalid) {
-    const answers = name === "effort" ? effortAnswers("high") : answersFor("cheap");
+    const answers = name === "debugging" ? activityAnswers(["debugging"]) : answersFor("cheap");
     mutate(answers);
     const h = setup({ answers });
-    await assert.rejects(h.run({ action: name === "effort" ? "switch_effort" : "recommend" }), error, `${name}: ${error}`);
+    await assert.rejects(h.run({ action: name === "debugging" ? "switch_effort" : "recommend" }), error, `${name}: ${error}`);
     assert.equal(h.selected.length, 0);
     assert.equal(h.efforts.length, 0);
   }
@@ -421,13 +422,13 @@ test("result details, content text and rendering use the Choice contract", async
     jevUsage: { inputTokens: 12, outputTokens: 3 },
   });
   assert.equal(result.content[0].text.split("\n")[0],
-    `Jev decision: CHEAP → ${cheap} (lane local 75%, blast radius cross_cutting, escalated: cross_cutting_floor)`);
+    `Jev proposal: CHEAP → ${cheap} (lane local 75%, blast radius cross_cutting, escalated: cross_cutting_floor)`);
   const theme = { fg: (_color: string, text: string) => text };
   assert.equal(h.tool.renderResult(result, { isPartial: false }, theme).text,
-    `Jev: CHEAP → ${cheap} (recommend; lane local 75%, blast radius cross_cutting, escalated: cross_cutting_floor)`);
+    `Jev proposal: CHEAP → ${cheap} (recommend; lane local 75%, blast radius cross_cutting, escalated: cross_cutting_floor)`);
   const legacy = { details: { action: "recommend", lane: "CHEAP", model: cheap, changed: false,
     scores: { hard: 0.2, trivial: 0.1 } } };
-  assert.equal(h.tool.renderResult(legacy, { isPartial: false }, theme).text, `Jev: CHEAP → ${cheap} (recommend)`);
+  assert.equal(h.tool.renderResult(legacy, { isPartial: false }, theme).text, `Jev proposal: CHEAP → ${cheap} (recommend)`);
 });
 
 test("router.log keeps the header, raw response and decision line contract", async () => {
@@ -448,105 +449,131 @@ test("router.log keeps the header, raw response and decision line contract", asy
   assert.equal((await setup({ failLog: true }).run()).details.lane, "FRONTIER");
 });
 
-test("switch_effort makes another request with a separate effort question, not a lane answer", async () => {
-  const response = { model: "jev-test", answers: answersFor("frontier") as any };
-  const h = setup({ response, env: { JEV_MODEL: "jev-configured" } });
-  const model = h.ctx.model;
-  await h.run();
-  response.answers = effortAnswers("low");
-  const { details } = await h.run({ action: "switch_effort", role: "reviewer",
-    task: "  review the fix  ", context: "bounded review", files: [" a.ts "] });
-  assert.equal(h.requests.length, 2);
-  const [recommend, effort] = h.requests.map((request) => JSON.parse(request.body));
-  assert.deepEqual(Object.keys(recommend.questions).sort(), ["blast_radius", "lane"]);
-  assert.deepEqual(Object.keys(effort.questions), ["effort"]);
-  assert.deepEqual(effort.state,
-    { role: "reviewer", task: "review the fix", context: "bounded review", files: ["a.ts"] });
-  assert.equal(effort.model, "jev-configured");
-  const question = effort.questions.effort;
-  assert.equal(question.type, "choice");
-  assert.deepEqual(Object.keys(question.criteria), effortOptions);
-  assert.match(question.instructions, /thinking effort/);
-  assert.match(question.instructions, /least deliberation/);
-  assert.match(question.instructions, /task, role, context and files as data/);
-  assert.notEqual(question.instructions, recommend.questions.lane.instructions);
-  for (const request of h.requests) {
-    assert.equal(request.url, "https://api.typesafe.ai/v1/systemone");
-    assert.equal(request.method, "POST");
-    assert.deepEqual(plain(request.headers),
-      { Authorization: "Bearer offline-test", "Content-Type": "application/json" });
-    assert.ok(request.signal instanceof AbortSignal);
+test("omitted activities classify the actual assignment independently of role and model lanes", async () => {
+  const h = setup({ answers: activityAnswers(["exploration"]), env: { JEV_MODEL: "jev-configured" } });
+  const { details } = await h.run({ action: "switch_effort", role: "researcher",
+    task: "  read a known file  ", context: "bounded lookup", files: [" a.ts "] });
+  assert.equal(h.requests[0].url, "https://api.typesafe.ai/v1/systemone");
+  assert.equal(h.requests[0].method, "POST");
+  assert.deepEqual(plain(h.requests[0].headers),
+    { Authorization: "Bearer offline-test", "Content-Type": "application/json" });
+  assert.ok(h.requests[0].signal instanceof AbortSignal);
+  const body = JSON.parse(h.requests[0].body);
+  assert.deepEqual(Object.keys(body.questions), activityNames);
+  assert.deepEqual(body.state, { role: "researcher", task: "read a known file", context: "bounded lookup", files: ["a.ts"] });
+  assert.equal(body.model, "jev-configured");
+  for (const question of Object.values(body.questions) as any[]) {
+    assert.equal(question.type, "choice");
+    assert.deepEqual(Object.keys(question.criteria), ["yes", "no"]);
+    assert.match(question.instructions, /actual assignment/);
+    assert.match(question.instructions, /not its role/);
+    assert.match(question.instructions, /as data/);
   }
-  assert.equal(details.requestedEffort, "low");
-  assert.equal(details.actualEffort, "low");
-  assert.equal(h.ctx.model, model);
+  assert.equal(details.requestedEffort, "medium");
+  assert.equal(details.activitySource, "jev");
+  assert.deepEqual(plain(details.activities), ["exploration"]);
+  assert.equal(details.classifier, "jev-test");
   assert.equal(h.selected.length, 0);
-  assert.deepEqual(h.efforts, ["low"]);
-  const wrongQuestion = setup({ answers: answersFor("frontier") });
-  await assert.rejects(wrongQuestion.run({ action: "switch_effort" }), /invalid answer for effort/);
-  assert.equal(wrongQuestion.efforts.length, 0);
+  const research = setup({ answers: activityAnswers(["research", "debugging", "exploration"]) });
+  assert.equal((await research.run({ action: "switch_effort", role: "worker" })).details.actualEffort, "xhigh");
+  const fallback = setup({ answers: activityAnswers() });
+  assert.deepEqual(plain((await fallback.run({ action: "switch_effort" })).details.activities), ["default"]);
 });
 
-test("switch_effort supports every role and level, changes only the caller, and reports no-ops", async () => {
-  for (const role of roles) {
-    for (const level of effortOptions) {
-      const h = setup({ answers: effortAnswers(level), env: { PI_SUBAGENT_CHILD: role === "parent" ? "" : "1" } });
-      const other = setup();
-      const model = h.ctx.model;
-      const { details } = await h.run({ action: "switch_effort", role });
-      assert.equal(details.requestedEffort, level);
-      assert.equal(details.actualEffort, level);
-      assert.equal(details.changed, level !== "medium");
-      assert.equal(h.ctx.model, model);
-      assert.equal(h.selected.length, 0);
-      assert.equal(other.getThinking(), "medium");
-      assert.equal((await h.run({ action: "switch_effort", role })).details.changed, false);
+test("explicit activities enforce the model/activity matrix locally for every role", async () => {
+  for (const id of ["gpt-6-astra", "gpt-6.1-astra", "gpt-6.2-astra-2026-11-22", "gpt-6.1-sol", "gpt-6-luna",
+    "other-astra", "gpt-6-astra-fake", "claude-opus"]) {
+    for (const role of roles) {
+      for (const activity of [...activityNames, "default"]) {
+        const h = setup({ env: { TYPESAFE_API_KEY: "" } });
+        h.ctx.model.id = id;
+        const expected = activity === "research" ? "xhigh"
+          : ["performance", "debugging"].includes(activity) ? "high"
+          : activity === "exploration" && /^gpt-6(?:\.[12])?-astra(?:-2026-11-22)?$/.test(id) ? "low" : "medium";
+        const other = setup();
+        const model = h.ctx.model;
+        const result = await h.run({ action: "switch_effort", role, activities: [activity] });
+        assert.equal(result.details.requiredEffort, expected, `${id} ${role} ${activity}`);
+        assert.equal(result.details.requestedEffort, expected);
+        assert.equal(result.details.actualEffort, expected);
+        assert.equal(result.details.activitySource, "explicit");
+        assert.equal(result.details.classifier, undefined);
+        assert.equal(result.details.changed, expected !== "medium");
+        assert.equal(h.ctx.model, model);
+        assert.equal(h.requests.length, 0);
+        assert.equal(h.selected.length, 0);
+        assert.equal(other.getThinking(), "medium");
+        assert.equal((await h.run({ action: "switch_effort", role, activities: [activity] })).details.changed, false);
+      }
     }
   }
 });
 
-test("effort results, rendering and logs report requested versus effective Pi-clamped effort", async () => {
-  // Pi's verified clamp maps unsupported max/xhigh downward, and unsupported off upward.
-  for (const [requested, actual, previous] of [["max", "high", "medium"],
-    ["xhigh", "high", "high"], ["off", "minimal", "high"]]) {
-    const h = setup({ answers: effortAnswers(requested, 0.75), thinking: previous,
-      clampEffort: () => actual });
-    const result = await h.run({ action: "switch_effort", role: "worker" });
-    const model = `${profiles.codex.LOCAL.provider}/${profiles.codex.LOCAL.id}`;
-    assert.deepEqual(plain(result.details), {
-      action: "switch_effort", model, previousModel: model, currentModel: model,
-      previousEffort: previous, requestedEffort: requested, actualEffort: actual,
-      changed: actual !== previous,
-      effortAnswer: { choice: requested, confidence: 0.75,
-        probabilities: effortAnswers(requested).effort.probabilities },
-      classifier: "jev-test", jevUsage: { inputTokens: 12, outputTokens: 3 },
-    });
-    assert.deepEqual(h.efforts, [requested]); // Pass the Jev choice, not a guessed capability level.
-    assert.equal(h.selected.length, 0);
-    const state = actual !== previous ? "changed" : "unchanged";
-    assert.equal(result.content[0].text.split("\n")[0],
-      `Jev effort: requested ${requested}, actual ${actual} (${state}; model unchanged: ${model})`);
-    const theme = { fg: (_color: string, text: string) => text };
-    assert.equal(h.tool.renderResult(result, { isPartial: false }, theme).text,
-      `Jev effort: ${requested} → ${actual} (${state}; model unchanged: ${model})`);
-    const decisionLine = h.logs[1].data.split("\n").find((line) => line.startsWith("{"))!;
-    assert.deepEqual(JSON.parse(decisionLine), { ...plain(result.details), role: "worker" });
+test("mixed activities use research then performance/debugging then exploration then default", async () => {
+  for (const [activities, expected] of [
+    [["default", "exploration", "debugging", "research"], "xhigh"],
+    [["research", "performance"], "xhigh"], [["exploration", "performance"], "high"],
+    [["debugging", "exploration"], "high"], [["default", "exploration"], "low"],
+  ] as const) {
+    const h = setup(); h.ctx.model.id = "gpt-6-astra";
+    assert.equal((await h.run({ action: "switch_effort", activities })).details.actualEffort, expected);
   }
-  const h = setup({ answers: effortAnswers("max"), thinking: "off" });
-  h.ctx.model.reasoning = false;
-  const { details } = await h.run({ action: "switch_effort" });
-  assert.deepEqual([details.requestedEffort, details.actualEffort, details.changed], ["max", "off", false]);
-  assert.equal(h.requests.length, 1); // Non-reasoning still classifies, then Pi clamps to off.
-  assert.equal(h.selected.length, 0);
+});
+
+test("invalid activity tags and classification answers fail before effort mutation", async () => {
+  for (const activities of [null, "research", [], ["unknown"], ["Research"], ["research", "research"], [null]]) {
+    const h = setup();
+    await assert.rejects(h.run({ action: "switch_effort", activities }), /activities must/);
+    assert.equal(h.requests.length, 0); assert.equal(h.efforts.length, 0);
+  }
+  const recommendation = setup();
+  await assert.rejects(recommendation.run({ activities: ["research"] }), /only supported for switch_effort/);
+  assert.equal(recommendation.requests.length, 0);
+  for (const answers of [answersFor("cheap"), { ...activityAnswers(), research: undefined }]) {
+    const h = setup({ answers });
+    await assert.rejects(h.run({ action: "switch_effort" }), /invalid answer/);
+    assert.equal(h.efforts.length, 0);
+  }
+});
+
+test("every policy rejects unsupported/clamped effort and reports required/actual/model", async () => {
+  for (const [activity, required, actual] of [["research", "xhigh", "high"], ["research", "xhigh", "off"],
+    ["exploration", "low", "medium"], ["debugging", "high", "medium"], ["performance", "high", "xhigh"],
+    ["default", "medium", "minimal"]]) {
+    const h = setup({ clampEffort: () => actual }); h.ctx.model.id = "gpt-6-astra";
+    await assert.rejects(h.run({ action: "switch_effort", activities: [activity] }),
+      new RegExp(`requires ${required}, actual ${actual} on openai-codex/gpt-6-astra`));
+    assert.equal(h.getThinking(), actual); // Accurate current state, no rollback or model fallback.
+    assert.equal(h.selected.length, 0);
+    assert.match(h.logs.at(-1).data, /unsupported effort/);
+  }
+  const h = setup(); h.ctx.model.reasoning = false;
+  await assert.rejects(h.run({ action: "switch_effort", activities: ["research"] }), /requires xhigh, actual off/);
+});
+
+test("policy results rendering and logs expose activity and exact applied effort", async () => {
+  const h = setup();
+  const result = await h.run({ action: "switch_effort", role: "deep-worker", activities: ["debugging"] });
+  const d = result.details;
+  assert.deepEqual(plain(d.activities), ["debugging"]);
+  assert.equal(d.policy, "performance_or_debugging");
+  assert.equal(d.requiredEffort, "high");
+  assert.equal(d.actualEffort, "high");
+  const theme = { fg: (_color: string, text: string) => text };
+  assert.equal(h.tool.renderResult(result, { isPartial: false }, theme).text,
+    `Jev effort: high → high (changed; model unchanged: ${d.model})`);
+  assert.match(result.content[0].text, /requested high, actual high/);
+  assert.deepEqual(JSON.parse(h.logs.at(-1).data.split("\n").find((line: string) => line.startsWith("{"))!),
+    { ...plain(d), role: "deep-worker" });
 });
 
 test("switch_effort is independent of lane mappings, model registry, and context window", async () => {
-  const h = setup({ answers: effortAnswers("high"), rawConfig: "not JSON", failLog: true });
+  const h = setup({ answers: activityAnswers(["debugging"]), rawConfig: "not JSON", failLog: true });
   h.ctx.modelRegistry = { find: () => assert.fail("registry must not be read"),
     getAvailable: () => assert.fail("registry must not be read") };
   h.ctx.getContextUsage = () => assert.fail("effort does not shrink the context window");
   assert.equal((await h.run({ action: "switch_effort" })).details.actualEffort, "high");
-  const noModel = setup({ answers: effortAnswers("low") });
+  const noModel = setup({ answers: activityAnswers(["exploration"]) });
   noModel.ctx.model = undefined;
   await assert.rejects(noModel.run({ action: "switch_effort" }), /no current model/);
   assert.equal(noModel.requests.length, 0);
@@ -588,12 +615,12 @@ test("blank inputs, credentials, HTTP, network, JSON and abort failures do not m
       [{ onFetch: () => { throw new Error("network unavailable"); } }, {}, undefined, /network unavailable/],
       [{ onJson: () => { throw new SyntaxError("bad JSON"); } }, {}, undefined, /bad JSON/],
     ] as const) {
-      const h = setup({ ...options, answers: action === "switch_effort" ? effortAnswers("high") : answersFor("cheap") });
+      const h = setup({ ...options, answers: action === "switch_effort" ? activityAnswers(["debugging"]) : answersFor("cheap") });
       await assert.rejects(h.run({ action, ...params }, signal), error);
       assert.equal(h.selected.length, 0);
       assert.equal(h.efforts.length, 0);
     }
-    const changing = setup({ answers: action === "switch_effort" ? effortAnswers("high") : answersFor("cheap"),
+    const changing = setup({ answers: action === "switch_effort" ? activityAnswers(["debugging"]) : answersFor("cheap"),
       onFetch: (ctx: any) => { ctx.sessionManager.getSessionId = () => "new-session"; } });
     await assert.rejects(changing.run({ action }), /session changed/);
     assert.equal(changing.selected.length, 0);
@@ -609,7 +636,7 @@ test("effort rejects model changes while awaiting the request or response body",
       (ctx: any) => { ctx.model = { ...ctx.model, reasoning: false }; },
       (ctx: any) => { ctx.model = undefined; },
     ]) {
-      const h = setup({ answers: effortAnswers("high"), [stage]: mutate });
+      const h = setup({ answers: activityAnswers(["debugging"]), [stage]: mutate });
       await assert.rejects(h.run({ action: "switch_effort" }), /model changed while classifying/);
       assert.equal(h.selected.length, 0);
       assert.equal(h.efforts.length, 0);
@@ -620,7 +647,7 @@ test("effort rejects model changes while awaiting the request or response body",
 test("effort honors cancellation and the shared timeout even after a response arrives", async () => {
   for (const timedOut of [false, true]) {
     const controller = new AbortController();
-    const h = setup({ answers: effortAnswers("high"),
+    const h = setup({ answers: activityAnswers(["debugging"]),
       onJson: () => controller.abort(new Error(timedOut ? "timeout" : "cancelled")),
       AbortSignal: { any: AbortSignal.any, timeout: (ms: number) => {
         assert.equal(ms, 2_000);
@@ -634,14 +661,38 @@ test("effort honors cancellation and the shared timeout even after a response ar
 });
 
 test("effort setter failures and unexpected model changes never trigger a model switch", async () => {
-  const failure = setup({ answers: effortAnswers("high"), failEffort: true });
+  const failure = setup({ answers: activityAnswers(["debugging"]), failEffort: true });
   await assert.rejects(failure.run({ action: "switch_effort" }), /Pi could not apply effort/);
   assert.equal(failure.getThinking(), "medium");
   assert.equal(failure.selected.length, 0);
-  const changing = setup({ answers: effortAnswers("high"),
+  const changing = setup({ answers: activityAnswers(["debugging"]),
     onSetEffort: (ctx: any) => { ctx.model = { ...ctx.model, id: "external-switch" }; } });
   await assert.rejects(changing.run({ action: "switch_effort" }), /changed while applying effort/);
   assert.equal(changing.selected.length, 0); // Do not attempt to restore a model changed externally.
+});
+
+test("explicit activity path preserves cancellation, model/session guards and setter errors", async () => {
+  const aborted = setup({ env: { TYPESAFE_API_KEY: "" } });
+  await assert.rejects(aborted.run({ action: "switch_effort", activities: ["default"] }, AbortSignal.abort()), /abort/i);
+  assert.equal(aborted.efforts.length, 0); assert.equal(aborted.requests.length, 0);
+  const noModel = setup(); noModel.ctx.model = undefined;
+  await assert.rejects(noModel.run({ action: "switch_effort", activities: ["default"] }), /no current model/);
+  for (const kind of ["session", "model"]) {
+    const h = setup({ onSetEffort: (ctx: any) => {
+      if (kind === "session") ctx.sessionManager.getSessionId = () => "new-session";
+      else ctx.model = { ...ctx.model, id: "another-model" };
+    } });
+    await assert.rejects(h.run({ action: "switch_effort", activities: ["default"] }), /changed while applying/);
+    assert.equal(h.selected.length, 0); assert.equal(h.requests.length, 0);
+  }
+  const failure = setup({ failEffort: true });
+  await assert.rejects(failure.run({ action: "switch_effort", activities: ["default"] }), /could not apply effort/);
+  assert.equal(failure.selected.length, 0);
+  const controller = new AbortController();
+  const cancelDuringSet = setup({ onSetEffort: () => controller.abort(new Error("cancelled during set")) });
+  await assert.rejects(cancelDuringSet.run({ action: "switch_effort", activities: ["default"] }, controller.signal), /cancelled during set/);
+  const logFailure = setup({ failLog: true });
+  assert.equal((await logFailure.run({ action: "switch_effort", activities: ["research"] })).details.actualEffort, "xhigh");
 });
 
 test("tracked profiles preserve router tool and effective extension access for all native subagent roles", () => {
@@ -650,14 +701,46 @@ test("tracked profiles preserve router tool and effective extension access for a
     const { subagents } = readConfig(join("profiles", name, "settings.json"));
     const router = `${home}/.pi/agent/extensions/pi-typesafe-router.ts`;
     assert.ok(subagents.defaultSubagentOnlyExtensions.includes(router), `${name}: default router extension`);
-    for (const role of roles.filter((role) => role !== "parent")) {
-      const override = subagents.agentOverrides[role];
+    for (const [role, override] of Object.entries(subagents.agentOverrides) as [string, any][]) {
+      if (override.disabled) continue;
       const label = `${name}: ${role}`;
       assert.ok(override.tools.includes("jev_route"), `${label}: tool allowlist`);
       // An explicit role extension list replaces, rather than augments, the default.
       const extensions = override.subagentOnlyExtensions ?? subagents.defaultSubagentOnlyExtensions;
       assert.ok(extensions.includes(router), `${label}: effective router extension`);
     }
+  }
+});
+
+test("every profile reapplies medium startup effort without changing its other configuration", () => {
+  for (const name of ["codex", "cloud", "openai", "plain", "bedrock", "bedrock-sonnet"]) {
+    const dir = mkdtempSync(join(tmpdir(), "effort-default-profile-"));
+    try {
+      mkdirSync(join(dir, "profiles", name), { recursive: true });
+      copyFileSync(join(root, "profile.sh"), join(dir, "profile.sh"));
+      const path = join("profiles", name, "settings.json");
+      copyFileSync(join(root, path), join(dir, path));
+      const expected = readConfig(path);
+      const stale = structuredClone(expected);
+      stale.defaultThinkingLevel = "high";
+      if (stale.subagents) {
+        stale.subagents.defaultThinking = "low";
+        for (const role of Object.values(stale.subagents.agentOverrides ?? {}) as any[]) {
+          if (!role.disabled) role.thinking = "xhigh";
+        }
+      }
+      writeFileSync(join(dir, "settings.json"), JSON.stringify(stale));
+      execFileSync("bash", [join(dir, "profile.sh"), name], { cwd: dir, stdio: "pipe" });
+      const applied = JSON.parse(readFileSync(join(dir, "settings.json"), "utf8"));
+      assert.deepEqual(applied, expected, `${name}: complete profile reapplication`);
+      assert.equal(applied.defaultThinkingLevel, "medium", name);
+      if (applied.subagents) {
+        assert.equal(applied.subagents.defaultThinking, "medium", name);
+        for (const [role, override] of Object.entries(applied.subagents.agentOverrides ?? {}) as [string, any][]) {
+          if (!override.disabled) assert.equal(override.thinking, "medium", `${name}: ${role}`);
+        }
+      }
+    } finally { rmSync(dir, { recursive: true, force: true }); }
   }
 });
 
@@ -688,12 +771,11 @@ test("Codex reapplication resets expensive defaults while keeping task-local eff
     assert.equal(applied.defaultThinkingLevel, "medium");
     assert.equal(applied.subagents.defaultModel, "gpt-6.1-sol");
     assert.equal(applied.subagents.defaultThinking, "medium");
-    for (const role of roles.filter((role) => role !== "parent")) {
+    for (const role of roles.filter((role) => role !== "parent" && role !== "deep-worker")) {
       const override = applied.subagents.agentOverrides[role];
       const mechanical = role === "scout" || role === "delegate";
       assert.equal(override.model, mechanical ? "gpt-6-luna" : "gpt-6.1-sol", role);
-      assert.equal(override.thinking, mechanical ? "low"
-        : role === "reviewer" || role === "oracle" ? "high" : "medium", role);
+      assert.equal(override.thinking, "medium", role);
       assert.equal(override.fast, false, `${role}: standard service tier`);
       assert.ok(override.tools.includes("jev_route"), `${role}: effort switching retained`);
     }
