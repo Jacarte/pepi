@@ -1,4 +1,4 @@
-# Way of working
+# Way of working (pepi)
 
 ## Explanations: simple and visual
 
