@@ -8,12 +8,12 @@
     "npm:pi-ketch",
     "npm:@dietrichgebert/ponytail"
   ],
-  "defaultModel": "gemini-3.8-flash",
+  "defaultModel": "gemini-2.5-flash",
   "defaultProvider": "google",
   "defaultThinkingLevel": "high",
   "subagents": {
     "projectRootResolution": "git-root",
-    "defaultModel": "gemini-3.8-flash",
+    "defaultModel": "gemini-2.5-flash",
     "defaultProvider": "google",
     "agentOverrides": {
       "claude-code": {
@@ -23,7 +23,7 @@
         "disabled": true
       },
       "oracle": {
-        "model": "gemini-4-argon",
+        "model": "gemini-3.1-pro-preview",
         "tools": [
           "jev_route",
           "read",
@@ -50,7 +50,7 @@
         ]
       },
       "delegate": {
-        "model": "gemini-3.5-flash-lite",
+        "model": "gemini-3.1-flash-lite",
         "tools": [
           "read",
           "grep",
@@ -80,7 +80,7 @@
         ]
       },
       "researcher": {
-        "model": "gemini-3.8-flash",
+        "model": "gemini-2.5-flash",
         "tools": [
           "jev_route",
           "read",
@@ -94,7 +94,7 @@
         ]
       },
       "worker": {
-        "model": "gemini-3.5-flash-lite",
+        "model": "gemini-3.1-flash-lite",
         "tools": [
           "read",
           "grep",
@@ -124,7 +124,7 @@
         ]
       },
       "scout": {
-        "model": "gemini-3.5-flash-lite",
+        "model": "gemini-3.1-flash-lite",
         "tools": [
           "jev_route",
           "read",
@@ -153,7 +153,7 @@
         ]
       },
       "reviewer": {
-        "model": "gemini-4-argon",
+        "model": "gemini-3.1-pro-preview",
         "tools": [
           "jev_route",
           "read",
