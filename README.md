@@ -17,7 +17,7 @@ credentials before starting pi. The root `settings.json`, `mcp.json`, and
 npm install -g @earendil-works/pi-coding-agent
 git clone git@github.com:<you>/<this-repo>.git ~/.pi/agent
 cd ~/.pi/agent
-./profile.sh codex     # or: ./profile.sh bedrock
+./profile.sh codex     # or: ./profile.sh bedrock / ./profile.sh gemini
 # ./profile.sh        # interactive selector
 ```
 
@@ -32,9 +32,10 @@ files absent from the selected profile:
 |---|---|
 | `codex` | `settings.json`, `mcp.json`, `models-router.json`, `models.json` |
 | `bedrock` | `settings.json`, `mcp.json`, `models-router.json` |
+| `gemini` | `settings.json`, `mcp.json`, `models-router.json` |
 
 The root `models.json` is tracked and currently matches the Codex profile's model
-context-window overrides. Applying Bedrock leaves it in place. Reapplying a profile
+context-window overrides. Applying Bedrock or Gemini leaves it in place. Reapplying a profile
 replaces local edits to the files it copies; edit `profiles/<name>/` to preserve
 intentional profile changes.
 
@@ -43,14 +44,15 @@ intentional profile changes.
 These are personal profiles, not portable zero-configuration presets. Review the
 selected profile before starting pi:
 
-- Both `settings.json` files contain absolute `subagentOnlyExtensions` and
-  `defaultSubagentOnlyExtensions` paths under `/Users/javier.cabrera/.pi/agent/`.
+- These `settings.json` files contain absolute `subagentOnlyExtensions` and
+  `defaultSubagentOnlyExtensions` paths under `/Users/javcab/.pi/agent/` (Codex)
+  or `/Users/javier.cabrera/.pi/agent/` (Bedrock/Gemini).
   Replace them with your checkout's extension paths.
-- Both MCP configs contain `speaker` and `voice-devtools` commands under
+- The Bedrock MCP config contains `speaker` and `voice-devtools` commands under
   `/Users/javcab/Documents/maelstrom/voice-devtools`. Install/configure the matching
   tools and paths, or disable the servers you do not use.
-- Review the memory endpoint below. Codex points to a private LAN address;
-  Bedrock points to localhost. Neither backend is included in this repository.
+- Review the memory endpoint below. Codex and Gemini point to a private LAN
+  address; Bedrock points to localhost. Neither backend is included in this repository.
 - `reviewer` references a `go-reviewer` skill that is **not tracked
   here**. Supply it separately or adjust that profile setting.
 
@@ -59,8 +61,11 @@ After editing a profile, apply it again. Do not commit credentials in profile fi
 ### 3. Provide credentials and environment variables
 
 Provider credentials belong in local `auth.json` (gitignored). Configure auth for
-`openai-codex` with the Codex profile, or `litellm` with the Bedrock profile, using
-your installed pi/provider's authentication instructions.
+`openai-codex` with the Codex profile, `litellm` with the Bedrock profile, or
+`google` with the Gemini profile, using your installed pi/provider's authentication
+instructions. Applying a profile does not configure authentication or verify model
+access. Keep Google API credentials in local auth/environment settings, not in
+the tracked Gemini profile.
 
 The bundled `litellm-budget` extension reads a `litellm` auth entry of this shape:
 
@@ -78,11 +83,11 @@ MCP credentials are separate: the tracked profiles use `{env:VAR}` references.
 Export the variables for servers you keep enabled before starting pi:
 
 ```bash
-export GITHUB_TOKEN="..."         # github (both profiles)
-export NEO4J_PASSWORD="..."       # neo4j
-export ELEVENLABS_API_KEY="..."   # speaker
-export DEEPGRAM_API_KEY="..."     # speaker
-# export CONTEXT7_API_KEY="..."   # only if enabling context7
+export GITHUB_TOKEN="..."         # github (Codex, Bedrock, Gemini)
+export CONTEXT7_API_KEY="..."     # context7
+# export NEO4J_PASSWORD="..."     # neo4j (Bedrock)
+# export ELEVENLABS_API_KEY="..." # speaker (Bedrock)
+# export DEEPGRAM_API_KEY="..."   # speaker (Bedrock)
 # export TYPESAFE_API_KEY="..."   # local jev_route tool (not MCP)
 ```
 
@@ -106,34 +111,35 @@ specs are unpinned, so resolved versions can differ across machines; only
 These are the tracked package specifications, not a snapshot of locally installed
 versions:
 
-| Package spec | Codex | Bedrock |
-|---|---|---|
-| `npm:pi-subagents@0.78.0` | yes | yes |
-| `npm:pi-mcp-adapter` | yes | yes |
-| `npm:@vndv/pi-codegraph` | yes | yes |
-| `npm:@dietrichgebert/ponytail` | yes | yes |
-| `npm:pi-ketch` | yes | — |
-| `npm:pi-provider-litellm` | — | yes |
-| `npm:pi-web-access` | — | yes |
+| Package spec | Codex | Bedrock | Gemini |
+|---|---|---|---|
+| `npm:pi-subagents@0.78.0` | yes | yes | yes |
+| `npm:pi-mcp-adapter` | yes | yes | yes |
+| `npm:@vndv/pi-codegraph` | yes | yes | yes |
+| `npm:@dietrichgebert/ponytail` | yes | yes | yes |
+| `npm:pi-ketch` | yes | yes | yes |
+| `npm:pi-provider-litellm` | — | yes | — |
+| `npm:pi-web-access` | — | yes | — |
 
 LiteLLM is specific to Bedrock here; it is not required by every profile.
 
 ### Model settings
 
 Model names below are configured IDs, not a guarantee of provider availability.
-Both profiles use subagent project-root resolution `git-root`. Codex starts the
-parent at `medium` thinking; Bedrock keeps its profile-owned `high` default.
+These three profiles use subagent project-root resolution `git-root`. Codex starts
+the parent at `medium` thinking; Bedrock and Gemini keep their profile-owned `high`
+defaults.
 
-| Setting / agent | Codex model (`openai-codex`) | Codex initial effort | Bedrock model (`litellm`) |
-|---|---|---|---|
-| Main default | `gpt-6-astra` | medium | `bedrock-claude-sonnet-5-5` |
-| Subagent default | `gpt-6.1-sol` | medium when no role effort is set | `bedrock-claude-sonnet-5-5` |
-| `worker` | `gpt-6.1-sol` | medium | `bedrock-claude-haiku-4-5` |
-| `oracle`, `reviewer` | `gpt-6-astra` | high | `bedrock-claude-opus-5-5` |
-| `scout` | `gpt-6-luna` | low | `bedrock-claude-haiku-4-5` |
-| `delegate` | `gpt-6-luna` | low | inherits subagent default |
-| `researcher`, `evidence-auditor` | `gpt-6.1-sol` | medium | inherits subagent default |
-| `claude-code`, `claude-code-writer` | disabled | — | disabled |
+| Setting / agent | Codex model (`openai-codex`) | Codex initial effort | Bedrock model (`litellm`) | Gemini model (`google`) |
+|---|---|---|---|---|
+| Main default | `gpt-6-astra` | medium | `bedrock-claude-sonnet-5-5` | `gemini-3.8-flash` |
+| Subagent default | `gpt-6.1-sol` | medium when no role effort is set | `bedrock-claude-sonnet-5-5` | `gemini-3.8-flash` |
+| `worker` | `gpt-6.1-sol` | medium | `bedrock-claude-haiku-4-5` | `gemini-3.1-flash-lite` |
+| `oracle`, `reviewer` | `gpt-6-astra` | high | `bedrock-claude-opus-5-5` | `gemini-3.1-pro-preview` |
+| `scout` | `gpt-6-luna` | low | `bedrock-claude-haiku-4-5` | `gemini-3.1-flash-lite` |
+| `delegate` | `gpt-6-luna` | low | inherits subagent default | `gemini-3.1-flash-lite` |
+| `researcher`, `evidence-auditor` | `gpt-6.1-sol` | medium | inherits subagent default | `gemini-3.8-flash` (auditor inherits) |
+| `claude-code`, `claude-code-writer` | disabled | — | disabled | disabled |
 
 Codex role `thinking` settings establish the listed initial effort; task-local
 `switch_effort` can adjust it. A bounded mechanical writer can launch with
@@ -164,16 +170,22 @@ child settings make no claim about the parent service tier. This configuration
 and instruction trial does not enforce a runtime
 model scope; authorized task-local Astra remains possible.
 
+For Gemini, apply `./profile.sh gemini` after configuring its local credentials
+and paths, then start a fresh Pi session and check `/subagents-models`. Keep the
+Gemini role assignments above; the Codex-specific Astra authorization and `fast`
+settings do not replace them. Gemini's selected models and account access are
+checked by Pi/provider at use time, not by the profile copy script.
+
 `models-router.json` is a separate mapping for the local `jev_route` tool:
 
-| Lane | Codex | Bedrock |
-|---|---|---|
-| `LOCAL` | `openai-codex/gpt-6-luna` | `litellm/bedrock-claude-haiku-5-5` |
-| `CHEAP` | `openai-codex/gpt-6.1-sol` | `litellm/bedrock-claude-sonnet-5-5` |
-| `FRONTIER` | `openai-codex/gpt-6-astra` | `litellm/bedrock-claude-opus-5-5` |
+| Lane | Codex | Bedrock | Gemini |
+|---|---|---|---|
+| `LOCAL` | `openai-codex/gpt-6-luna` | `litellm/bedrock-claude-haiku-5-5` | `google/gemini-3.1-flash-lite` |
+| `CHEAP` | `openai-codex/gpt-6.1-sol` | `litellm/bedrock-claude-sonnet-5-5` | `google/gemini-3.8-flash` |
+| `FRONTIER` | `openai-codex/gpt-6.1-sol` | `litellm/bedrock-claude-opus-5-5` | `google/gemini-3.1-pro-preview` |
 
 Each lane requires a nonempty `provider` and `id`. Each file also requires a
-top-level numeric `minConfidence` in `[0,1]` (currently **0.4** in both profiles;
+top-level numeric `minConfidence` in `[0,1]` (currently **0.4** in these profiles;
 the Codex value may be tuned separately). Missing, nonfinite, nonnumeric, or
 out-of-range values fail before classification. Edit the tracked profile files to preserve changes
 across `profile.sh` switches; `recommend` reads the active root config on each call.
@@ -197,9 +209,10 @@ Rules never lower a lane. The result reports `escalated` and `reason` (the first
 rule that raised the lane, or `null`). Invalid classifier answers fail; there is
 no fallback lane.
 
-The Bedrock router's `LOCAL` ID differs from the worker/scout override. Both router
-files also contain `HUMAN`, which the extension deliberately ignores; routing is
-not approval.
+The Bedrock router's `LOCAL` ID differs from the worker/scout override. Codex's
+`CHEAP` and `FRONTIER` advice both use Sol; that advisory mapping does not change
+the mandatory Astra parent/reviewer/oracle role pins. All three router files also
+contain `HUMAN`, which the extension deliberately ignores; routing is not approval.
 
 `jev_route` action `switch_effort` makes another Jev call with a separate `effort`
 Choice question about the supplied task/role/context/files. It does not reuse the
@@ -227,7 +240,7 @@ capability and a corrected brief or explicit task-local choice, with no automati
 FRONTIER retry. Reclassify effort or seek advice only when the assignment or
 evidence changes materially, and report classification failures.
 
-The tracked Bedrock, Codex, and Cloud profiles preserve router availability for
+The tracked Bedrock, Codex, Cloud, and Gemini profiles preserve router availability for
 all native Pi subagent roles through `jev_route` allowlists and explicit/default
 `subagentOnlyExtensions`, including when reapplying a profile. No router extension
 or child tool is removed. Existing capability restrictions still apply; adapt the
@@ -281,21 +294,22 @@ editor, inline tool summaries) and model-response aliases.
 
 ## MCP inventory and external requirements
 
-The two tracked `mcp.json` files share the following inventory, except for ClickUp.
-There are no Nucleus, Atlassian, or Datadog entries in either profile.
+The Codex and Gemini profiles share the same MCP inventory. Bedrock adds voice,
+Atlassian, tldraw, and Neo4j integrations:
 
 | Server | Profiles / state | Configured transport and requirements |
 |---|---|---|
-| `context7` | both, disabled | `https://mcp.context7.com/mcp`; `CONTEXT7_API_KEY` header |
-| `browsermcp` | both, enabled | `npx @browsermcp/mcp@0.1.3` |
-| `playwright` | both, enabled | `npx @playwright/mcp@0.0.68` |
-| `speaker` | both, enabled | Absolute `tts2mic-mcp` path; `ELEVENLABS_API_KEY`, `DEEPGRAM_API_KEY` |
-| `voice-devtools` | both, enabled | `bash -lc` in an absolute checkout path; `./bin/tts2mic-mcp` with PipeWire/session settings |
-| `github` | both, enabled | `https://api.githubcopilot.com/mcp`; Bearer `GITHUB_TOKEN`, `oauth: false` |
-| `clickup` | Codex only, enabled | `npx -y mcp-remote https://mcp.clickup.com/mcp` |
-| `neo4j` | both, enabled | `neo4j-mcp` on `PATH`, local `bolt://localhost:7687`, `NEO4J_PASSWORD`; read-only flag |
-| `Chrome` | both, disabled | `npx -y chrome-devtools-mcp@latest` |
-| `codegraph` | both, enabled | `codegraph serve --mcp` on `PATH` |
+| `context7` | all three, enabled | `https://mcp.context7.com/mcp`; `CONTEXT7_API_KEY` header |
+| `browsermcp` | all three, enabled | `npx @browsermcp/mcp@0.1.3` |
+| `playwright` | all three, enabled | `npx @playwright/mcp@0.0.68` |
+| `speaker` | Bedrock, enabled | Absolute `tts2mic-mcp` path; `ELEVENLABS_API_KEY`, `DEEPGRAM_API_KEY` |
+| `voice-devtools` | Bedrock, enabled | `bash -lc` in an absolute checkout path; `./bin/tts2mic-mcp` with PipeWire/session settings |
+| `github` | all three, enabled | `https://api.githubcopilot.com/mcp`; Bearer `GITHUB_TOKEN`, `oauth: false` |
+| `Atlassian` | Bedrock, enabled | `https://mcp.atlassian.com/v1/mcp`; OAuth |
+| `tldraw` | Bedrock, enabled | `http://jacarte:8787/mcp`; local service |
+| `neo4j` | Bedrock, enabled | `neo4j-mcp` on `PATH`, local `bolt://localhost:7687`, `NEO4J_PASSWORD`; read-only flag |
+| `Chrome` | all three, disabled | `npx -y chrome-devtools-mcp@latest` |
+| `codegraph` | all three, enabled | `codegraph serve --mcp` on `PATH` |
 
 Install the external commands/services for servers you retain. `npx` entries need
 Node/npm and access to their packages; this repo does not provision browser
@@ -323,7 +337,7 @@ logger/router into selected children via the machine-specific paths noted above.
 
 ## Semantic memory
 
-Codex, Bedrock, and Cloud use the local Hippocampus adapter and retain the
+Codex, Bedrock, Cloud, and Gemini use the local Hippocampus adapter and retain the
 `mem0_memory` tool name. The parent entry point loads automatically from
 `extensions/hippocampus.ts`. Every child extension list loads the explicit
 read-only entry point before `mem0-fallback.ts`; children can recall memory but
@@ -343,8 +357,9 @@ The tracked endpoints are personal defaults, not bundled services:
 | Codex | `http://192.168.0.160:18000` |
 | Bedrock | `http://localhost:8000` |
 | Cloud | `http://192.168.0.160:18000` |
+| Gemini | `http://192.168.0.160:18000` |
 
-All three profiles explicitly set the same behavior. For example, Codex contains:
+All four profiles explicitly set the same behavior. For example, Codex contains:
 
 ```json
 {

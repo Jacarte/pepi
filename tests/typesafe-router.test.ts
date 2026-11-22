@@ -11,12 +11,13 @@ import { test } from "node:test";
 const root = fileURLToPath(new URL("../", import.meta.url));
 const source = readFileSync(join(root, "extensions/pi-typesafe-router.ts"), "utf8");
 const readConfig = (path: string) => JSON.parse(readFileSync(join(root, path), "utf8"));
-const profiles = Object.fromEntries(["codex", "bedrock"].map((name) => [name,
+const profiles = Object.fromEntries(["codex", "bedrock", "gemini"].map((name) => [name,
   readConfig(join("profiles", name, "models-router.json")),
 ]));
 const configFiles = {
   bedrock: "profiles/bedrock/models-router.json",
   codex: "profiles/codex/models-router.json",
+  gemini: "profiles/gemini/models-router.json",
 };
 const lanes = ["LOCAL", "CHEAP", "FRONTIER"];
 const laneOptions = ["local", "cheap", "frontier"];
@@ -356,7 +357,8 @@ test("model mapping validation and HUMAN-ignore behavior remain intact", async (
   h.config.FRONTIER.id = ` ${h.config.FRONTIER.id} `;
   for (const human of [undefined, null, [], { threshold: "invalid", provider: "human" }]) {
     h.config.HUMAN = human;
-    assert.equal((await h.run()).details.model, "openai-codex/gpt-6-astra");
+    assert.equal((await h.run()).details.model,
+      `${profiles.codex.FRONTIER.provider}/${profiles.codex.FRONTIER.id}`);
   }
 });
 
@@ -556,7 +558,11 @@ test("recommend registry, authentication and image guards remain enforced", asyn
   for (const [mutate, error] of [
     [(h: any) => { h.ctx.modelRegistry.find = () => undefined; }, /model not registered/],
     [(h: any) => { h.ctx.modelRegistry.getAvailable = () => []; }, /no configured authentication/],
-    [(h: any) => { h.models[2].input = ["text"]; }, /does not support images/],
+    [(h: any) => {
+      // Several lanes may share one registry model (Codex CHEAP/FRONTIER).
+      const { provider, id } = h.config.FRONTIER;
+      h.ctx.modelRegistry.find(provider, id).input = ["text"];
+    }, /does not support images/],
   ] as const) {
     const h = setup();
     mutate(h);
@@ -646,7 +652,7 @@ test("effort setter failures and unexpected model changes never trigger a model 
 
 test("tracked profiles preserve router tool and effective extension access for all native subagent roles", () => {
   for (const [name, home] of [["bedrock", "/Users/javier.cabrera"], ["codex", "/Users/javcab"],
-    ["cloud", "/root"]]) {
+    ["cloud", "/root"], ["gemini", "/Users/javier.cabrera"]]) {
     const { subagents } = readConfig(join("profiles", name, "settings.json"));
     const router = `${home}/.pi/agent/extensions/pi-typesafe-router.ts`;
     assert.ok(subagents.defaultSubagentOnlyExtensions.includes(router), `${name}: default router extension`);
@@ -709,6 +715,56 @@ test("Codex reapplication restores configured model pins while keeping task-loca
   }
 });
 
+test("Gemini reapplication restores its own models, router, and MCP without replacing auth or instructions", () => {
+  const dir = mkdtempSync(join(tmpdir(), "gemini-routing-profile-"));
+  try {
+    mkdirSync(join(dir, "profiles", "gemini"), { recursive: true });
+    copyFileSync(join(root, "profile.sh"), join(dir, "profile.sh"));
+    const profileFiles = ["settings.json", "models-router.json", "mcp.json"];
+    for (const file of profileFiles) {
+      copyFileSync(join(root, "profiles", "gemini", file), join(dir, "profiles", "gemini", file));
+    }
+    writeFileSync(join(dir, "settings.json"), JSON.stringify(readConfig("profiles/codex/settings.json")));
+    writeFileSync(join(dir, "models-router.json"), JSON.stringify(profiles.codex));
+    writeFileSync(join(dir, "mcp.json"), '{"mcpServers":{"stale":{}}}\n');
+    writeFileSync(join(dir, "AGENTS.md"), "existing instructions\n");
+    writeFileSync(join(dir, "auth.json"), "local auth sentinel\n");
+    writeFileSync(join(dir, "models.json"), "existing model overrides\n");
+
+    execFileSync("bash", [join(dir, "profile.sh"), "gemini"], { cwd: dir, stdio: "pipe" });
+
+    const applied = JSON.parse(readFileSync(join(dir, "settings.json"), "utf8"));
+    assert.equal(applied.defaultProvider, "google");
+    assert.equal(applied.defaultModel, "gemini-3.8-flash");
+    assert.equal(applied.subagents.defaultProvider, "google");
+    assert.equal(applied.subagents.defaultModel, "gemini-3.8-flash");
+    const expected = {
+      oracle: "gemini-3.1-pro-preview", reviewer: "gemini-3.1-pro-preview",
+      worker: "gemini-3.1-flash-lite", scout: "gemini-3.1-flash-lite", delegate: "gemini-3.1-flash-lite",
+      researcher: "gemini-3.8-flash", "evidence-auditor": "gemini-3.8-flash",
+    };
+    for (const [role, model] of Object.entries(expected)) {
+      assert.equal(applied.subagents.agentOverrides[role].model ?? applied.subagents.defaultModel, model, role);
+      assert.ok(applied.subagents.agentOverrides[role].tools.includes("jev_route"), `${role}: effort tool`);
+    }
+    const router = JSON.parse(readFileSync(join(dir, "models-router.json"), "utf8"));
+    assert.deepEqual([router.LOCAL, router.CHEAP, router.FRONTIER], [
+      { provider: "google", id: "gemini-3.1-flash-lite" },
+      { provider: "google", id: "gemini-3.8-flash" },
+      { provider: "google", id: "gemini-3.1-pro-preview" },
+    ]);
+    for (const file of profileFiles) {
+      assert.equal(readFileSync(join(dir, file), "utf8"),
+        readFileSync(join(root, "profiles", "gemini", file), "utf8"), `${file}: complete overlay`);
+    }
+    assert.equal(readFileSync(join(dir, "AGENTS.md"), "utf8"), "existing instructions\n");
+    assert.equal(readFileSync(join(dir, "auth.json"), "utf8"), "local auth sentinel\n");
+    assert.equal(readFileSync(join(dir, "models.json"), "utf8"), "existing model overrides\n");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("profile.sh preserves each tracked router config when applying profiles", () => {
   const dir = mkdtempSync(join(tmpdir(), "typesafe-router-profile-"));
   try {
@@ -717,7 +773,7 @@ test("profile.sh preserves each tracked router config when applying profiles", (
       mkdirSync(join(dir, "profiles", name), { recursive: true });
       copyFileSync(join(root, "profiles", name, "models-router.json"), join(dir, "profiles", name, "models-router.json"));
     }
-    for (const name of ["codex", "bedrock", "codex"]) {
+    for (const name of ["codex", "bedrock", "gemini", "codex"]) {
       execFileSync("bash", [join(dir, "profile.sh"), name]);
       assert.deepEqual(JSON.parse(readFileSync(join(dir, "models-router.json"), "utf8")), profiles[name]);
     }
