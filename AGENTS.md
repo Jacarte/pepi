@@ -137,8 +137,10 @@ orchestrates and integrates.
 
   | Assignment | Model |
   | --- | --- |
-  | Parent and unpinned subagents | `gpt-6.1-sol` |
-  | Regular worker, reviewer, or oracle | `gpt-6.1-sol` |
+  | Parent | `gpt-6-astra` |
+  | Unpinned subagents | `gpt-6.1-sol` |
+  | Regular worker | `gpt-6.1-sol` |
+  | Reviewer or oracle judgment | `gpt-6-astra` |
   | Researcher or evidence-auditor | `gpt-6.1-sol` |
   | Bounded scout or delegate | `gpt-6-luna` |
   | Mechanical writer | explicit `openai-codex/gpt-6-luna:medium` |
@@ -155,13 +157,15 @@ orchestrates and integrates.
   child launch, including reviewers. Select it anew for that assignment; do not
   copy the last child's model or use a mutable shared "current model". Existing
   shared workflow templates may use the active profile's role defaults.
-- Astra requires user authorization for a named, bounded assignment. Honor an
-  existing authorization only within its stated scope. Never infer authority
-  from risk keywords, a failed attempt, or a previous Astra assignment; do not
-  inherit its model into later workers. In Codex, keep the parent on Sol 6.1.
-  Resume an Astra child only for the same authorized assignment; launch a new
-  child with its own explicit model for unrelated work. Never write global
-  settings to make a task-local choice.
+- Codex parent, reviewer, and oracle use Astra as mandatory profile defaults.
+  This is standing operator authorization for those configured roles; no
+  per-task permission is required. Other Astra assignments require user
+  authorization for a named, bounded assignment. Honor that authorization only
+  within its stated scope. Never infer an Astra worker exception from risk
+  keywords, a failed attempt, or a previous Astra assignment. Other children
+  select their own models; do not inherit Astra into later workers. Resume a
+  task-local Astra exception only for the same authorized assignment. Never
+  write global settings to make a task-local choice.
 - Reconsider model choice or effort only when the assignment or evidence changes
   materially. After a failure, identify the specific missing capability or
   evidence and correct the brief or task-local model choice accordingly; do

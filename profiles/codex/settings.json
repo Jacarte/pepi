@@ -8,7 +8,7 @@
     "npm:pi-ketch",
     "npm:@dietrichgebert/ponytail"
   ],
-  "defaultModel": "gpt-6.1-sol",
+  "defaultModel": "gpt-6-astra",
   "defaultProvider": "openai-codex",
   "defaultThinkingLevel": "medium",
   "subagents": {
@@ -23,7 +23,7 @@
         "disabled": true
       },
       "oracle": {
-        "model": "gpt-6.1-sol",
+        "model": "gpt-6-astra",
         "tools": [
           "jev_route",
           "read",
@@ -163,7 +163,7 @@
         "fast": false
       },
       "reviewer": {
-        "model": "gpt-6.1-sol",
+        "model": "gpt-6-astra",
         "tools": [
           "jev_route",
           "read",

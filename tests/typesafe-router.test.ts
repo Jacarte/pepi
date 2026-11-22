@@ -744,7 +744,7 @@ test("every profile reapplies medium startup effort without changing its other c
   }
 });
 
-test("Codex reapplication resets expensive defaults while keeping task-local effort routing", () => {
+test("Codex reapplication restores configured model pins while keeping task-local effort routing", () => {
   const dir = mkdtempSync(join(tmpdir(), "codex-routing-profile-"));
   try {
     mkdirSync(join(dir, "profiles", "codex"), { recursive: true });
@@ -755,26 +755,30 @@ test("Codex reapplication resets expensive defaults while keeping task-local eff
     // Model selections in a running session are not persisted by this test.
     // Exercise the real profile overlay over previously edited disk defaults.
     const stale = structuredClone(readConfig(settingsPath));
-    stale.defaultModel = "gpt-6-astra";
+    stale.defaultModel = "gpt-6.1-sol";
     stale.defaultThinkingLevel = "high";
     stale.subagents.defaultModel = "gpt-6-astra";
     stale.subagents.defaultThinking = "high";
-    for (const override of Object.values(stale.subagents.agentOverrides) as any[]) {
-      if (!override.disabled) Object.assign(override, { model: "gpt-6-astra", thinking: "high", fast: true });
+    for (const [role, override] of Object.entries(stale.subagents.agentOverrides) as [string, any][]) {
+      if (!override.disabled) Object.assign(override, {
+        model: role === "reviewer" || role === "oracle" ? "gpt-6.1-sol" : "gpt-6-astra",
+        thinking: "high", fast: true
+      });
     }
     writeFileSync(join(dir, "settings.json"), JSON.stringify(stale));
     execFileSync("bash", [join(dir, "profile.sh"), "codex"], { cwd: dir, stdio: "pipe" });
 
     const applied = JSON.parse(readFileSync(join(dir, "settings.json"), "utf8"));
     assert.equal(applied.defaultProvider, "openai-codex");
-    assert.equal(applied.defaultModel, "gpt-6.1-sol");
+    assert.equal(applied.defaultModel, "gpt-6-astra");
     assert.equal(applied.defaultThinkingLevel, "medium");
     assert.equal(applied.subagents.defaultModel, "gpt-6.1-sol");
     assert.equal(applied.subagents.defaultThinking, "medium");
     for (const role of roles.filter((role) => role !== "parent" && role !== "deep-worker")) {
       const override = applied.subagents.agentOverrides[role];
       const mechanical = role === "scout" || role === "delegate";
-      assert.equal(override.model, mechanical ? "gpt-6-luna" : "gpt-6.1-sol", role);
+      assert.equal(override.model, role === "reviewer" || role === "oracle" ? "gpt-6-astra"
+        : mechanical ? "gpt-6-luna" : "gpt-6.1-sol", role);
       assert.equal(override.thinking, "medium", role);
       assert.equal(override.fast, false, `${role}: standard service tier`);
       assert.ok(override.tools.includes("jev_route"), `${role}: effort switching retained`);

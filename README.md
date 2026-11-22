@@ -130,10 +130,10 @@ Codex and Bedrock use subagent project-root resolution `git-root`.
 
 | Setting / agent | Codex model (`openai-codex`) | Codex initial effort | Bedrock model (`litellm`) |
 |---|---|---|---|
-| Main default | `gpt-6.1-sol` | medium | `bedrock-claude-sonnet-5-5` |
+| Main default | `gpt-6-astra` | medium | `bedrock-claude-sonnet-5-5` |
 | Subagent default | `gpt-6.1-sol` | medium when no role effort is set | `bedrock-claude-sonnet-5-5` |
 | `worker` | `gpt-6.1-sol` | medium | `bedrock-claude-haiku-4-5` |
-| `oracle`, `reviewer` | `gpt-6.1-sol` | medium | `bedrock-claude-opus-5-5` |
+| `oracle`, `reviewer` | `gpt-6-astra` | medium | `bedrock-claude-opus-5-5` |
 | `scout` | `gpt-6-luna` | medium | `bedrock-claude-haiku-4-5` |
 | `delegate` | `gpt-6-luna` | medium | inherits subagent default |
 | `researcher`, `evidence-auditor` | `gpt-6.1-sol` | medium | inherits subagent default |
@@ -150,11 +150,14 @@ explicit models deliberately. For one launch, put effort in the model suffix
 [model settings](https://github.com/nicobailon/pi-subagents/blob/v0.78.0/docs/models.md)
 and [dispatch reference](https://github.com/nicobailon/pi-subagents/blob/v0.78.0/docs/tool-reference.md).
 
-Astra is reserved for a user-authorized named, bounded assignment. An existing
-authorization applies only within its stated scope; a previous Astra task or
-failed worker does not authorize later Astra launches. In Codex, keep the parent
-on Sol 6.1 and make exceptions per launch without writing global defaults. Other
-profiles retain their own model choices.
+Codex parent, reviewer, and oracle use Astra as mandatory profile defaults.
+This is standing operator authorization for those configured roles; no per-task
+permission is required. Other Astra assignments require user authorization for a
+named, bounded assignment, honored only within its stated scope. A previous Astra
+task or failed worker does not authorize an Astra worker exception. Other
+children select their own models; do not inherit Astra into later workers or
+write global defaults for task-local exceptions. Other profiles retain their
+own model choices.
 
 After changing tracked settings, run `./profile.sh <profile>` (for example,
 `./profile.sh codex`) and start a fresh Pi session so startup defaults apply;
@@ -292,7 +295,7 @@ if (!edit.ok) return { edit };
 
 const review = await runs.run("review-edit", {
   agent: "reviewer",
-  model: "openai-codex/gpt-6.1-sol:medium",
+  model: "openai-codex/gpt-6-astra:medium",
   context: "fresh",
   task: reviewTask
 });
@@ -303,7 +306,7 @@ Here `mechanicalTask` and `reviewTask` are briefs supplied by the caller. Includ
 the task-local `switch_effort` instruction, exact source/scope, acceptance checks,
 and applicable permissions; give the reviewer the completed diff and check
 evidence. Check its actual verdict before integration or publication. For normal
-implementation use `openai-codex/gpt-6.1-sol:medium`. An authorized Astra exception
+implementation use `openai-codex/gpt-6.1-sol:medium`. Any task-local model exception
 belongs on its one named launch; later tasks select their own model and do not
 resume that child for unrelated work.
 
