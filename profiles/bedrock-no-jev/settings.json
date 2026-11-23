@@ -1,0 +1,209 @@
+{
+  "lastChangelogVersion": "1.1.0",
+  "theme": "dark",
+  "packages": [
+    "npm:pi-provider-litellm",
+    "npm:pi-web-access",
+    "npm:pi-subagents@0.78.0",
+    "npm:pi-mcp-adapter",
+    "npm:@vndv/pi-codegraph",
+    "npm:@dietrichgebert/ponytail",
+    "npm:pi-ketch"
+  ],
+  "defaultModel": "bedrock-claude-sonnet-5-5",
+  "defaultProvider": "litellm",
+  "defaultThinkingLevel": "medium",
+  "subagents": {
+    "projectRootResolution": "git-root",
+    "defaultModel": "bedrock-claude-sonnet-5-5",
+    "defaultProvider": "litellm",
+    "agentOverrides": {
+      "claude-code": {
+        "disabled": true
+      },
+      "claude-code-writer": {
+        "disabled": true
+      },
+      "oracle": {
+        "model": "bedrock-claude-opus-5-5",
+        "tools": [
+          "read",
+          "grep",
+          "find",
+          "ls",
+          "bash",
+          "mem0_memory",
+          "codegraph_search",
+          "codegraph_node",
+          "codegraph_files",
+          "codegraph_callers",
+          "codegraph_callees",
+          "codegraph_impact",
+          "codegraph_explore",
+          "codegraph_status"
+        ],
+        "subagentOnlyExtensions": [
+          "/Users/javier.cabrera/.pi/agent/extensions/prompt-logger.ts",
+          "/Users/javier.cabrera/.pi/agent/extensions/subagent-only/hippocampus-readonly.ts",
+          "/Users/javier.cabrera/.pi/agent/extensions/subagent-only/mem0-fallback.ts",
+          "/Users/javier.cabrera/.pi/agent/npm/node_modules/@vndv/pi-codegraph/extensions/codegraph.ts"
+        ],
+        "thinking": "medium"
+      },
+      "worker": {
+        "model": "bedrock-claude-haiku-4-5",
+        "tools": [
+          "read",
+          "grep",
+          "find",
+          "ls",
+          "bash",
+          "edit",
+          "write",
+          "contact_supervisor",
+          "mem0_memory",
+          "codegraph_search",
+          "codegraph_node",
+          "codegraph_files",
+          "codegraph_callers",
+          "codegraph_callees",
+          "codegraph_impact",
+          "codegraph_explore",
+          "codegraph_status"
+        ],
+        "subagentOnlyExtensions": [
+          "/Users/javier.cabrera/.pi/agent/extensions/prompt-logger.ts",
+          "/Users/javier.cabrera/.pi/agent/extensions/subagent-only/hippocampus-readonly.ts",
+          "/Users/javier.cabrera/.pi/agent/extensions/subagent-only/mem0-fallback.ts",
+          "/Users/javier.cabrera/.pi/agent/npm/node_modules/@vndv/pi-codegraph/extensions/codegraph.ts"
+        ],
+        "thinking": "medium"
+      },
+      "scout": {
+        "model": "bedrock-claude-haiku-4-5",
+        "tools": [
+          "read",
+          "grep",
+          "find",
+          "ls",
+          "bash",
+          "write",
+          "contact_supervisor",
+          "mem0_memory",
+          "codegraph_search",
+          "codegraph_node",
+          "codegraph_files",
+          "codegraph_callers",
+          "codegraph_callees",
+          "codegraph_impact",
+          "codegraph_explore",
+          "codegraph_status"
+        ],
+        "subagentOnlyExtensions": [
+          "/Users/javier.cabrera/.pi/agent/extensions/prompt-logger.ts",
+          "/Users/javier.cabrera/.pi/agent/extensions/subagent-only/hippocampus-readonly.ts",
+          "/Users/javier.cabrera/.pi/agent/extensions/subagent-only/mem0-fallback.ts",
+          "/Users/javier.cabrera/.pi/agent/npm/node_modules/@vndv/pi-codegraph/extensions/codegraph.ts"
+        ],
+        "thinking": "medium"
+      },
+      "reviewer": {
+        "model": "bedrock-claude-opus-5-5",
+        "tools": [
+          "read",
+          "grep",
+          "find",
+          "ls",
+          "watchdog_diff",
+          "contact_supervisor",
+          "mem0_memory",
+          "codegraph_search",
+          "codegraph_node",
+          "codegraph_files",
+          "codegraph_callers",
+          "codegraph_callees",
+          "codegraph_impact",
+          "codegraph_explore",
+          "codegraph_status"
+        ],
+        "subagentOnlyExtensions": [
+          "/Users/javier.cabrera/.pi/agent/extensions/prompt-logger.ts",
+          "/Users/javier.cabrera/.pi/agent/extensions/subagent-only/hippocampus-readonly.ts",
+          "/Users/javier.cabrera/.pi/agent/extensions/subagent-only/mem0-fallback.ts",
+          "/Users/javier.cabrera/.pi/agent/npm/node_modules/@vndv/pi-codegraph/extensions/codegraph.ts"
+        ],
+        "thinking": "medium"
+      },
+      "delegate": {
+        "tools": [
+          "read",
+          "grep",
+          "find",
+          "ls",
+          "bash",
+          "edit",
+          "write",
+          "contact_supervisor",
+          "mem0_memory",
+          "codegraph_search",
+          "codegraph_node",
+          "codegraph_files",
+          "codegraph_callers",
+          "codegraph_callees",
+          "codegraph_impact",
+          "codegraph_explore",
+          "codegraph_status"
+        ],
+        "subagentOnlyExtensions": [
+          "/Users/javier.cabrera/.pi/agent/extensions/prompt-logger.ts",
+          "/Users/javier.cabrera/.pi/agent/extensions/subagent-only/hippocampus-readonly.ts",
+          "/Users/javier.cabrera/.pi/agent/extensions/subagent-only/mem0-fallback.ts",
+          "/Users/javier.cabrera/.pi/agent/npm/node_modules/@vndv/pi-codegraph/extensions/codegraph.ts"
+        ],
+        "thinking": "medium"
+      },
+      "researcher": {
+        "tools": [
+          "read",
+          "write",
+          "ketch_search",
+          "ketch_scrape",
+          "ketch_code",
+          "ketch_docs",
+          "ketch_crawl",
+          "mem0_memory"
+        ],
+        "thinking": "medium"
+      },
+      "evidence-auditor": {
+        "tools": [
+          "read",
+          "ketch_search",
+          "ketch_scrape",
+          "ketch_code",
+          "ketch_docs",
+          "ketch_crawl",
+          "mem0_memory"
+        ],
+        "thinking": "medium"
+      }
+    },
+    "defaultSubagentOnlyExtensions": [
+      "/Users/javier.cabrera/.pi/agent/extensions/prompt-logger.ts",
+      "/Users/javier.cabrera/.pi/agent/extensions/subagent-only/hippocampus-readonly.ts",
+      "/Users/javier.cabrera/.pi/agent/extensions/subagent-only/mem0-fallback.ts"
+    ],
+    "defaultThinking": "medium"
+  },
+  "hippocampus": {
+    "enabled": true,
+    "baseUrl": "http://localhost:8000",
+    "userId": "default-user",
+    "autoCapture": true,
+    "autoRecall": true,
+    "requestTimeoutMs": 10000,
+    "recallLimit": 5,
+    "legacyUserIds": [],
+    "recallLegacyCwd": true
+  }
+}
