@@ -18,11 +18,21 @@ type LaneOption = (typeof LANE_OPTIONS)[number];
 const LANE_FOR_OPTION: Record<LaneOption, Lane> = { local: "LOCAL", cheap: "CHEAP", frontier: "FRONTIER" };
 const EFFORT_OPTIONS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 type Effort = (typeof EFFORT_OPTIONS)[number];
+type EffortModel = Target & { reasoning?: boolean; thinkingLevelMap?: { high?: unknown } };
+type EffortPolicy = {
+  policy: string;
+  policyEffort: Effort;
+  requiredEffort: Effort;
+  mappingReason: "gemini_native_max_high" | null;
+};
+const GEMINI_NATIVE_HIGH_MODELS = new Set([
+  "gemini-3.8-flash", "gemini-3.1-flash-lite", "gemini-3.1-pro-preview",
+]);
 const BLAST_RADIUS_OPTIONS = ["contained", "cross_cutting", "critical"] as const;
 type BlastRadiusOption = (typeof BLAST_RADIUS_OPTIONS)[number];
 const ROLES = [
   "parent", "scout", "worker", "reviewer", "oracle",
-  "researcher", "evidence-auditor", "delegate",
+  "researcher", "evidence-auditor", "delegate", "deep-worker",
 ] as const;
 type ChoiceAnswer<Option extends string> = {
   choice: Option;
@@ -73,24 +83,67 @@ const QUESTIONS = {
   },
 } as const;
 
-// Classify task effort independently; Pi clamps the request to the current model.
-const EFFORT_QUESTIONS = {
-  effort: {
+const ACTIVITIES = ["exploration", "research", "performance", "debugging", "default"] as const;
+type Activity = (typeof ACTIVITIES)[number];
+const YES_NO = ["yes", "no"] as const;
+const ACTIVITY_QUESTIONS = Object.fromEntries(
+  ACTIVITIES.filter((activity) => activity !== "default").map((activity) => [activity, {
     type: "choice",
-    instructions: "How much thinking effort does completing this task require? " +
-      "Choose the least deliberation sufficient for the reasoning needed, not a model " +
-      `lane or blast radius. ${DATA_GUARD}`,
+    instructions: `Does the actual assignment include ${activity}? Classify the assignment, ` +
+      `not its role or unrelated project risks. Mixed assignments may answer yes to several activities. ${DATA_GUARD}`,
     criteria: {
-      off: "No extended reasoning: direct retrieval, copying, or a fully prescribed answer.",
-      minimal: "A brief check or trivial inference with an obvious answer.",
-      low: "A short, straightforward chain of reasoning with little ambiguity.",
-      medium: "Several reasoning steps, comparing plausible options, or a bounded diagnosis.",
-      high: "Sustained reasoning across interacting constraints, ambiguous evidence, or subtle edge cases.",
-      xhigh: "Very demanding reasoning: many interdependent hypotheses or difficult contradiction checking.",
-      max: "Exceptional reasoning depth: a difficult proof or unresolved, tightly coupled problem requiring exhaustive analysis.",
+      yes: {
+        exploration: "Read or navigate files, locate symbols, or discover existing code behavior.",
+        research: "Investigate a question by gathering, comparing, or evaluating evidence or sources; a plain file read alone is not research.",
+        performance: "Measure, diagnose, or optimize runtime, throughput, latency, memory, or resource efficiency.",
+        debugging: "Investigate or repair a failure, defect, or unexpected behavior.",
+      }[activity],
+      no: "This activity is not part of the actual assignment, even if the role or context mentions it.",
     },
-  },
-} as const;
+  }]),
+);
+
+function validateActivities(value: unknown): Activity[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length === 0 || value.length > ACTIVITIES.length ||
+      Array.from(value).some((entry) => !ACTIVITIES.includes(entry)) || new Set(value).size !== value.length) {
+    throw new Error("Jev router: activities must be a nonempty unique array of exploration, research, performance, debugging, default.");
+  }
+  return value as Activity[];
+}
+
+function activityEffort(activities: Activity[], modelId: string): { policyEffort: Effort; policy: string } {
+  if (activities.includes("research")) return { policyEffort: "xhigh", policy: "research" };
+  if (activities.includes("performance") || activities.includes("debugging")) {
+    return { policyEffort: "high", policy: "performance_or_debugging" };
+  }
+  if (activities.includes("exploration")) {
+    // Match model IDs, never a provider name or an arbitrary substring.
+    const id = modelId.slice(modelId.indexOf("/") + 1);
+    const astra = /^gpt-\d+(?:\.\d+)*-astra(?:-\d{4}-\d{2}-\d{2})?$/.test(id);
+    return { policyEffort: astra ? "low" : "medium", policy: astra ? "astra_exploration" : "exploration" };
+  }
+  return { policyEffort: "medium", policy: "default" };
+}
+
+function effortPolicy(activities: Activity[], model: EffortModel): EffortPolicy {
+  const { policyEffort, policy } = activityEffort(activities, fullId(model)!);
+  if (policyEffort !== "xhigh" || model.provider !== "google" || !GEMINI_NATIVE_HIGH_MODELS.has(model.id)) {
+    return { policyEffort, requiredEffort: policyEffort, policy, mappingReason: null };
+  }
+  // These exact models use native high as their maximum thinking level:
+  // https://aistudio.google.com/docs/thinking. Do not generalize to future models
+  // or treat arbitrary Pi clamps as equivalent to the research policy.
+  // Pi can remap high (even to LOW), so a contradictory descriptor must fail.
+  const high = model.thinkingLevelMap?.high;
+  if (model.reasoning !== true || (high !== undefined &&
+      (typeof high !== "string" || high.toLowerCase() !== "high"))) {
+    throw new Error(`Jev router: research policy xhigh resolves to high on ${fullId(model)} ` +
+      "(gemini_native_max_high), but the model must enable reasoning and preserve native high; " +
+      "unsupported Gemini research mapping, no effort applied.");
+  }
+  return { policyEffort, requiredEffort: "high", policy, mappingReason: "gemini_native_max_high" };
+}
 
 function unitInterval(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1;
@@ -215,9 +268,15 @@ export default function(pi: ExtensionAPI) {
     description:
       "Ask Jev to recommend a model or classify and apply thinking effort. " +
       "recommend returns a provider/model ID without changing any session; " +
-      "pass it as model when launching a subagent. switch_effort makes a separate " +
-      "effort-specific Jev call and changes only this calling session's thinking level, " +
-      "never its model. Pi clamps effort to the current model's capabilities. " +
+      "it is a proposal, never a forced model change. switch_effort applies activity policy " +
+      "only to this calling session's thinking level, never its model. Supply activities " +
+      "to apply local policy without a Jev request; otherwise Jev classifies the actual " +
+      "assignment's activities, not its role. Research policy xhigh resolves to high only for " +
+      "google/gemini-3.8-flash, google/gemini-3.1-flash-lite and google/gemini-3.1-pro-preview " +
+      "with reasoning enabled and native high preserved. Performance/debugging requires high, " +
+      "exploration Astra low and other models medium, default medium; mixed tasks use that precedence. " +
+      "Unsupported effort fails; Pi readback must exactly match the resolved target. Results report " +
+      "policy intent and applied Pi effort, not provider acknowledgement of executed reasoning. " +
       "Before substantive work, the parent and EVERY subagent role MUST call switch_effort " +
       "for its own assignment, even if recommend was already called for delegation. " +
       "If classification fails, report the failure rather than silently skipping it. " +
@@ -237,6 +296,10 @@ export default function(pi: ExtensionAPI) {
         Type.String({ minLength: 1, maxLength: 1_000 }),
         { maxItems: 50, description: "Relevant file paths only, not file contents." },
       )),
+      activities: Type.Optional(Type.Array(StringEnum(ACTIVITIES), {
+        minItems: 1, maxItems: ACTIVITIES.length, uniqueItems: true,
+        description: "switch_effort only: actual assignment activities; omit for Jev classification.",
+      })),
       requiresImages: Type.Optional(Type.Boolean({
         description: "For recommend: the selected model must support image inputs.",
       })),
@@ -248,13 +311,18 @@ export default function(pi: ExtensionAPI) {
         action: string; lane: string; model: string; changed: boolean;
         laneAnswer?: ChoiceAnswer<LaneOption>; blastRadius?: ChoiceAnswer<BlastRadiusOption>;
         reason: EscalationReason | null;
-        requestedEffort?: Effort; actualEffort?: Effort;
+        policyEffort?: Effort; requiredEffort?: Effort;
+        requestedEffort?: Effort; actualEffort?: Effort; mappingReason?: string | null;
       } | undefined;
       if (!d) return new Text(theme.fg("error", "Jev router: no decision"), 0, 0);
       if (d.action === "switch_effort") {
+        // Older saved results did not record policy intent or a resolved target.
+        const policy = d.policyEffort && d.requiredEffort
+          ? `policy ${d.policyEffort}, required ${d.requiredEffort}, ` : "";
         return new Text(
-          theme.fg("success", `Jev effort: ${d.requestedEffort} → ${d.actualEffort}`) +
-          theme.fg("dim", ` (${d.changed ? "changed" : "unchanged"}; model unchanged: ${d.model})`),
+          theme.fg("success", `Jev effort: ${policy}requested ${d.requestedEffort}, applied Pi ${d.actualEffort}`) +
+          theme.fg("dim", ` (${d.changed ? "changed" : "unchanged"}; model unchanged: ${d.model}` +
+            `${d.mappingReason ? `; mapping: ${d.mappingReason}` : ""})`),
           0, 0,
         );
       }
@@ -262,7 +330,7 @@ export default function(pi: ExtensionAPI) {
       const summary = d.laneAnswer && d.blastRadius
         ? `; ${decisionSummary(d.laneAnswer, d.blastRadius, d.reason)}` : "";
       return new Text(
-        theme.fg("success", `Jev: ${d.lane} → ${d.model}`) +
+        theme.fg("success", `Jev proposal: ${d.lane} → ${d.model}`) +
         theme.fg("dim", ` (${d.action}${d.changed ? ", switched" : ""}${summary})`),
         0, 0,
       );
@@ -276,6 +344,10 @@ export default function(pi: ExtensionAPI) {
       if (!task) throw new Error("Jev router: task must not be blank.");
       const files = (params.files ?? []).map((file) => file.trim());
       if (files.some((file) => !file)) throw new Error("Jev router: files must not contain blank paths.");
+      const explicitActivities = validateActivities(params.activities);
+      if (params.action === "recommend" && explicitActivities) {
+        throw new Error("Jev router: activities are only supported for switch_effort.");
+      }
       signal?.throwIfAborted();
       const sessionId = ctx.sessionManager.getSessionId();
       const initialModel = ctx.model;
@@ -284,43 +356,53 @@ export default function(pi: ExtensionAPI) {
         throw new Error("Jev router: no current model for effort selection.");
       }
       const routing = params.action === "recommend" ? loadModels() : undefined;
-      const key = process.env.TYPESAFE_API_KEY;
-      if (!key) throw new Error("Jev router: missing TYPESAFE_API_KEY.");
-      const classifier = process.env.JEV_MODEL || "jev-latest";
       const timeout = AbortSignal.timeout(TIMEOUT_MS);
       const requestSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
-
-      // Only the explicitly supplied role/task/context/file paths go to TypeSafe.
       const role = params.role ?? "unspecified";
-      const response = await fetch(ENDPOINT, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
-        signal: requestSignal,
-        body: JSON.stringify({
-          model: classifier,
-          state: { role, task, context: params.context ?? "", files },
-          questions: params.action === "switch_effort" ? EFFORT_QUESTIONS : QUESTIONS,
-        }),
-      });
-      if (!response.ok) {
-        log(`${new Date().toISOString()} ${params.action} FAILED: TypeSafe HTTP ${response.status}`, task);
-        throw new Error(`Jev router: TypeSafe HTTP ${response.status}.`);
+      let answers: Record<string, unknown> = {};
+      let classifierDetails: { classifier?: string; jevUsage?: { inputTokens: number | null; outputTokens: number | null } } = {};
+      if (!explicitActivities) {
+        const key = process.env.TYPESAFE_API_KEY;
+        if (!key) throw new Error("Jev router: missing TYPESAFE_API_KEY.");
+        const classifier = process.env.JEV_MODEL || "jev-latest";
+
+        // Only the explicitly supplied role/task/context/file paths go to TypeSafe.
+        const response = await fetch(ENDPOINT, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+          signal: requestSignal,
+          body: JSON.stringify({
+            model: classifier,
+            state: { role, task, context: params.context ?? "", files },
+            questions: params.action === "switch_effort" ? ACTIVITY_QUESTIONS : QUESTIONS,
+          }),
+        });
+        if (!response.ok) {
+          log(`${new Date().toISOString()} ${params.action} FAILED: TypeSafe HTTP ${response.status}`, task);
+          throw new Error(`Jev router: TypeSafe HTTP ${response.status}.`);
+        }
+        const data = object(await response.json(), "TypeSafe response");
+        log(`${new Date().toISOString()} session=${sessionId} action=${params.action}`, JSON.stringify(data));
+        answers = object(data.answers, "TypeSafe answers");
+        const usage = data.usage && typeof data.usage === "object"
+          ? data.usage as Record<string, unknown> : {};
+        classifierDetails = {
+          classifier: typeof data.model === "string" ? data.model : classifier,
+          // Recorded separately; these counts are not a Pi billing estimate.
+          jevUsage: {
+            inputTokens: tokenCount(usage.input_tokens),
+            outputTokens: tokenCount(usage.output_tokens),
+          },
+        };
       }
-      const data = object(await response.json(), "TypeSafe response");
-      log(`${new Date().toISOString()} session=${sessionId} action=${params.action}`, JSON.stringify(data));
-      const answers = object(data.answers, "TypeSafe answers");
-      const usage = data.usage && typeof data.usage === "object"
-        ? data.usage as Record<string, unknown> : {};
-      const classifierDetails = {
-        classifier: typeof data.model === "string" ? data.model : classifier,
-        // Recorded separately; these counts are not a Pi billing estimate.
-        jevUsage: {
-          inputTokens: tokenCount(usage.input_tokens),
-          outputTokens: tokenCount(usage.output_tokens),
-        },
-      };
       if (params.action === "switch_effort") {
-        const effortAnswer = choiceAnswer(answers, "effort", EFFORT_OPTIONS);
+        const activityAnswers = explicitActivities ? undefined : Object.fromEntries(
+          ACTIVITIES.filter((activity) => activity !== "default").map((activity) =>
+            [activity, choiceAnswer(answers, activity, YES_NO)]),
+        );
+        const activities = explicitActivities ?? Object.entries(activityAnswers!)
+          .filter(([, answer]) => answer.choice === "yes").map(([activity]) => activity as Activity);
+        if (activities.length === 0) activities.push("default");
         requestSignal.throwIfAborted();
         if (ctx.sessionManager.getSessionId() !== sessionId) {
           throw new Error("Jev router: session changed while classifying; retry in the new session.");
@@ -328,13 +410,24 @@ export default function(pi: ExtensionAPI) {
         if (ctx.model !== initialModel || fullId(ctx.model) !== initialModelId) {
           throw new Error("Jev router: model changed while classifying; retry for the current model.");
         }
+        const { policyEffort, requiredEffort, policy, mappingReason } = effortPolicy(activities, initialModel!);
         const previousEffort = pi.getThinkingLevel();
-        const requestedEffort = effortAnswer.choice;
+        const requestedEffort = requiredEffort;
         pi.setThinkingLevel(requestedEffort);
+        // Pi session state only: this readback is not a provider acknowledgement.
         const actualEffort = pi.getThinkingLevel();
         if (ctx.sessionManager.getSessionId() !== sessionId ||
             ctx.model !== initialModel || fullId(ctx.model) !== initialModelId) {
           throw new Error("Jev router: session or model changed while applying effort; inspect the session.");
+        }
+        requestSignal.throwIfAborted();
+        if (actualEffort !== requiredEffort) {
+          log(JSON.stringify({ action: params.action, model: initialModelId, role, activities,
+            activitySource: explicitActivities ? "explicit" : "jev", policy, policyEffort, requiredEffort, mappingReason,
+            requestedEffort, actualEffort, error: "unsupported effort" }), task);
+          throw new Error(`Jev router: effort policy requires ${requiredEffort}, actual ${actualEffort} on ${initialModelId}; ` +
+            `policy ${policyEffort}${mappingReason ? `, mapping ${mappingReason}` : ""}; ` +
+            "unsupported applied Pi effort, no model fallback.");
         }
         const changed = actualEffort !== previousEffort;
         const result = {
@@ -346,15 +439,23 @@ export default function(pi: ExtensionAPI) {
           requestedEffort,
           actualEffort,
           changed,
-          effortAnswer,
+          activities,
+          activitySource: explicitActivities ? "explicit" : "jev",
+          activityAnswers,
+          policy,
+          policyEffort,
+          requiredEffort,
+          mappingReason,
           ...classifierDetails,
         };
         log(JSON.stringify({ ...result, role }), task);
         return {
           content: [{
             type: "text" as const,
-            text: `Jev effort: requested ${requestedEffort}, actual ${actualEffort} ` +
-              `(${changed ? "changed" : "unchanged"}; model unchanged: ${initialModelId})\n\n` +
+            text: `Jev effort: policy ${policyEffort}, required ${requiredEffort}, ` +
+              `requested ${requestedEffort}, applied Pi ${actualEffort} ` +
+              `(${changed ? "changed" : "unchanged"}; model unchanged: ${initialModelId}` +
+              `${mappingReason ? `; mapping: ${mappingReason}` : ""})\n\n` +
               JSON.stringify(result, null, 2),
           }],
           details: result,
@@ -405,7 +506,7 @@ export default function(pi: ExtensionAPI) {
       return {
         content: [{
           type: "text" as const,
-          text: `Jev decision: ${lane} → ${fullId(target)} ` +
+          text: `Jev proposal: ${lane} → ${fullId(target)} ` +
             `(${decisionSummary(laneAnswer, blastRadius, reason)})\n\n` +
             JSON.stringify(result, null, 2),
         }],

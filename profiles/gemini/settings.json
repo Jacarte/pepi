@@ -10,7 +10,7 @@
   ],
   "defaultModel": "gemini-3.8-flash",
   "defaultProvider": "google",
-  "defaultThinkingLevel": "high",
+  "defaultThinkingLevel": "medium",
   "subagents": {
     "projectRootResolution": "git-root",
     "defaultModel": "gemini-3.8-flash",
@@ -47,7 +47,8 @@
           "/Users/javier.cabrera/.pi/agent/extensions/subagent-only/hippocampus-readonly.ts",
           "/Users/javier.cabrera/.pi/agent/extensions/subagent-only/mem0-fallback.ts",
           "/Users/javier.cabrera/.pi/agent/npm/node_modules/@vndv/pi-codegraph/extensions/codegraph.ts"
-        ]
+        ],
+        "thinking": "medium"
       },
       "delegate": {
         "model": "gemini-3.1-flash-lite",
@@ -77,7 +78,8 @@
           "/Users/javier.cabrera/.pi/agent/extensions/subagent-only/hippocampus-readonly.ts",
           "/Users/javier.cabrera/.pi/agent/extensions/subagent-only/mem0-fallback.ts",
           "/Users/javier.cabrera/.pi/agent/npm/node_modules/@vndv/pi-codegraph/extensions/codegraph.ts"
-        ]
+        ],
+        "thinking": "medium"
       },
       "researcher": {
         "model": "gemini-3.8-flash",
@@ -91,7 +93,8 @@
           "ketch_docs",
           "ketch_crawl",
           "mem0_memory"
-        ]
+        ],
+        "thinking": "medium"
       },
       "worker": {
         "model": "gemini-3.1-flash-lite",
@@ -121,7 +124,8 @@
           "/Users/javier.cabrera/.pi/agent/extensions/subagent-only/hippocampus-readonly.ts",
           "/Users/javier.cabrera/.pi/agent/extensions/subagent-only/mem0-fallback.ts",
           "/Users/javier.cabrera/.pi/agent/npm/node_modules/@vndv/pi-codegraph/extensions/codegraph.ts"
-        ]
+        ],
+        "thinking": "medium"
       },
       "scout": {
         "model": "gemini-3.1-flash-lite",
@@ -150,7 +154,8 @@
           "/Users/javier.cabrera/.pi/agent/extensions/subagent-only/hippocampus-readonly.ts",
           "/Users/javier.cabrera/.pi/agent/extensions/subagent-only/mem0-fallback.ts",
           "/Users/javier.cabrera/.pi/agent/npm/node_modules/@vndv/pi-codegraph/extensions/codegraph.ts"
-        ]
+        ],
+        "thinking": "medium"
       },
       "reviewer": {
         "model": "gemini-3.1-pro-preview",
@@ -178,7 +183,8 @@
           "/Users/javier.cabrera/.pi/agent/extensions/subagent-only/hippocampus-readonly.ts",
           "/Users/javier.cabrera/.pi/agent/extensions/subagent-only/mem0-fallback.ts",
           "/Users/javier.cabrera/.pi/agent/npm/node_modules/@vndv/pi-codegraph/extensions/codegraph.ts"
-        ]
+        ],
+        "thinking": "medium"
       },
       "evidence-auditor": {
         "tools": [
@@ -190,7 +196,8 @@
           "ketch_docs",
           "ketch_crawl",
           "mem0_memory"
-        ]
+        ],
+        "thinking": "medium"
       }
     },
     "defaultSubagentOnlyExtensions": [
@@ -198,7 +205,8 @@
       "/Users/javier.cabrera/.pi/agent/extensions/prompt-logger.ts",
       "/Users/javier.cabrera/.pi/agent/extensions/subagent-only/hippocampus-readonly.ts",
       "/Users/javier.cabrera/.pi/agent/extensions/subagent-only/mem0-fallback.ts"
-    ]
+    ],
+    "defaultThinking": "medium"
   },
   "hippocampus": {
     "enabled": true,
