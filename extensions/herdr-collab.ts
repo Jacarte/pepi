@@ -25,7 +25,6 @@ export default function (pi: ExtensionAPI) {
   const agentDir = resolve(__dirname, "..");
   const deps: CollabDeps = {
     exec: createExec(env),
-    fetch: (...args) => fetch(...args),
     env,
     agentDir,
     builtinAgentsDir: join(agentDir, "npm", "node_modules", "pi-subagents", "agents"),
@@ -90,7 +89,7 @@ export default function (pi: ExtensionAPI) {
     signal,
   });
   const optIn = "Herdr collaboration mode only: use when the user explicitly asks for herdr mode; pi-subagents stays the default.";
-  const model = Type.Optional(Type.String({ description: "Explicit provider/id; skips routing. Omit to route like jev_route recommend." }));
+  const model = Type.Optional(Type.String({ description: "Explicit provider/id. Omit to use the role's pinned model; a role without one fails." }));
   const spawnRoles = ROLE_NAMES.map((role) => Type.Literal(role));
 
   pi.registerTool({
@@ -100,7 +99,7 @@ export default function (pi: ExtensionAPI) {
       `${optIn} Start a wave of interactive pi panes (parent keeps the left half; panes tile the right half) with pi-subagents role definitions. ` +
       `Max ${MAX_PARALLEL_WORKERS} open worker panes per run. Parallel writers each get a jj workspace (git worktree fallback) ` +
       "under ~/.herdr-ws/<run>/<name>; a lone writer uses the main checkout (herdr_merge never integrates it). Without model, " +
-      "worker/delegate are routed in-process; other roles use their pinned settings model (routed only if none). " +
+      "each role uses its pinned settings model; a role with no pin requires model. " +
       "Returns after each task is submitted; use herdr_wait next.",
     executionMode: "sequential",
     parameters: Type.Object({
@@ -119,7 +118,7 @@ export default function (pi: ExtensionAPI) {
     }, { additionalProperties: false }),
     async execute(_id, params, signal, _update, ctx) {
       const result = await collab.spawn(params, call(ctx, signal));
-      return text(`herdr run ${result.runId}: started ${result.panes.map((p) => `${p.name} (${p.role}, ${p.model} [${p.modelSource}${p.modelNote ? `: ${p.modelNote}` : ""}], ${p.placement}${p.codegraph ? `, codegraph ${p.codegraph}` : ""})`).join("; ")}`, result);
+      return text(`herdr run ${result.runId}: started ${result.panes.map((p) => `${p.name} (${p.role}, ${p.model} [${p.modelSource}], ${p.placement}${p.codegraph ? `, codegraph ${p.codegraph}` : ""})`).join("; ")}`, result);
     },
   });
 
@@ -200,7 +199,7 @@ export default function (pi: ExtensionAPI) {
     description:
       `${optIn} Mechanically integrate finished worker workspaces: jj new w1 w2 ... in ~/.herdr-ws/<run>/integration ` +
       "(git: sequential merges). Clean: seal the change and mark panes merged (panes and workspaces stay alive). Conflict: " +
-      "spawn one worker fixer (model routed like a normal worker unless fixerModel is given) in the integration workspace; after it finishes, call herdr_merge with no workers to re-check.",
+      "spawn one worker fixer (model: fixerModel, else the worker role's pinned model) in the integration workspace; after it finishes, call herdr_merge with no workers to re-check.",
     executionMode: "sequential",
     parameters: Type.Object({
       runId,

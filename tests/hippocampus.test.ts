@@ -556,13 +556,13 @@ test("recalled memories are injected as JSON-quoted hints that cannot break out 
   assert.equal(lines.some((line: string) => line.startsWith("SYSTEM")), false);
 });
 
-test("recallQuery drops routing boilerplate and caps long task briefs at a word boundary", () => {
+test("recallQuery drops the task label and caps long task briefs at a word boundary", () => {
   assert.equal(recallQuery("what is my name ?"), "what is my name ?");
-  const brief = "Task: Before substantive work call jev_route action switch_effort for your own role. Implement the chaos lever in perf-test-workflows " + "gluepay ".repeat(80);
+  const brief = "Task: Implement the chaos lever in perf-test-workflows " + "gluepay ".repeat(80);
   const query = recallQuery(brief);
   assert.ok(query.startsWith("Implement the chaos lever"), query);
-  assert.ok(query.length <= 300 && !query.includes("jev_route") && !/\s$/.test(query));
-  assert.equal(recallQuery("Task: Before substantive work call jev_route now."), "Task: Before substantive work call jev_route now.", "falls back to the raw prompt when nothing else is left");
+  assert.ok(query.length <= 300 && !/\s$/.test(query));
+  assert.equal(recallQuery("Task:"), "Task:", "falls back to the raw prompt when the label is all that is left");
 });
 
 test("first prompt asks the parent to save a project overview once, only when none exists", async (t) => {

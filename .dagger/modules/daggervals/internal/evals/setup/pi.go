@@ -15,11 +15,17 @@ type PiSetup struct {
 	Env       *dagger.EnvFile
 	Profile   string
 	// Bake copies the workspace into the image filesystem (instead of mounting it)
-	// and skips the auth mount; Auth and Env may then be nil.
+	// and skips the auth mount; Auth and Env may then be nil. A baked image carries
+	// no ablation: ForceDelegation with Bake fails.
 	Bake bool
 	// Memory rewrites the hippocampus section (and, off, the extensions list) in the
 	// container's settings.json only; the profiles on disk are not touched.
 	Memory memory.Mode
+	// ForceDelegation appends the mandatory delegation section to AGENTS.md (see
+	// appendForcedDelegation). Resolve must run first.
+	ForceDelegation bool
+	// ablationAgents is the AGENTS.md text Resolve computed for ForceDelegation.
+	ablationAgents *string
 }
 
 // memorySettingsScript is run by node with the mode, the base URL and the project id. On needs
@@ -58,6 +64,9 @@ func memorySettingsCommand(mode memory.Mode) []string {
 // Copy needed files, setup
 // the needed for pi and return a new Container setup function
 func (c *PiSetup) Setup() dagger.WithContainerFunc {
+	if err := c.validateAblations(); err != nil {
+		panic(err)
+	}
 
 	return func(container *dagger.Container) *dagger.Container {
 
@@ -74,6 +83,8 @@ func (c *PiSetup) Setup() dagger.WithContainerFunc {
 			container = container.WithMountedDirectory("/root/.pi/agent", c.Workspace).
 				WithMountedSecret("/root/.pi/agent/auth.json", c.Auth).
 				WithExec([]string{"/root/.pi/agent/profile.sh", c.Profile})
+			// The eval-only ablation writes AGENTS.md after profile.sh; a baked image never has it.
+			container = c.applyAblations(container)
 			// TODO install ketch
 			// TODO install herdr
 		}
@@ -101,8 +112,8 @@ func (c *PiSetup) Setup() dagger.WithContainerFunc {
 // setupFilesHashScript hashes, from the current directory, only the files that define the
 // agent setup; $1 is the profile. Volatile workspace files (budget history, caches, run
 // history, ...) and CI files (.github, eval-baseline, .eval.track) must not change the run ID.
-// Root settings.json/mcp.json/models-router.json are overlaid by the profile, so the profile
-// directory is hashed instead.
+// Root settings.json/mcp.json are overlaid by the profile, so the profile directory is hashed
+// instead.
 const setupFilesHashScript = `
 paths=()
 for p in AGENTS.md profile.sh extensions skills prompts workflows "profiles/$1" .dagger; do
@@ -124,8 +135,8 @@ func (c *PiSetup) GetSetupId(ctx context.Context, container *dagger.Container) (
 	if err != nil {
 		return "", err
 	}
-	// The final id is sha256(workspace sha + env content + profile name), hex, no newline.
-	sum := sha256.Sum256([]byte(strings.TrimSpace(shaFolder) + envContent + c.Profile))
+	// The final id is sha256(workspace sha + env content + profile name + ablation suffix), hex, no newline.
+	sum := sha256.Sum256([]byte(setupIdInput(strings.TrimSpace(shaFolder), envContent, c.Profile, c.ForceDelegation)))
 	return hex.EncodeToString(sum[:]), nil
 
 }

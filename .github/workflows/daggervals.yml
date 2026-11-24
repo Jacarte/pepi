@@ -1,9 +1,6 @@
 # Runs the daggervals Dagger module (`dagger call daggervals hello`).
 # Runs on every push to main and manually; the job is bound to the `evals` GitHub Environment, which holds the secrets:
 #   PI_AUTH  content of an evaluation-only auth.json (written to a 0600 temp file, passed as a Dagger secret)
-#   TYPESAFE_API_KEY  key for the Jev router; hello calls jev_route and fails without it (written to a 0600 env file)
-# Optional repository/environment variable: JEV_MODEL (Jev classifier model override).
-# TYPESAFE_API_KEY and JEV_MODEL may only use [A-Za-z0-9._~+/=-] (Dagger env files alter quotes, $ and #).
 # Never put GitHub expressions inside `run:` scripts; pass values through `env:`.
 
 name: daggervals
@@ -52,36 +49,17 @@ jobs:
       - name: Write secrets
         env:
           PI_AUTH: ${{ secrets.PI_AUTH }}
-          TYPESAFE_API_KEY: ${{ secrets.TYPESAFE_API_KEY }}
-          JEV_MODEL: ${{ vars.JEV_MODEL }}
         run: |
           set -euo pipefail
           if [[ -z "$PI_AUTH" ]]; then
             echo "::error::Secret PI_AUTH is not set in the evals environment."
             exit 1
           fi
-          if [[ -z "$TYPESAFE_API_KEY" ]]; then
-            echo "::error::Secret TYPESAFE_API_KEY is not set in the evals environment; hello must exercise the Jev router."
-            exit 1
-          fi
-          # Dagger's env-file parser strips quotes and expands variables, so only allow
-          # characters it passes through unchanged. Never echo the values.
-          safe_env_value='^[A-Za-z0-9._~+/=-]+$'
-          if [[ ! "$TYPESAFE_API_KEY" =~ $safe_env_value ]]; then
-            echo "::error::Secret TYPESAFE_API_KEY contains characters outside [A-Za-z0-9._~+/=-]."
-            exit 1
-          fi
-          if [[ -n "$JEV_MODEL" && ! "$JEV_MODEL" =~ $safe_env_value ]]; then
-            echo "::error::Variable JEV_MODEL contains characters outside [A-Za-z0-9._~+/=-]."
-            exit 1
-          fi
           umask 077
           mkdir -p "$RUNNER_TEMP/secrets"
           printf '%s' "$PI_AUTH" > "$RUNNER_TEMP/secrets/auth.json"
-          {
-            printf 'TYPESAFE_API_KEY=%s\n' "$TYPESAFE_API_KEY"
-            if [[ -n "$JEV_MODEL" ]]; then printf 'JEV_MODEL=%s\n' "$JEV_MODEL"; fi
-          } > "$RUNNER_TEMP/secrets/agent.env"
+          # The module takes an agent env file; it holds no variable now.
+          : > "$RUNNER_TEMP/secrets/agent.env"
 
       - name: Dagger call
         env:

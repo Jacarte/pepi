@@ -72,7 +72,7 @@ func TestScanSecrets(t *testing.T) {
 }
 
 func TestSecretValues(t *testing.T) {
-	env := []EnvVar{{"TYPESAFE_API_KEY", "key-value-1"}, {"JEV_MODEL", "bedrock-claude"}, {"LLM_TOKEN", "tok"}, {"OPENAI_BASE_URL", "https://llm"}}
+	env := []EnvVar{{"SAMPLE_API_KEY", "key-value-1"}, {"SAMPLE_MODEL", "bedrock-claude"}, {"LLM_TOKEN", "tok"}, {"OPENAI_BASE_URL", "https://llm"}}
 	auth := `{"anthropic":{"type":"oauth","access":"access-token-1","refresh":"refresh-token-1","expires":1},"list":["in-a-list-1"]}`
 	got := SecretValues(env, auth)
 	slices.Sort(got)

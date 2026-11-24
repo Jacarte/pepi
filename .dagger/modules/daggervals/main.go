@@ -141,6 +141,9 @@ func (m *Daggervals) Evals(
 	// +optional
 	// +default=true
 	memoryFixture bool,
+	// Append the mandatory delegation section to the agent's AGENTS.md (implementation by a worker, review by a reviewer). The run id gets @forced.
+	// +optional
+	forceDelegation bool,
 ) (*EvalResult, error) {
 	if err := engine.ValidateRuns(runs); err != nil {
 		return nil, err
@@ -174,8 +177,13 @@ func (m *Daggervals) Evals(
 		}
 		tasks = repoSuite.Tasks
 	}
-	piSetup := setup.PiSetup{Workspace: m.Source, Auth: auth, Env: agentEnv.AsEnvFile(), Profile: agentProfile, Memory: memoryConfig.Mode()}
+	piSetup := setup.PiSetup{Workspace: m.Source, Auth: auth, Env: agentEnv.AsEnvFile(), Profile: agentProfile, Memory: memoryConfig.Mode(), ForceDelegation: forceDelegation}
+	if err := piSetup.Resolve(ctx); err != nil {
+		return nil, err
+	}
 	piAgent := llm.NewPiAgent(&piSetup)
+	// The judge grades the agent under test; it never runs with the ablation flags.
+	judgeAgent := llm.NewPiAgent(piSetup.WithoutAblations())
 
 	baseID := fixed
 	if baseID == "" {
@@ -191,11 +199,12 @@ func (m *Daggervals) Evals(
 	} else if suite != "" && suite != "rust" {
 		idSuffix = "@" + suite
 	}
+	idSuffix += setup.AblationRunIDSuffix(forceDelegation)
 	idSuffix += memoryConfig.RunIDSuffix()
 
 	result := &EvalResult{Cache: cacheDir}
 	for i := 1; i <= runs; i++ {
-		one, err := evalOnce(ctx, piAgent, piSetup.Env, memoryConfig, tasks, rootContainer, agentProfile, result.Cache, engine.RunID(baseID, i, runs, idSuffix))
+		one, err := evalOnce(ctx, piAgent, piSetup.Env, memoryConfig, tasks, rootContainer, agentProfile, result.Cache, engine.RunID(baseID, i, runs, idSuffix), judgeAgent)
 		if err != nil {
 			return nil, err
 		}
@@ -208,9 +217,9 @@ func (m *Daggervals) Evals(
 	return result, nil
 }
 
-// evalOnce runs the eval and the judge once under runId. The returned cache directory is
-// cacheDir plus this run's entry and eval report.
-func evalOnce(ctx context.Context, piAgent *llm.PiAgent, agentEnv *dagger.EnvFile, memoryConfig *memory.Config, tasks []task.FixTask, rootContainer *dagger.Container, agentProfile string, cacheDir *dagger.Directory, runId string) (*EvalResult, error) {
+// evalOnce runs the agent under test (piAgent) and the judge (judgeAgent) once under runId. The
+// returned cache directory is cacheDir plus this run's entry and eval report.
+func evalOnce(ctx context.Context, piAgent *llm.PiAgent, agentEnv *dagger.EnvFile, memoryConfig *memory.Config, tasks []task.FixTask, rootContainer *dagger.Container, agentProfile string, cacheDir *dagger.Directory, runId string, judgeAgent *llm.PiAgent) (*EvalResult, error) {
 	evalCache := cache.NewGHCache(cacheDir, ctx)
 	evalEngine := engine.NewEngine(piAgent, tasks, evalCache)
 	evalEngine.Memory = memoryConfig
@@ -220,7 +229,7 @@ func evalOnce(ctx context.Context, piAgent *llm.PiAgent, agentEnv *dagger.EnvFil
 	if err != nil {
 		return nil, err
 	}
-	judge := &judge.Judge{Agent: piAgent}
+	judge := &judge.Judge{Agent: judgeAgent}
 	judgedEvals, err := judge.Judge(ctx, outcomes, rootContainer)
 	if err != nil {
 		return nil, err
@@ -573,7 +582,7 @@ func (m *Daggervals) CiEvalRun(
 		}
 		repo, ref, names = tasksRepo, tasksRef, strings.Join(s.TaskNames, ",")
 	}
-	result, err := m.Evals(ctx, auth, agentEnv, agentProfile, dag.Directory(), t.FixedName(s), s.Suite, repo, ref, names, nil, t.Runs, hippocampusEnv, false, "", true)
+	result, err := m.Evals(ctx, auth, agentEnv, agentProfile, dag.Directory(), t.FixedName(s), s.Suite, repo, ref, names, nil, t.Runs, hippocampusEnv, false, "", true, false)
 	if err != nil {
 		return nil, err
 	}

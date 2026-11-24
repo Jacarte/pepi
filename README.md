@@ -4,8 +4,8 @@ My personal [pi](https://github.com/earendil-works/pi-coding-agent) configuratio
 profiles, MCP servers, extensions, skills, prompt templates, and subagent workflows.
 
 Clone this to `~/.pi/agent`, **apply a profile**, then configure local paths and
-credentials before starting pi. The root `settings.json`, `mcp.json`, and
-`models-router.json` are ignored runtime overlays, not tracked defaults.
+credentials before starting pi. The root `settings.json` and `mcp.json` are ignored
+runtime overlays, not tracked defaults.
 
 ---
 
@@ -30,9 +30,9 @@ files absent from the selected profile:
 
 | Profile | Files copied to root |
 |---|---|
-| `codex` | `settings.json`, `mcp.json`, `models-router.json`, `models.json` |
-| `bedrock` | `settings.json`, `mcp.json`, `models-router.json` |
-| `gemini` | `settings.json`, `mcp.json`, `models-router.json` |
+| `codex` | `settings.json`, `mcp.json`, `models.json` |
+| `bedrock` | `settings.json`, `mcp.json` |
+| `gemini` | `settings.json`, `mcp.json` |
 
 The root `models.json` is tracked and currently matches the Codex profile's model
 context-window overrides. Applying Bedrock or Gemini leaves it in place. Reapplying a profile
@@ -88,7 +88,6 @@ export CONTEXT7_API_KEY="..."     # context7
 # export NEO4J_PASSWORD="..."     # neo4j (Bedrock)
 # export ELEVENLABS_API_KEY="..." # speaker (Bedrock)
 # export DEEPGRAM_API_KEY="..."   # speaker (Bedrock)
-# export TYPESAFE_API_KEY="..."   # local jev_route tool (not MCP)
 ```
 
 ### 4. Start pi
@@ -130,7 +129,7 @@ All seven tracked profiles (`codex`, `cloud`, `openai`, `bedrock`, `bedrock-sonn
 `gemini`, and `plain`) set parent startup thinking to `medium`. Profiles with subagents
 also set `defaultThinking` and each enabled role's `thinking` to `medium`, so
 bundled role defaults cannot retain an old high/low setting. The plain profile
-still has no subagent configuration. Task-specific effort is applied separately.
+still has no subagent configuration.
 Codex, Bedrock, and Gemini use subagent project-root resolution `git-root`.
 
 | Setting / agent | Codex model (`openai-codex`) | Codex initial effort | Bedrock model (`litellm`) | Gemini model (`google`) |
@@ -144,8 +143,7 @@ Codex, Bedrock, and Gemini use subagent project-root resolution `git-root`.
 | `researcher`, `evidence-auditor` | `gpt-6.1-sol` | medium | inherits subagent default | `gemini-3.8-flash` (auditor inherits) |
 | `claude-code`, `claude-code-writer` | disabled | — | disabled | disabled |
 
-Codex role `thinking` settings establish the listed initial effort; task-local
-`switch_effort` enforces the activity policy below. A mechanical writer can use
+Codex role `thinking` settings establish the listed initial effort. A mechanical writer can use
 `model: "openai-codex/gpt-6-luna:medium"`; exploratory or coupled discovery can use
 `model: "openai-codex/gpt-6.1-sol:medium"` when needed. Regular implementation
 stays on Sol. Per-run model overrides take precedence over role pins, so use
@@ -178,130 +176,6 @@ and paths, then start a fresh Pi session and check `/subagents-models`. Keep the
 Gemini role assignments above; the Codex-specific Astra authorization and `fast`
 settings do not replace them. Gemini's selected models and account access are
 checked by Pi/provider at use time, not by the profile copy script.
-
-`models-router.json` is a separate mapping for the local `jev_route` tool:
-
-| Lane | Codex | Bedrock | Gemini |
-|---|---|---|---|
-| `LOCAL` | `openai-codex/gpt-6-luna` | `litellm/bedrock-claude-haiku-5-5` | `google/gemini-3.1-flash-lite` |
-| `CHEAP` | `openai-codex/gpt-6.1-sol` | `litellm/bedrock-claude-sonnet-5-5` | `google/gemini-3.8-flash` |
-| `FRONTIER` | `openai-codex/gpt-6.1-sol` | `litellm/bedrock-claude-opus-5-5` | `google/gemini-3.1-pro-preview` |
-
-Each lane requires a nonempty `provider` and `id`. Each file also requires a
-top-level numeric `minConfidence` in `[0,1]` (currently **0.4** in these profiles;
-the Codex value may be tuned separately). Missing, nonfinite, nonnumeric, or
-out-of-range values fail before classification. Edit the tracked profile files to preserve changes
-across `profile.sh` switches; `recommend` reads the active root config on each call.
-
-For `jev_route` action `recommend`, Jev answers two Choice questions about the
-supplied `role`, `task`, `context` and `files`: `lane` (`local`, `cheap`, `frontier`)
-and `blast_radius` (`contained`,
-`cross_cutting`, `critical`). The lane choice is used unless a rule raises it, in
-this order:
-
-1. lane confidence below `minConfidence` → `FRONTIER` (`low_confidence`);
-2. `critical` blast radius with blast-radius confidence at or above
-   `minConfidence` → `FRONTIER` (`critical`). Unlike rule 1, exactly
-   `minConfidence` counts as confident here (`>=`, whereas the lane rule is
-   strict `<`);
-3. `critical` blast radius with confidence below `minConfidence` → at least
-   `CHEAP` (`uncertain_critical_floor`), not `FRONTIER`;
-4. `cross_cutting` blast radius → at least `CHEAP` (`cross_cutting_floor`).
-
-Rules never lower a lane. The result reports `escalated` and `reason` (the first
-rule that raised the lane, or `null`). Invalid classifier answers fail; there is
-no fallback lane.
-
-The Bedrock router's `LOCAL` ID differs from the worker/scout override. Codex's
-`CHEAP` and `FRONTIER` advice both use Sol; that advisory mapping does not change
-the mandatory Astra parent/reviewer/oracle role pins. All three router files also
-contain `HUMAN`, which the extension deliberately ignores; routing is not approval.
-
-`recommend` returns a **model proposal**. It never changes the caller's model or
-effort and does not require adopting the returned ID. The lane rules above shape
-that proposal; they do not authorize overriding a profile pin or launching Astra.
-The parent chooses a model within the assignment's authorization. A failed
-attempt calls for evidence and a corrected brief or explicit task-local choice,
-with no automatic FRONTIER retry.
-
-### Effort policy
-
-Before substantive work, the native Pi parent and every native Pi child must call
-`jev_route` with `action: "switch_effort"` for its own assignment. The tool applies
-a fixed policy, rather than asking Jev to choose an arbitrary effort level:
-
-| Activity | Astra | Sol / Luna | Configured Gemini models below | Other models |
-|---|---|---|---|---|
-| Research | `xhigh` | `xhigh` | `high` (policy intent: `xhigh`) | `xhigh` |
-| Performance or debugging checks | `high` | `high` | `high` | `high` |
-| Exploration / known-file reading | `low` | `medium` | `medium` | `medium` |
-| Everything else | `medium` | `medium` | `medium` | `medium` |
-
-The research exception matches provider `google` and exactly `gemini-3.8-flash`,
-`gemini-3.1-flash-lite`, or `gemini-3.1-pro-preview`. Google's
-[thinking documentation](https://aistudio.google.com/docs/thinking) gives these
-models a highest native level of `high`. Their generic `xhigh` policy therefore
-resolves to Pi `high`, with reason `gemini_native_max_high`. Unknown Google models
-and the same IDs under another provider retain the exact `xhigh` requirement.
-The exception requires a reasoning-capable model and rejects an explicit
-`thinkingLevelMap.high` that disables or remaps high (for example, `null` or
-`"LOW"`); an absent mapping or identity `"high"` / `"HIGH"` is allowed.
-This is level translation, not a claim of equal reasoning budgets or performance
-across providers.
-
-For mixed tasks, research wins over performance/debugging, which wins over
-exploration, then default. Performance/debugging checks retain high effort while
-tracking interacting states or hypotheses. Routine acceptance checks and ordinary
-reviews use medium unless their actual assignment includes one of those activities.
-
-Pass all applicable `activities` explicitly to apply the policy locally without a
-Jev request or API key. For example, a bounded code lookup can call the tool with:
-
-```json
-{
-  "action": "switch_effort",
-  "role": "scout",
-  "task": "Read the named entry point and identify its direct callers.",
-  "activities": ["exploration"]
-}
-```
-
-Allowed tags are `exploration`, `research`, `performance`, `debugging`, and
-`default`. Describe the actual task; role names and the surrounding project's
-risk do not determine its activity. Include research or debugging tags even when
-those tasks also involve file reading. When `activities` is omitted, existing
-callers still work: Jev classifies activities from the supplied task/context using
-separate yes/no Choice questions, then the same local policy selects effort.
-Invalid tags or classifier responses fail explicitly.
-
-The tool reports `policyEffort` (generic activity intent), `requiredEffort`
-(resolved Pi target), `requestedEffort` (the value passed to Pi), `actualEffort`
-(Pi session readback), `mappingReason`, and whether the effort changed. Success
-requires the readback to exactly match the resolved target: the three Gemini
-models must read back `high`, while other models must read back `xhigh` for
-research. Clamps to another level fail with the required and actual levels; stop
-that assignment and report the mismatch. No arbitrary clamp is accepted and the
-tool never switches models. The reported Pi effort may remain applied after an
-error. Cancellation and stale session/model decisions also fail explicitly.
-
-Pi readback confirms session state, not provider acknowledgement or the amount
-of reasoning executed. The Google mapping was checked against Pi v1.1.0's
-[Google adapter](https://github.com/earendil-works/pi/blob/v1.1.0/packages/ai/src/api/google-generative-ai.ts)
-and thinking-level handling; locally installed model descriptors and live provider
-execution are not verified by these offline tests. Pi installation is unpinned;
-`lastChangelogVersion` does not pin the installed package or its model descriptors.
-
-The effort mapping is enforced inside the tool. Calling it before work remains
-an instruction requirement, carried in the tool description for children that do
-not inherit global `AGENTS.md`; it is not a continuous guard against later manual
-effort changes. Reapply it when the actual assignment changes materially.
-
-The tracked Bedrock, Codex, Cloud, and Gemini profiles preserve router availability for
-all native Pi subagent roles through `jev_route` allowlists and explicit/default
-`subagentOnlyExtensions`, including when reapplying a profile. No router extension
-or child tool is removed. Existing capability restrictions still apply; adapt the
-absolute extension paths to your machine. External CLI runtimes (`claude-code`,
-`claude-code-writer`) are outside this Pi extension's scope.
 
 ### Subagent workflows
 
@@ -336,8 +210,7 @@ return { edit, review };
 ```
 
 Here `mechanicalTask` and `reviewTask` are briefs supplied by the caller. Include
-the task-local `switch_effort` instruction, exact source/scope, acceptance checks,
-and applicable permissions; give the reviewer the completed diff and check
+exact source/scope, acceptance checks, and applicable permissions; give the reviewer the completed diff and check
 evidence. Check its actual verdict before integration or publication. For normal
 implementation use `openai-codex/gpt-6.1-sol:medium`. Any task-local model exception
 belongs on its one named launch; later tasks select their own model and do not
@@ -383,13 +256,12 @@ Local TypeScript extension entry points are tracked under `extensions/`:
 | `extensions/codex-usage-bar.ts` | Codex usage-window status via `codex app-server`; requires the Codex CLI for that status query |
 | `extensions/litellm-budget.ts` | LiteLLM spend status and `/budget` |
 | `extensions/hippocampus.ts` | Project-scoped recall and durable completed-work capture through `mem0_memory`; children load `extensions/subagent-only/hippocampus-readonly.ts` |
-| `extensions/pi-typesafe-router.ts` | `jev_route`: advisory model proposals using `models-router.json` and a fixed activity-to-effort policy without changing models. Explicit activities apply locally; model proposals or omitted-activity classification call `https://api.typesafe.ai/v1/systemone` with `TYPESAFE_API_KEY` (`JEV_MODEL` optionally selects classifier) |
 | `extensions/prompt-logger.ts` | Provider-request JSONL logging, including prompts/messages/tools; defaults to `logs/prompts.jsonl`. Disable with `PROMPT_LOG=0`, override with `PROMPT_LOG_FILE` |
 | `extensions/top-status.ts` | Status widget above the editor and `/topbar` layout toggle |
 
 The prompt logger redacts string values under secret-looking keys, **not all
 sensitive text**. Treat its output as private. The profiles explicitly load the
-logger/router into selected children via the machine-specific paths noted above.
+logger into selected children via the machine-specific paths noted above.
 
 ## Semantic memory
 
@@ -535,7 +407,7 @@ When upgrading an existing installation:
 
 | Path | Purpose |
 |---|---|
-| `profiles/` | Tracked profile settings, MCP inventory, and router model mappings |
+| `profiles/` | Tracked profile settings and MCP inventory |
 | `profile.sh` | Applies a profile overlay; no pi launch |
 | `models.json` | Tracked Codex model context-window overrides |
 | `mcp-onboarding.json` | Tracked adapter onboarding flags |
@@ -564,13 +436,18 @@ The `daggervals` Dagger module in `.dagger/modules/daggervals` runs this setup (
 - [docs/ci-eval.md](docs/ci-eval.md) covers the PR labels `eval` and `eval-full`, the approval,
   and the baselines.
 
+One eval-only ablation flag on `evals`: `--force-delegation` appends a mandatory delegation section to
+`AGENTS.md` (implementation by a `worker`, review by a `reviewer`). It is off by default, and a baked image
+rejects it. The run id gets `@forced`, and the setup id changes with it, so those runs never share a cache
+entry with the default ones.
+
 ## What is deliberately not tracked
 
 See `.gitignore` for the full list:
 
 - `auth.json`, `auth.json.bak`, `.env*` — credentials and local environment.
 - `trust.json` — machine-specific trust decisions.
-- Root `settings.json`, `mcp.json`, `models-router.json` — copied profile overlays.
+- Root `settings.json`, `mcp.json` — copied profile overlays.
 - `npm/`, `git/`, `node_modules/`, `bin/` — installed packages and helpers.
 - `sessions/`, `missions/`, `run-history.jsonl`, `logs/` — private runtime state/logs.
 - `litellm-models-dev.json`, `models-store.json`, MCP caches, `web-search-cache/` — caches.

@@ -27,7 +27,6 @@
       "oracle": {
         "model": "bedrock-claude-opus-5-5",
         "tools": [
-          "jev_route",
           "read",
           "grep",
           "find",
@@ -44,7 +43,6 @@
           "codegraph_status"
         ],
         "subagentOnlyExtensions": [
-          "/Users/javier.cabrera/.pi/agent/extensions/pi-typesafe-router.ts",
           "/Users/javier.cabrera/.pi/agent/extensions/prompt-logger.ts",
           "/Users/javier.cabrera/.pi/agent/extensions/subagent-only/hippocampus-readonly.ts",
           "/Users/javier.cabrera/.pi/agent/extensions/subagent-only/mem0-fallback.ts",
@@ -63,7 +61,6 @@
           "edit",
           "write",
           "contact_supervisor",
-          "jev_route",
           "mem0_memory",
           "codegraph_search",
           "codegraph_node",
@@ -75,7 +72,6 @@
           "codegraph_status"
         ],
         "subagentOnlyExtensions": [
-          "/Users/javier.cabrera/.pi/agent/extensions/pi-typesafe-router.ts",
           "/Users/javier.cabrera/.pi/agent/extensions/prompt-logger.ts",
           "/Users/javier.cabrera/.pi/agent/extensions/subagent-only/hippocampus-readonly.ts",
           "/Users/javier.cabrera/.pi/agent/extensions/subagent-only/mem0-fallback.ts",
@@ -86,7 +82,6 @@
       "scout": {
         "model": "bedrock-claude-sonnet-5-5",
         "tools": [
-          "jev_route",
           "read",
           "grep",
           "find",
@@ -105,7 +100,6 @@
           "codegraph_status"
         ],
         "subagentOnlyExtensions": [
-          "/Users/javier.cabrera/.pi/agent/extensions/pi-typesafe-router.ts",
           "/Users/javier.cabrera/.pi/agent/extensions/prompt-logger.ts",
           "/Users/javier.cabrera/.pi/agent/extensions/subagent-only/hippocampus-readonly.ts",
           "/Users/javier.cabrera/.pi/agent/extensions/subagent-only/mem0-fallback.ts",
@@ -116,7 +110,6 @@
       "reviewer": {
         "model": "bedrock-claude-opus-5-5",
         "tools": [
-          "jev_route",
           "read",
           "grep",
           "find",
@@ -134,7 +127,6 @@
           "codegraph_status"
         ],
         "subagentOnlyExtensions": [
-          "/Users/javier.cabrera/.pi/agent/extensions/pi-typesafe-router.ts",
           "/Users/javier.cabrera/.pi/agent/extensions/prompt-logger.ts",
           "/Users/javier.cabrera/.pi/agent/extensions/subagent-only/hippocampus-readonly.ts",
           "/Users/javier.cabrera/.pi/agent/extensions/subagent-only/mem0-fallback.ts",
@@ -152,7 +144,6 @@
           "edit",
           "write",
           "contact_supervisor",
-          "jev_route",
           "mem0_memory",
           "codegraph_search",
           "codegraph_node",
@@ -164,7 +155,6 @@
           "codegraph_status"
         ],
         "subagentOnlyExtensions": [
-          "/Users/javier.cabrera/.pi/agent/extensions/pi-typesafe-router.ts",
           "/Users/javier.cabrera/.pi/agent/extensions/prompt-logger.ts",
           "/Users/javier.cabrera/.pi/agent/extensions/subagent-only/hippocampus-readonly.ts",
           "/Users/javier.cabrera/.pi/agent/extensions/subagent-only/mem0-fallback.ts",
@@ -174,7 +164,6 @@
       },
       "researcher": {
         "tools": [
-          "jev_route",
           "read",
           "write",
           "ketch_search",
@@ -188,7 +177,6 @@
       },
       "evidence-auditor": {
         "tools": [
-          "jev_route",
           "read",
           "ketch_search",
           "ketch_scrape",
@@ -201,7 +189,6 @@
       }
     },
     "defaultSubagentOnlyExtensions": [
-      "/Users/javier.cabrera/.pi/agent/extensions/pi-typesafe-router.ts",
       "/Users/javier.cabrera/.pi/agent/extensions/prompt-logger.ts",
       "/Users/javier.cabrera/.pi/agent/extensions/subagent-only/hippocampus-readonly.ts",
       "/Users/javier.cabrera/.pi/agent/extensions/subagent-only/mem0-fallback.ts"

@@ -90,60 +90,11 @@ orchestrates and integrates.
 ### Model and effort quality guardrail (parent and every subagent)
 
 - Choose models explicitly for the actual assignment, following operator scope
-  and the active profile. Jev model advice is optional: `jev_route` action
-  `recommend` returns advice, not authority to replace a profile pin or switch
-  the parent. Treat the returned model as a proposal; adopt it only when it fits
-  the authorized assignment. Never automatically pass it to later children.
-- Before substantive work, the parent and **every subagent role** MUST call
-  `jev_route` with action `switch_effort` for its own assignment, passing its
-  own `role`, actual task, relevant context, and file paths. This includes
-  scout, worker, deep-worker, reviewer, oracle, researcher, evidence-auditor,
-  and delegate. A parent's effort call does not replace the child's own call.
-- Supply all applicable `activities`: `exploration`, `research`, `performance`,
-  `debugging`, or `default`. These describe the actual assignment, not its role
-  or the whole project's risk. If uncertain, omit `activities` and let Jev
-  classify the supplied task/context. Explicit activities apply the policy
-  locally without a classifier request. Do not omit research or debugging from
-  a mixed assignment merely because it also involves reading files.
-- `switch_effort` enforces this policy for the current model:
-
-  | Actual activity | Policy effort | Required Pi effort |
-  | --- | --- | --- |
-  | Research, on the three Google models below | `xhigh` | `high` |
-  | Research, on other models | `xhigh` | `xhigh` |
-  | Performance or debugging checks, on any model | `high` | `high` |
-  | Exploration on Astra | `low` | `low` |
-  | Exploration on Sol, Luna, or another model | `medium` | `medium` |
-  | Everything else | `medium` | `medium` |
-
-  The research exception is limited to provider `google` with exact IDs
-  `gemini-3.8-flash`, `gemini-3.1-flash-lite`, and `gemini-3.1-pro-preview`, whose
-  highest native level is `high`. It reports `gemini_native_max_high` as the
-  mapping reason and requires reasoning enabled with no disabled or contradictory
-  `thinkingLevelMap.high`. Unknown models and other providers retain `xhigh`.
-  This translation does not imply equal reasoning budgets across providers.
-
-  Mixed assignments use research first, then performance/debugging, then
-  exploration, then default. Performance/debugging includes tracking multiple
-  interacting states or hypotheses; retain high effort through that check.
-  A routine read or review is not automatically research or debugging.
+  and the active profile.
 - Every profile starts at `medium`; profiles with subagents also set
   `defaultThinking` and enabled role `thinking` to `medium`, overriding bundled
-  role defaults. These are startup values; call `switch_effort` for the actual
-  assignment before work. A role name alone does not determine effort.
-- The tool reports generic `policyEffort`, resolved `requiredEffort`, the actual
-  setter target `requestedEffort`, Pi readback `actualEffort`, and `mappingReason`.
-  Readback must exactly match the resolved target; a clamp or unsupported level
-  is an error. Research must read back `high` for the three configured Google
-  models and `xhigh` elsewhere. Report a mismatch and stop that assignment until
-  resolved. Pi readback is session state, not provider acknowledgement or proof
-  of executed reasoning. Do not silently downgrade or switch models. The tool
-  never changes models, other sessions, tools, permissions, or global settings.
-- Enforcement applies when `switch_effort` is called. The requirement to call
-  it before work remains instruction-based, not a continuous runtime guard.
-  The tool description carries that requirement into children even when global
-  `AGENTS.md` is not inherited. Keep the router extension and `jev_route`
-  available subject to inherited capability restrictions.
+  role defaults. These are startup values. A role name alone does not determine
+  effort.
 - For the Codex profile, keep these model defaults:
 
   | Assignment | Model |
@@ -161,9 +112,8 @@ orchestrates and integrates.
   Codex native roles set `fast: false` for standard child service by default;
   an explicit per-run `fast: true` overrides that setting. This does not
   establish the parent service tier.
-  For one launch, an effort suffix can match the policy (`:low`, `:medium`,
-  `:high`, or `:xhigh`); dispatch `thinking` is ignored. A suffix does not
-  replace the mandatory task-local `switch_effort` call.
+  For one launch, an effort suffix can set the thinking level (`:low`, `:medium`,
+  `:high`, or `:xhigh`); dispatch `thinking` is ignored.
 - In newly written Codex workflows, include the full provider/model on each
   child launch, including reviewers. Select it anew for that assignment; do not
   copy the last child's model or use a mutable shared "current model". Existing
@@ -182,9 +132,6 @@ orchestrates and integrates.
   evidence and correct the brief or task-local model choice accordingly; do
   not automatically escalate to Astra or repeat advice to obtain a preferred
   answer. If the needed capability exceeds authorized models, report it.
-- If an effort classification or optional recommendation fails, report the
-  failure rather than inventing a result. Do not send secrets to Jev. For
-  `recommend`, set `requiresImages: true` when image processing is required.
 - Use available model identity and explicit operator/profile guidance, not the
   parent's self-confidence, as evidence of capability. Do not invent rankings
   from model names or assume a child is stronger merely because it is a child.
@@ -390,10 +337,10 @@ first.
 
 - Tools: `herdr_spawn`, `herdr_wait`, `herdr_collect`, `herdr_merge`,
   `herdr_review`, `herdr_cleanup`, plus `herdr_peers` / `herdr_send`.
-- Panes use the same role definitions as pi-subagents. Herdr's default
-  `worker`/`delegate` launch path uses `jev_route recommend`; pass the explicit
-  authorized task model for those roles to preserve the model policy above.
-  Do not treat Herdr's implicit router as permission to launch Astra.
+- Panes use the same role definitions as pi-subagents. Without `model`, each
+  role uses its pinned model (or `subagents.defaultModel`); a role with neither
+  fails the spawn. Pass an explicit authorized model when the assignment needs a
+  different one, to preserve the model policy above.
 - For `scout`, omit `model` to use its configured pin for bounded discovery,
   or pass an explicit authorized model for exploratory/coupled discovery.
   An explicit model overrides the role pin.
@@ -570,6 +517,82 @@ this rule; the discovery owner checks once if its status is unknown.
 - Distinguish original defects, introduced regressions, and errors in the brief.
   Never weaken correct behavior or tests to satisfy an incorrect instruction.
   Report unrelated findings without silently absorbing them into the task.
+
+## Writing Wayfinder notes that Visor reads
+
+Visor (`~/DEV/visor`) is a read-only graph viewer for Wayfinder folders. It only
+trusts explicit, machine-readable frontmatter and never guesses readiness. Write
+every Wayfinder note in exactly the form below; other shapes are shown as
+unknown or not indexed.
+
+### Layout
+
+One folder per map: the map note at its root, tickets and other artifacts
+anywhere beneath it (`tickets/`, `specs/`, `impl-tickets/`, ...). Open the map
+folder in Visor; sibling map folders stay one level up.
+
+### Map note
+
+```yaml
+---
+title: <Map title>
+labels: [wayfinder:map]
+tags: [<project>, wayfinder]
+status: active
+---
+```
+
+### Decision ticket (research | prototype | grilling | task)
+
+```yaml
+---
+title: <Question as a title>
+labels: [wayfinder:research]     # or wayfinder:prototype | wayfinder:grilling | wayfinder:task
+parent: "[[<map-note-name>]]"    # quoted wikilink to the map; required
+status: open                     # exactly `open`, `closed` or `done`
+assignee:                        # empty = unassigned; a name = assigned
+blocked-by: []                   # always present; [] means none
+---
+```
+
+With blockers, always quote each wikilink:
+`blocked-by: ["[[t04-bulkhead-cap-design]]", "[[t05-rollout]]"]`.
+
+### Implementation ticket (a build slice, not a decision)
+
+```yaml
+---
+title: <Slice title>
+labels: [implementation:ticket]
+status: ready-for-agent          # free text; shown, never used for readiness
+blocked-by: []
+---
+```
+
+It is drawn with the ticket graph, but Visor deliberately infers no readiness
+from it. Put real dependencies in `blocked-by`, not only in the body text.
+
+### Everything else
+
+Specs, briefs, handoffs, indexes and session notes need no Wayfinder fields.
+Link them with `[[wikilinks]]` from the map or a ticket and they appear as
+context notes. Do not give them a ticket label or the tag `wayfinder-ticket`.
+
+### Rules that avoid the usual failures
+
+- Always quote YAML values that contain `:` (`title: "Agent image: tools"`);
+  an unquoted colon makes the whole note invisible to Visor.
+- `status` is exactly `open`, `closed` or `done` on decision tickets. Any other
+  value (`built-unmerged`, `active`, ...) makes the ticket and everything that
+  depends on it `unknown`. Track finer states in the body.
+- Blockers are wikilinks to notes inside the map folder. A bare slug, an
+  unquoted `[[[a]]]`, or a missing note is flagged "malformed blocker" and the
+  dependent can never show as ready.
+- `parent` points at exactly one map. Two maps in the same folder cannot be
+  told apart, so give each map its own folder.
+- `frontier` = open, unassigned, all blockers closed/done. `assigned` = same but
+  with an `assignee`. Cycles, unknown statuses and unavailable blockers make a
+  ticket `unknown`.
 
 ## PR descriptions
 

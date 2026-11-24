@@ -199,12 +199,9 @@ export async function requestJson(url: string, timeoutMs: number, init: RequestI
 }
 
 /** Build the automatic-recall query from a prompt: long task briefs make poor search strings, so drop
- *  boilerplate routing sentences, collapse whitespace and cap the length at a word boundary. */
+ *  the leading "Task:" label, collapse whitespace and cap the length at a word boundary. */
 export function recallQuery(prompt: string, maxChars = 300): string {
-  const text = prompt.replace(/\s+/g, " ").trim()
-    .replace(/^task:\s*/i, "")
-    .replace(/(?:^|(?<=[.!?]\s))[^.!?]*\bjev_route\b[^.!?]*[.!?]\s*/gi, "")
-    .trim();
+  const text = prompt.replace(/\s+/g, " ").trim().replace(/^task:\s*/i, "").trim();
   const base = text || prompt.replace(/\s+/g, " ").trim();
   if (base.length <= maxChars) return base;
   const cut = base.slice(0, maxChars);

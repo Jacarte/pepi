@@ -435,8 +435,8 @@ Analyze every task in this order and support each claim with evidence from the d
 6. Process and efficiency. From agentStats and processStats: number of turns, cost,
    which roles and models ran and how the work was split between them (orchestration),
    and whether any agent errored, was cut short, or emitted warnings. Mention network
-   volume only if it is unusual. Only state that an extension or a router such as Jev
-   was used if the data shows it; otherwise say it cannot be told.
+   volume only if it is unusual. Only state that an extension was used if the data
+   shows it; otherwise say it cannot be told.
    Tools: name the tools used most and any with errors, from toolUsage.
    Timing, always with numbers in seconds:
    - total wall clock and the share spent in each role (byRoleMs);
@@ -546,7 +546,7 @@ Method:
      tests that BEFORE did not).
    - Tool calls: from toolUsage, the total, errors, calls per turn and the per-tool mix,
      with the change AFTER vs BEFORE. Say which tools grew or shrank, especially bash,
-     read, edit, write, subagent and jev_route, and whether new tool errors explain a
+     read, edit, write and subagent, and whether new tool errors explain a
      regression. Remember the counts are parent-only: if subagent calls rose while the
      other parent tool calls fell, work moved into children whose tool calls are not recorded.
    - Tokens: total tokens, cache hit ratio, and cost and tokens per turn, with the change
@@ -638,7 +638,6 @@ a final row for the totals. Use exactly these columns:
 | Tool errors | | | |
 | Tool calls per turn | | | |
 | Subagent calls | | | |
-| jev_route calls | | | |
 
 - Then add a third small table with the tool mix, summing toolUsage.byTool over the
   shared tasks. Include every tool that appears in either file, most used first:
