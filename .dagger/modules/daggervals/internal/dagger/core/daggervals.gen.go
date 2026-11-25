@@ -16,9 +16,10 @@ type Daggervals struct { // daggervals (../../../../../../:0:0)
 	// field again.
 	refetchID bool
 
-	ciSetupHash *string
-	hello       *string
-	id          *ID
+	ciSetupHash     *string
+	hello           *string
+	id              *ID
+	recallInjection *string
 }
 
 func (r *Daggervals) WithGraphQLQuery(q *querybuilder.Selection) *Daggervals {
@@ -521,6 +522,37 @@ func (r *Daggervals) UnmarshalJSON(bs []byte) error {
 	}
 	*r = Daggervals{query: selectNode(dag.QueryBuilder(), id, "Daggervals")}
 	return nil
+}
+
+// DaggervalsRecallInjectionOpts contains options for Daggervals.RecallInjection
+type DaggervalsRecallInjectionOpts struct {
+	// Recall gate of the run: recall on turns 1, N+1, 2N+1, ... (1 to 50).
+	//
+	// Default: 1
+	RecallEveryNturns int
+}
+
+// RecallInjection checks a Pi session transcript for the context cost of Hippocampus recall:
+// no memory injected twice, recall only on the turns recallEveryNTurns allows, and the size of
+// what was injected. It runs offline on the transcript; it does not start an agent.
+func (r *Daggervals) RecallInjection(ctx context.Context, transcript *File, opts ...DaggervalsRecallInjectionOpts) (string, error) {
+	assertNotNil("transcript", transcript)
+	if r.recallInjection != nil {
+		return *r.recallInjection, nil
+	}
+	q := r.query.Select("recallInjection")
+	for i := len(opts) - 1; i >= 0; i-- {
+		// `recallEveryNturns` optional argument
+		if !querybuilder.IsZeroValue(opts[i].RecallEveryNturns) {
+			q = q.Arg("recallEveryNturns", opts[i].RecallEveryNturns)
+		}
+	}
+	q = q.Arg("transcript", transcript)
+
+	var response string
+
+	q = q.Bind(&response)
+	return response, q.Execute(ctx)
 }
 
 func (r *Daggervals) Source() *Directory {

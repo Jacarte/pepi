@@ -19,7 +19,7 @@ function temporary(t: any) {
 }
 function config(baseUrl = "http://127.0.0.1:1"): Config {
   return { enabled: true, baseUrl, userId: "test-user", projectId: "tests", autoCapture: true,
-    autoRecall: false, requestTimeoutMs: 1000, recallLimit: 5, recallLegacyCwd: false, legacyUserIds: [] };
+    autoRecall: false, requestTimeoutMs: 1000, recallLimit: 5, recallEveryNTurns: 1, recallLegacyCwd: false, legacyUserIds: [] };
 }
 const observedAt = "2026-01-02T03:04:05.000Z";
 function capture(baseUrl = "http://127.0.0.1:1") {
@@ -556,6 +556,73 @@ test("recalled memories are injected as JSON-quoted hints that cannot break out 
   assert.equal(lines.some((line: string) => line.startsWith("SYSTEM")), false);
 });
 
+// Recall fetcher: records every request body; the overview probe always finds an overview so bootstrap stays out of the way.
+function recallFetcher(state: { rows: { id: string; memory: string }[] }, calls: any[] = []) {
+  return async (_url: any, init: any) => {
+    const body = init.body ? JSON.parse(init.body) : {};
+    calls.push(body);
+    return Response.json({ results: body.filters?.capture_kind ? [{ id: "overview", memory: "overview", metadata: { capture_kind: "overview" } }] : state.rows });
+  };
+}
+const recallIds = (result: any) => result?.message.content.split("\n").filter((line: string) => /^\d+\. \[/.test(line))
+  .map((line: string) => /id=(\S+)/.exec(line)![1]);
+
+test("recall injects each memory id once per session and injects nothing when every match was already injected", async (t) => {
+  const state = { rows: [{ id: "m1", memory: "first fact" }, { id: "m2", memory: "second fact" }] };
+  const h = await harness(t, { config: { autoRecall: true, recallLegacyCwd: false }, fetcher: recallFetcher(state) });
+  assert.deepEqual(recallIds(await h.emit("before_agent_start", { prompt: "turn one", messageType: "user" })), ["m1", "m2"]);
+  assert.equal(await h.emit("before_agent_start", { prompt: "turn two", messageType: "user" }), undefined);
+  state.rows = [...state.rows, { id: "m3", memory: "third fact" }];
+  assert.deepEqual(recallIds(await h.emit("before_agent_start", { prompt: "turn three", messageType: "user" })), ["m3"]);
+});
+
+test("recallEveryNTurns=3 recalls only on turns 1 and 4 and makes no request on skipped turns", async (t) => {
+  const state = { rows: [{ id: "m1", memory: "first fact" }] }, calls: any[] = [];
+  const h = await harness(t, { config: { autoRecall: true, recallLegacyCwd: false, recallEveryNTurns: 3 }, fetcher: recallFetcher(state, calls) });
+  const injections: [number, string[]][] = [];
+  for (let turn = 1; turn <= 6; turn++) {
+    if (turn === 4) state.rows = [...state.rows, { id: "m2", memory: "second fact" }];
+    const before = calls.length;
+    const result = await h.emit("before_agent_start", { prompt: `turn ${turn}`, messageType: "user" });
+    if ([1, 4].includes(turn)) assert.ok(calls.length > before, `turn ${turn} recalls`);
+    else assert.equal(calls.length, before, `turn ${turn} makes no request`);
+    if (result) injections.push([turn, recallIds(result)]);
+  }
+  assert.deepEqual(injections, [[1, ["m1"]], [4, ["m2"]]]);
+});
+
+test("recallEveryNTurns=2 keeps memories seen only on a skipped turn for the next recall turn", async (t) => {
+  const state = { rows: [{ id: "m1", memory: "first fact" }] };
+  const calls: any[] = [];
+  const h = await harness(t, { config: { autoRecall: true, recallLegacyCwd: false, recallEveryNTurns: 2 }, fetcher: recallFetcher(state, calls) });
+  assert.deepEqual(recallIds(await h.emit("before_agent_start", { prompt: "turn one", messageType: "user" })), ["m1"]);
+  state.rows = [{ id: "m1", memory: "first fact" }, { id: "m2", memory: "second fact" }];
+  const skipped = calls.length;
+  assert.equal(await h.emit("before_agent_start", { prompt: "turn two", messageType: "user" }), undefined);
+  assert.equal(calls.length, skipped);
+  assert.deepEqual(recallIds(await h.emit("before_agent_start", { prompt: "turn three", messageType: "user" })), ["m2"]);
+});
+
+test("default recallEveryNTurns=1 recalls every turn and injects only newly seen memories", async (t) => {
+  const state = { rows: [{ id: "m1", memory: "first fact" }] }, calls: any[] = [];
+  const h = await harness(t, { config: { autoRecall: true, recallLegacyCwd: false }, fetcher: recallFetcher(state, calls) });
+  assert.deepEqual(recallIds(await h.emit("before_agent_start", { prompt: "turn one", messageType: "user" })), ["m1"]);
+  state.rows = [...state.rows, { id: "m2", memory: "second fact" }];
+  const before = calls.length;
+  assert.deepEqual(recallIds(await h.emit("before_agent_start", { prompt: "turn two", messageType: "user" })), ["m2"]);
+  assert.ok(calls.length > before);
+  assert.equal(await h.emit("before_agent_start", { prompt: "turn three", messageType: "user" }), undefined);
+  assert.ok(calls.length > before + 1);
+});
+
+test("recallEveryNTurns is a bounded integer that defaults to 1", (t) => {
+  for (const [value, expected] of [[undefined, 1], [0, 1], [3, 3], [99, 50], ["4", 1]] as const) {
+    const directory = temporary(t);
+    writeFileSync(join(directory, "settings.json"), JSON.stringify({ hippocampus: { enabled: false, recallEveryNTurns: value } }));
+    assert.equal(readConfig(directory).recallEveryNTurns, expected, String(value));
+  }
+});
+
 test("recallQuery drops the task label and caps long task briefs at a word boundary", () => {
   assert.equal(recallQuery("what is my name ?"), "what is my name ?");
   const brief = "Task: Implement the chaos lever in perf-test-workflows " + "gluepay ".repeat(80);
@@ -575,9 +642,8 @@ test("first prompt asks the parent to save a project overview once, only when no
   assert.match(first.message.content, /no overview memory yet/);
   assert.match(first.message.content, /kind \\"overview\\"|kind "overview"/);
   assert.ok(bodies.some((b) => b.filters?.capture_kind === "overview"));
-  const second = await h.emit("before_agent_start", { prompt: "another question", messageType: "user" });
-  assert.equal(second.message.details.bootstrap, false);
-  assert.doesNotMatch(second.message.content, /no overview memory yet/);
+  // Same recalled memory and no pending bootstrap: nothing is re-injected on the next turn.
+  assert.equal(await h.emit("before_agent_start", { prompt: "another question", messageType: "user" }), undefined);
 });
 
 test("no bootstrap instruction when an overview memory already exists", async (t) => {

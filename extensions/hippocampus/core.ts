@@ -12,6 +12,7 @@ export interface Config {
   autoRecall: boolean;
   requestTimeoutMs: number;
   recallLimit: number;
+  recallEveryNTurns: number;
   recallLegacyCwd: boolean;
   legacyUserIds: string[];
 }
@@ -44,6 +45,7 @@ export function readConfig(agentDir: string): Config {
     autoCapture: raw.autoCapture !== false, autoRecall: raw.autoRecall !== false,
     requestTimeoutMs: boundedInteger(raw.requestTimeoutMs, 10_000, 100, 30_000),
     recallLimit: boundedInteger(raw.recallLimit, 5, 1, 20),
+    recallEveryNTurns: boundedInteger(raw.recallEveryNTurns, 3, 1, 50),
     recallLegacyCwd: raw.recallLegacyCwd !== false, legacyUserIds,
   };
 }
