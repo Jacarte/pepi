@@ -14,6 +14,7 @@ import (
 	"dagger/daggervals/internal/evals/llm"
 	judge "dagger/daggervals/internal/evals/llm-judge"
 	"dagger/daggervals/internal/evals/memory"
+	"dagger/daggervals/internal/evals/recall"
 
 	"dagger/daggervals/internal/evals/setup"
 	"dagger/daggervals/internal/evals/task"
@@ -99,6 +100,32 @@ func (m *Daggervals) Hello(
 		return "", err
 	}
 	return outcomes[0].Output, nil
+}
+
+// RecallInjection checks a Pi session transcript for the context cost of Hippocampus recall:
+// no memory injected twice, recall only on the turns recallEveryNTurns allows, and the size of
+// what was injected. It runs offline on the transcript; it does not start an agent.
+func (m *Daggervals) RecallInjection(
+	ctx context.Context,
+	// Pi session transcript (JSONL) of the parent session.
+	transcript *dagger.File,
+	// Recall gate of the run: recall on turns 1, N+1, 2N+1, ... (1 to 50).
+	// +default=1
+	recallEveryNTurns int,
+) (string, error) {
+	text, err := transcript.Contents(ctx)
+	if err != nil {
+		return "", fmt.Errorf("read transcript: %w", err)
+	}
+	report, err := recall.Analyze(text, recallEveryNTurns)
+	if err != nil {
+		return "", err
+	}
+	out, err := json.MarshalIndent(report, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
 }
 
 func (m *Daggervals) Evals(

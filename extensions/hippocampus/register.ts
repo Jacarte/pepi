@@ -54,6 +54,9 @@ export function registerHippocampus(pi: ExtensionAPI, dependencies: Dependencies
   let config: Config | undefined;
   let unavailable = "Hippocampus has not started";
   let evidence = new Evidence();
+  // Per session: memory ids already injected (pi re-sends persisted recall messages every turn) and prompts seen.
+  const injectedIds = new Map<string, Set<string>>();
+  const promptTurns = new Map<string, number>();
   let outcome: string | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let pumping: Promise<Delivery[]> | undefined;
@@ -160,6 +163,19 @@ export function registerHippocampus(pi: ExtensionAPI, dependencies: Dependencies
 
   pi.on("session_start", async (_event, ctx) => {
     context = ctx; stopped = false; evidence = new Evidence(); outcome = undefined;
+    injectedIds.clear(); promptTurns.clear();
+    // Resumed/forked sessions still carry earlier recall messages: rebuild state from them so nothing is re-injected.
+    try {
+      let recalls = 0, users = 0;
+      for (const entry of (ctx.sessionManager.getEntries?.() ?? []) as Array<Record<string, any>>) {
+        const message = entry?.message ?? entry;
+        if (message?.role === "user") users++;
+        if (message?.customType !== "hippocampus-recall") continue;
+        recalls++;
+        for (const row of message.details?.rows ?? []) if (typeof row?.id === "string") injectedIds.add(row.id);
+      }
+      if (recalls) promptTurns.set(ctx.sessionManager.getSessionId(), users);
+    } catch { /* best effort */ }
     if (timer) clearTimeout(timer);
     try {
       config = readConfig(agentDir);
@@ -220,17 +236,24 @@ export function registerHippocampus(pi: ExtensionAPI, dependencies: Dependencies
     if (!config?.enabled || !config.autoRecall) return;
     const prompt = "prompt" in event ? event.prompt : undefined;
     if (typeof prompt !== "string" || !prompt.trim()) return;
+    const sessionId = ctx.sessionManager.getSessionId();
+    // Turns 1, N+1, 2N+1, ... recall; skipped turns make no request and inject nothing.
+    const turn = (promptTurns.get(sessionId) ?? 0) + 1;
+    promptTurns.set(sessionId, turn);
+    if ((turn - 1) % config.recallEveryNTurns !== 0) return;
     try {
       const query = recallQuery(prompt);
       const scope = identity(ctx);
-      const rows = await recall(config, scope, query, fetcher);
+      const injected = injectedIds.get(sessionId) ?? new Set<string>();
+      const rows = (await recall(config, scope, query, fetcher)).filter((row) => !injected.has(row.id));
       let bootstrap = false;
-      const sessionId = ctx.sessionManager.getSessionId();
       if (!readOnly && compatible && config.autoCapture && !writesPaused() && !askedSessions.has(sessionId)) {
         askedSessions.add(sessionId);
         if (bootstrapDue(scope.projectId) && !(await hasOverview(config, scope, fetcher))) { bootstrap = true; markBootstrap(scope.projectId); }
       }
       if (!rows.length && !bootstrap) return;
+      for (const row of rows) injected.add(row.id);
+      injectedIds.set(sessionId, injected);
       return { message: { customType: "hippocampus-recall", display: true,
         content: [rows.length ? quoteRecall(rows) : "", bootstrap ? BOOTSTRAP_INSTRUCTION : ""].filter(Boolean).join("\n\n"),
         details: { untrusted: true, rows, bootstrap, query: redact(query).replace(/\s+/g, " ").trim().slice(0, 50) } } };
