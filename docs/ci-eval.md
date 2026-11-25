@@ -87,8 +87,9 @@ PR's merge base. Otherwise the comparison comment shows the reason, for example
 `baseline is for <hash>, main is at <hash>`. This happens after any merge that changes the setup
 without an eval.
 
-The setup hash includes the content of the agent env file. Rotating `TYPESAFE_API_KEY` or changing
-`JEV_MODEL` makes every baseline incomparable until a new baseline is committed.
+The setup hash includes the content of the agent env file. The removal of the model router changed
+the setup hash of every run, so every baseline from before it is incomparable until a new baseline is
+committed.
 
 ### Trust chain and accepted risks
 
@@ -151,8 +152,8 @@ make every push to `main` wait for approval.
      convenience. `pull_request_target` jobs run with the base branch as their ref, so they pass.
      A `pull_request` workflow added on a PR branch, or a PR against another branch, can't get
      the secrets. Verify this on the first run.
-3. **Secrets of `eval-pr`.** Add `PI_AUTH`, `TYPESAFE_API_KEY` and `HIPPOCAMPUS_ENV`, plus the
-   optional variables `JEV_MODEL` and `PROFILE` (default `plain`).
+3. **Secrets of `eval-pr`.** Add `PI_AUTH` and `HIPPOCAMPUS_ENV`, plus the optional variable
+   `PROFILE` (default `plain`).
    - Keep the secrets environment-scoped only, never repository secrets: `pull_request` workflows
      on same-repo branches can read repository secrets.
    - Use dedicated eval credentials found nowhere else. Each should be spend-capped, revocable,

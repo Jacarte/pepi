@@ -7,7 +7,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
-const profiles = ["codex", "bedrock", "cloud"];
+const profiles = ["codex", "bedrock", "cloud", "gemini"];
 const nativeRoles = ["oracle", "delegate", "researcher", "worker", "scout", "reviewer", "evidence-auditor"];
 const readonlySuffix = "/extensions/subagent-only/hippocampus-readonly.ts";
 const fallbackSuffix = "/extensions/subagent-only/mem0-fallback.ts";

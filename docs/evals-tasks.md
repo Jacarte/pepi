@@ -26,7 +26,7 @@ n=3 and overlapping ranges a difference is noise, and a cause is only named when
 
 | Task | Lives in | Kind | Sessions | Scoring | What it measures | Status |
 |---|---|---|---|---|---|---|
-| `hello` | this repo | smoke | 1 | pass/fail | The setup boots and the router tool works | Runs on every push to `main` |
+| `hello` | this repo | smoke | 1 | pass/fail | The setup boots and the agent answers its probes | Runs on every push to `main` |
 | `r1` to `r8` | this repo | bug fix (Rust) | 1 | pass/fail | Fixing a real upstream bug | In the `rust` shard; no results kept here |
 | `g1` to `g5` | this repo | bug fix (Go) | 1 | pass/fail | Fixing a real upstream bug | In the `go` shard; no results kept here |
 | `kv-database` | tasks repo | long | 3 | prefix, 6 milestones | Long-horizon work over several sessions | `tasks-long`; no results kept here |
@@ -49,10 +49,10 @@ twelve-modules; full tier only). The lists are in `internal/evals/ci/tiers.go`.
 
 ### hello
 
-The agent is told to call the router tool with `recommend`, print a few lines about the tools,
-subagents, packages and extensions it can see, and finish with the words `hello world`. The
-oracle checks the final output and that the router log holds a valid `recommend` decision. It
-measures whether the profile boots and the router tool is reachable, not coding ability. The
+The agent is told to print a few lines about the tools, subagents, packages and extensions it
+can see, and whether its context holds the global AGENTS.md rules, then to finish with the words
+`hello world`. The oracle checks that the final output says `hello world`. It measures whether
+the profile boots and the agent answers the probes, not coding ability. The
 GitHub workflow `daggervals.yml` runs it on every push to `main`. It has no cache. Source:
 `internal/evals/task/hello_world.go`.
 

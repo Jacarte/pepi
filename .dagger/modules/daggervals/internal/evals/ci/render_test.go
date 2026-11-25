@@ -152,7 +152,7 @@ func TestRenderStatus(t *testing.T) {
 
 // A secret in the results or in the compare-runs answer withholds every body.
 func TestRenderWithholdsSecrets(t *testing.T) {
-	key := "typesafe-key-value"
+	key := "sample-key-value"
 	for name, mutate := range map[string]func(r *Report){
 		"result file": func(r *Report) { r.Inputs = map[string]string{"ci-fast-rust@x": `{"Output":"` + key + `"}`} },
 		"compare":     func(r *Report) { r.CompareLines = append(r.CompareLines, "the key is "+key) },

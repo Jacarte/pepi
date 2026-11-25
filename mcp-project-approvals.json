@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "approvals": [
+    {
+      "projectRoot": "/Users/javier.cabrera/DEV/chetter-service",
+      "serverName": "chetter",
+      "definitionHash": "611ee89cd8975582002e0cb5d8cc23c39e8288db8430bac27e75d121030a5495",
+      "approvedAt": "2026-11-24T14:02:10.524Z"
+    },
+    {
+      "projectRoot": "/Users/javier.cabrera/DEV/chetter-service",
+      "serverName": "runner-bridge",
+      "definitionHash": "6d9a49d9550461cb01f29ee31f731f152531173a7bfe60c072ec6d544b9b34fe",
+      "approvedAt": "2026-11-24T14:02:11.732Z"
+    }
+  ]
+}

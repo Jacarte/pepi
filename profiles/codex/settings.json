@@ -10,10 +10,10 @@
   ],
   "defaultModel": "gpt-6-astra",
   "defaultProvider": "openai-codex",
-  "defaultThinkingLevel": "high",
+  "defaultThinkingLevel": "medium",
   "subagents": {
     "projectRootResolution": "git-root",
-    "defaultModel": "gpt-6-astra",
+    "defaultModel": "gpt-6.1-sol",
     "defaultProvider": "openai-codex",
     "agentOverrides": {
       "claude-code": {
@@ -25,7 +25,6 @@
       "oracle": {
         "model": "gpt-6-astra",
         "tools": [
-          "jev_route",
           "read",
           "grep",
           "find",
@@ -42,12 +41,13 @@
           "codegraph_status"
         ],
         "subagentOnlyExtensions": [
-          "/Users/javcab/.pi/agent/extensions/pi-typesafe-router.ts",
           "/Users/javcab/.pi/agent/extensions/prompt-logger.ts",
           "/Users/javcab/.pi/agent/extensions/subagent-only/hippocampus-readonly.ts",
           "/Users/javcab/.pi/agent/extensions/subagent-only/mem0-fallback.ts",
           "/Users/javcab/.pi/agent/npm/node_modules/@vndv/pi-codegraph/extensions/codegraph.ts"
-        ]
+        ],
+        "thinking": "medium",
+        "fast": false
       },
       "delegate": {
         "model": "gpt-6-luna",
@@ -60,7 +60,6 @@
           "edit",
           "write",
           "contact_supervisor",
-          "jev_route",
           "mem0_memory",
           "codegraph_search",
           "codegraph_node",
@@ -72,17 +71,17 @@
           "codegraph_status"
         ],
         "subagentOnlyExtensions": [
-          "/Users/javcab/.pi/agent/extensions/pi-typesafe-router.ts",
           "/Users/javcab/.pi/agent/extensions/prompt-logger.ts",
           "/Users/javcab/.pi/agent/extensions/subagent-only/hippocampus-readonly.ts",
           "/Users/javcab/.pi/agent/extensions/subagent-only/mem0-fallback.ts",
           "/Users/javcab/.pi/agent/npm/node_modules/@vndv/pi-codegraph/extensions/codegraph.ts"
-        ]
+        ],
+        "thinking": "medium",
+        "fast": false
       },
       "researcher": {
         "model": "gpt-6.1-sol",
         "tools": [
-          "jev_route",
           "read",
           "write",
           "ketch_search",
@@ -91,10 +90,12 @@
           "ketch_docs",
           "ketch_crawl",
           "mem0_memory"
-        ]
+        ],
+        "thinking": "medium",
+        "fast": false
       },
       "worker": {
-        "model": "gpt-6-luna",
+        "model": "gpt-6.1-sol",
         "tools": [
           "read",
           "grep",
@@ -104,7 +105,6 @@
           "edit",
           "write",
           "contact_supervisor",
-          "jev_route",
           "mem0_memory",
           "codegraph_search",
           "codegraph_node",
@@ -116,17 +116,17 @@
           "codegraph_status"
         ],
         "subagentOnlyExtensions": [
-          "/Users/javcab/.pi/agent/extensions/pi-typesafe-router.ts",
           "/Users/javcab/.pi/agent/extensions/prompt-logger.ts",
           "/Users/javcab/.pi/agent/extensions/subagent-only/hippocampus-readonly.ts",
           "/Users/javcab/.pi/agent/extensions/subagent-only/mem0-fallback.ts",
           "/Users/javcab/.pi/agent/npm/node_modules/@vndv/pi-codegraph/extensions/codegraph.ts"
-        ]
+        ],
+        "thinking": "medium",
+        "fast": false
       },
       "scout": {
         "model": "gpt-6-luna",
         "tools": [
-          "jev_route",
           "read",
           "grep",
           "find",
@@ -145,17 +145,17 @@
           "codegraph_status"
         ],
         "subagentOnlyExtensions": [
-          "/Users/javcab/.pi/agent/extensions/pi-typesafe-router.ts",
           "/Users/javcab/.pi/agent/extensions/prompt-logger.ts",
           "/Users/javcab/.pi/agent/extensions/subagent-only/hippocampus-readonly.ts",
           "/Users/javcab/.pi/agent/extensions/subagent-only/mem0-fallback.ts",
           "/Users/javcab/.pi/agent/npm/node_modules/@vndv/pi-codegraph/extensions/codegraph.ts"
-        ]
+        ],
+        "thinking": "medium",
+        "fast": false
       },
       "reviewer": {
         "model": "gpt-6-astra",
         "tools": [
-          "jev_route",
           "read",
           "grep",
           "find",
@@ -173,16 +173,16 @@
           "codegraph_status"
         ],
         "subagentOnlyExtensions": [
-          "/Users/javcab/.pi/agent/extensions/pi-typesafe-router.ts",
           "/Users/javcab/.pi/agent/extensions/prompt-logger.ts",
           "/Users/javcab/.pi/agent/extensions/subagent-only/hippocampus-readonly.ts",
           "/Users/javcab/.pi/agent/extensions/subagent-only/mem0-fallback.ts",
           "/Users/javcab/.pi/agent/npm/node_modules/@vndv/pi-codegraph/extensions/codegraph.ts"
-        ]
+        ],
+        "thinking": "medium",
+        "fast": false
       },
       "evidence-auditor": {
         "tools": [
-          "jev_route",
           "read",
           "ketch_search",
           "ketch_scrape",
@@ -190,15 +190,18 @@
           "ketch_docs",
           "ketch_crawl",
           "mem0_memory"
-        ]
+        ],
+        "model": "gpt-6.1-sol",
+        "thinking": "medium",
+        "fast": false
       }
     },
     "defaultSubagentOnlyExtensions": [
-      "/Users/javcab/.pi/agent/extensions/pi-typesafe-router.ts",
       "/Users/javcab/.pi/agent/extensions/prompt-logger.ts",
       "/Users/javcab/.pi/agent/extensions/subagent-only/hippocampus-readonly.ts",
       "/Users/javcab/.pi/agent/extensions/subagent-only/mem0-fallback.ts"
-    ]
+    ],
+    "defaultThinking": "medium"
   },
   "hippocampus": {
     "enabled": true,

@@ -150,15 +150,7 @@ function sh(command: string, args: string[], cwd: string, env: NodeJS.ProcessEnv
   return execFileSync(command, args, { cwd, env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
 }
 
-// TypeSafe Choice answers in the shape pi-typesafe-router.ts parses.
-const LANE_OPTIONS = ["local", "cheap", "frontier"];
-const BLAST_RADIUS_OPTIONS = ["contained", "cross_cutting", "critical"];
-const choiceAnswer = (options: string[], choice: string, confidence: number) =>
-  ({ type: "choice", choice, confidence, probabilities: Object.fromEntries(options.map((o) => [o, o === choice ? confidence : (1 - confidence) / 2])) });
-const routerAnswers = (lane: string, blastRadius = "contained", confidence = 1, blastConfidence = 1) =>
-  ({ lane: choiceAnswer(LANE_OPTIONS, lane, confidence), blast_radius: choiceAnswer(BLAST_RADIUS_OPTIONS, blastRadius, blastConfidence) });
-
-function setup(options: { repo?: "jj" | "git" | "none"; answers?: unknown; fetchFails?: boolean; noKey?: boolean } = {}) {
+function setup(options: { repo?: "jj" | "git" | "none" } = {}) {
   const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "herdr-collab-test-")));
   const agentDir = path.join(tmp, "agent");
   for (const dir of ["agents", "extensions/subagent-only", "skills/fixture-skill", "bin"]) fs.mkdirSync(path.join(agentDir, dir), { recursive: true });
@@ -168,7 +160,7 @@ function setup(options: { repo?: "jj" | "git" | "none"; answers?: unknown; fetch
     return file;
   };
   const selfExt = ext("herdr-collab.ts");
-  const routerExt = ext("router.ts");
+  const extraExt = ext("extra.ts");
   const defaultOnly = ext("subagent-only/default-only.ts");
   ext("herdr-agent-state.ts");
   fs.writeFileSync(path.join(agentDir, "skills", "fixture-skill", "SKILL.md"), "---\nname: fixture-skill\n---\nbody\n");
@@ -182,20 +174,15 @@ function setup(options: { repo?: "jj" | "git" | "none"; answers?: unknown; fetch
       defaultProvider: "litellm",
       defaultSubagentOnlyExtensions: [defaultOnly],
       agentOverrides: {
-        worker: { model: "model-local", tools: ["read", "bash", "edit", "write", "contact_supervisor", "jev_route"], subagentOnlyExtensions: [routerExt] },
-        "evidence-auditor": { model: "model-frontier", skills: ["fixture-skill"], subagentOnlyExtensions: [routerExt] },
+        worker: { model: "model-local", tools: ["read", "bash", "edit", "write", "contact_supervisor"], subagentOnlyExtensions: [extraExt] },
+        "evidence-auditor": { model: "model-frontier", skills: ["fixture-skill"], subagentOnlyExtensions: [extraExt] },
         reviewer: { model: "litellm/model-frontier", skills: ["fixture-skill"], tools: ["read", "grep", "watchdog_diff", "contact_supervisor"] },
         oracle: { disabled: true },
         researcher: { thinking: false },
       },
     },
   }));
-  const lanes = { LOCAL: "model-local", CHEAP: "model-cheap", FRONTIER: "model-frontier" };
-  fs.writeFileSync(path.join(agentDir, "models-router.json"), JSON.stringify({
-    minConfidence: 0.4,
-    ...Object.fromEntries(Object.entries(lanes).map(([lane, id]) => [lane, { provider: "litellm", id }])),
-    HUMAN: { provider: "human", id: "javi" },
-  }));
+  const modelIds = ["model-local", "model-cheap", "model-frontier"];
   const fakeBin = path.join(agentDir, "bin", "herdr");
   fs.writeFileSync(fakeBin, FAKE_HERDR, { mode: 0o755 });
   fs.writeFileSync(path.join(agentDir, "bin", "codegraph"), FAKE_CODEGRAPH, { mode: 0o755 });
@@ -212,7 +199,6 @@ function setup(options: { repo?: "jj" | "git" | "none"; answers?: unknown; fetch
     JJ_CONFIG: path.join(tmp, "jjconfig.toml"),
     GIT_CONFIG_GLOBAL: path.join(tmp, "gitconfig"),
     GIT_CONFIG_NOSYSTEM: "1",
-    TYPESAFE_API_KEY: options.noKey ? undefined : "offline-test",
     PATH: `${path.join(agentDir, "bin")}${path.delimiter}${process.env.PATH}`,
     FAKE_CODEGRAPH_MODE: path.join(tmp, "codegraph-mode"),
     FAKE_CODEGRAPH_LOG: path.join(tmp, "codegraph-calls.jsonl"),
@@ -229,14 +215,8 @@ function setup(options: { repo?: "jj" | "git" | "none"; answers?: unknown; fetch
     sh("git", ["add", "-A"], repo, env as NodeJS.ProcessEnv);
     sh("git", ["commit", "-q", "-m", "base"], repo, env as NodeJS.ProcessEnv);
   }
-  const routerRequests: Array<{ url: string; body: any }> = [];
   const deps: core.CollabDeps = {
     exec: core.createExec(env),
-    fetch: (async (url: string, init: { body: string }) => {
-      routerRequests.push({ url, body: JSON.parse(init.body) });
-      if (options.fetchFails) return { ok: false, status: 503, json: async () => ({}) };
-      return { ok: true, json: async () => ({ answers: options.answers ?? routerAnswers("cheap") }) };
-    }) as unknown as typeof fetch,
     env,
     agentDir,
     builtinAgentsDir: realBuiltinAgents,
@@ -246,15 +226,13 @@ function setup(options: { repo?: "jj" | "git" | "none"; answers?: unknown; fetch
     timing: { settleMs: 0, pollMs: 5, promptRetryMs: 1, readyTimeoutMs: 1_000, lockTimeoutMs: 5_000 },
   };
   const registry = {
-    find: (provider: string, id: string) => provider === "litellm" && Object.values(lanes).includes(id) ? { provider, id, input: ["text"] } : undefined,
-    getAvailable: () => Object.values(lanes).map((id) => ({ provider: "litellm", id })),
+    find: (provider: string, id: string) => provider === "litellm" && modelIds.includes(id) ? { provider, id, input: ["text"] } : undefined,
+    getAvailable: () => modelIds.map((id) => ({ provider: "litellm", id })),
   };
   const ctx: core.CallContext = { cwd: repo, modelRegistry: registry, trusted: false };
   return {
-    tmp, agentDir, repo, env, deps, ctx, selfExt, routerExt, defaultOnly,
+    tmp, agentDir, repo, env, deps, ctx, selfExt, extraExt, defaultOnly,
     collab: core.createHerdrCollab(deps),
-    fetches: () => routerRequests.length,
-    routerRequests,
     state: () => JSON.parse(fs.readFileSync(stateFile, "utf8")),
     patchState: (mutate: (state: any) => void) => {
       const state = JSON.parse(fs.readFileSync(stateFile, "utf8"));
@@ -299,8 +277,8 @@ test("role resolution applies user agents, defaults, overrides, and fails loudly
   const opts = { agentDir: h.agentDir, builtinAgentsDir: realBuiltinAgents };
   const workerRole = core.resolveRole("worker", opts);
   assert.equal(workerRole.configuredModel, "litellm/model-local", "defaultProvider is applied to a bare model id");
-  assert.deepEqual(workerRole.tools, ["read", "bash", "edit", "write", "contact_supervisor", "jev_route"]);
-  assert.deepEqual(workerRole.subagentOnlyExtensions, [h.routerExt]);
+  assert.deepEqual(workerRole.tools, ["read", "bash", "edit", "write", "contact_supervisor"]);
+  assert.deepEqual(workerRole.subagentOnlyExtensions, [h.extraExt]);
   assert.equal(workerRole.systemPromptMode, "replace");
   const auditor = core.resolveRole("evidence-auditor", opts);
   assert.equal(auditor.source, path.join(h.agentDir, "agents", "evidence-auditor.md"), "a user agent file wins over the builtin");
@@ -308,7 +286,7 @@ test("role resolution applies user agents, defaults, overrides, and fails loudly
   assert.equal(auditor.inheritSkills, true);
   assert.deepEqual(auditor.skills, ["fixture-skill"]);
   assert.equal(auditor.configuredModel, "litellm/model-frontier");
-  assert.deepEqual(auditor.subagentOnlyExtensions, [h.routerExt]);
+  assert.deepEqual(auditor.subagentOnlyExtensions, [h.extraExt]);
   const scout = core.resolveRole("scout", opts);
   assert.deepEqual(scout.subagentOnlyExtensions, [h.defaultOnly], "default subagent-only extensions apply when a role has none");
   assert.equal(scout.configuredModel, undefined);
@@ -329,11 +307,11 @@ test("flag mapping matches pi CLI flags for writer, reviewer, and append roles",
   const value = (args: string[], flag: string) => args[args.indexOf(flag) + 1];
   assert.equal(value(writer, "--model"), M);
   assert.equal(value(writer, "--thinking"), "high");
-  assert.equal(value(writer, "--tools"), "read,bash,edit,write,jev_route,herdr_peers,herdr_send");
+  assert.equal(value(writer, "--tools"), "read,bash,edit,write,herdr_peers,herdr_send");
   assert.equal(value(writer, "--system-prompt"), "/tmp/p.md");
   assert.ok(writer.includes("--no-skills") && writer.includes("--no-approve") && !writer.includes("--no-context-files"));
   assert.ok(!writer.includes("--no-extensions"));
-  assert.deepEqual(writer.flatMap((a, i) => a === "-e" ? [writer[i + 1]] : []), [h.routerExt, h.selfExt]);
+  assert.deepEqual(writer.flatMap((a, i) => a === "-e" ? [writer[i + 1]] : []), [h.extraExt, h.selfExt]);
 
   const reviewerRole = core.resolveRole("reviewer", opts);
   const skill = core.resolveSkillPath("fixture-skill", { cwd: h.repo, agentDir: h.agentDir, homeDir: h.tmp });
@@ -347,7 +325,7 @@ test("flag mapping matches pi CLI flags for writer, reviewer, and append roles",
   assert.equal(value(delegate, "--append-system-prompt"), "/tmp/p.md");
   assert.ok(!delegate.includes("--system-prompt"));
 
-  const isolated = { ...core.resolveRole("worker", opts), extensions: [h.routerExt] };
+  const isolated = { ...core.resolveRole("worker", opts), extensions: [h.extraExt] };
   const args = core.buildPiArgs(isolated, { ...base, model: M, messaging: true });
   assert.ok(args.includes("--no-extensions"));
   assert.ok(args.includes(path.join(h.agentDir, "extensions", "herdr-agent-state.ts")), "herdr state reporting stays loaded");
@@ -388,140 +366,30 @@ test("pane prompt filtering drops global AGENTS.md and the orchestration skill o
   assert.equal(inherit.contextFiles.length, 1);
 });
 
-// Run the real jev_route recommend (vm-evaluated like tests/typesafe-router.test.ts) on the
-// same models-router.json, registry, and fake TypeSafe answers as the in-process duplicate.
-function loadJevRoute(h: ReturnType<typeof setup>, respond: () => unknown) {
-  const source = fs.readFileSync(path.join(root, "extensions", "pi-typesafe-router.ts"), "utf8");
-  const js = stripTypeScriptTypes(source)
-    .replace(/^import .* from ".*";\s*$/gm, "")
-    .replace("export default function", "function register");
-  const requests: Array<{ url: string; body: any }> = [];
-  const tools: any[] = [];
-  const register = vm.runInNewContext(`${js}\nregister;`, {
-    __dirname: path.join(root, "extensions"), dirname: path.dirname, resolve: path.resolve,
-    readFileSync: () => fs.readFileSync(path.join(h.agentDir, "models-router.json"), "utf8"),
-    appendFileSync() {}, mkdirSync() {},
-    Type: new Proxy({}, { get: () => () => ({}) }), StringEnum: () => ({}), Text: class {},
-    process: { env: h.env }, AbortSignal,
-    fetch: async (url: string, init: { body: string }) => {
-      requests.push({ url, body: JSON.parse(init.body) });
-      return { ok: true, json: async () => ({ answers: respond() }) };
-    },
-  });
-  register({ registerTool: (tool: any) => tools.push(tool) });
-  const ctx = { sessionManager: { getSessionId: () => "sync" }, modelRegistry: h.ctx.modelRegistry, getContextUsage: () => undefined };
-  return {
-    requests,
-    recommend: (params: { role: string; task: string; context: string }) =>
-      tools[0].execute("sync", { action: "recommend", ...params }, undefined, undefined, ctx).then((result: any) => result.details),
-  };
-}
-
-// Objects created inside the vm realm have a different Object.prototype.
-const plain = (value: unknown) => JSON.parse(JSON.stringify(value));
-const routingOutcome = (decision: Promise<any>) => decision.then(
-  (d) => plain({ lane: d.lane, model: d.model, escalated: d.escalated, reason: d.reason, laneAnswer: d.laneAnswer, blastRadius: d.blastRadius }),
-  (error: Error) => ({ error: error.message.replace(/^(Jev|herdr) router: /, "") }),
-);
-
-test("in-process router matches pi-typesafe-router recommend: request, lane decisions, and validation", async (t) => {
-  const h = setup({ repo: "none" });
-  t.after(h.done);
-  let answers: unknown;
-  const herdrRequests: Array<{ url: string; body: any }> = [];
-  const deps: core.CollabDeps = {
-    ...h.deps,
-    fetch: (async (url: string, init: { body: string }) => {
-      herdrRequests.push({ url, body: JSON.parse(init.body) });
-      return { ok: true, json: async () => ({ answers }) };
-    }) as unknown as typeof fetch,
-  };
-  const jev = loadJevRoute(h, () => answers);
-  const compare = async (label: string, role: core.RoleName = "worker") => {
-    const input = { role, task: `  ${label}  `, context: "supplied context" };
-    const [expected, actual] = await Promise.all([
-      routingOutcome(jev.recommend(input)),
-      routingOutcome(core.recommendModel(deps, input, h.ctx.modelRegistry)),
-    ]);
-    assert.deepEqual(actual, expected, label);
-    return actual;
-  };
-
-  const reasons = new Set<unknown>();
-  for (const lane of LANE_OPTIONS) for (const blast of BLAST_RADIUS_OPTIONS) {
-    for (const confidence of [0.39, 0.4, 0.9]) for (const blastConfidence of [0.39, 0.4, 0.9]) {
-      answers = routerAnswers(lane, blast, confidence, blastConfidence);
-      reasons.add((await compare(`${lane} ${blast} ${confidence} ${blastConfidence}`)).reason);
-    }
-  }
-  assert.deepEqual(reasons, new Set([null, "low_confidence", "critical", "uncertain_critical_floor", "cross_cutting_floor"]));
-  answers = routerAnswers("cheap");
-  await compare("scout task", "scout");
-  assert.equal(herdrRequests.length, jev.requests.length);
-  assert.deepEqual(plain(herdrRequests), plain(jev.requests), "same endpoint, classifier, state (role/task/context/files), and questions");
-  assert.equal(herdrRequests.at(-1)!.body.state.role, "scout");
-
-  const valid = routerAnswers("cheap");
-  const invalid: Array<[string, unknown]> = [
-    ["missing blast_radius", { lane: valid.lane }],
-    ["unknown choice", { ...valid, lane: { ...valid.lane, choice: "huge" } }],
-    ["confidence out of range", { ...valid, lane: { ...valid.lane, confidence: 1.5 } }],
-    ["missing probability", { ...valid, blast_radius: { ...valid.blast_radius, probabilities: { contained: 1 } } }],
-    ["extra probability", { ...valid, lane: { ...valid.lane, probabilities: { ...valid.lane.probabilities, huge: 0 } } }],
-    ["answers not an object", null],
-  ];
-  for (const [label, bad] of invalid) {
-    answers = bad;
-    assert.ok("error" in (await compare(label)), label);
-  }
-
-  answers = routerAnswers("cheap", "contained", 0.9);
-  const configFile = path.join(h.agentDir, "models-router.json");
-  const config = JSON.parse(fs.readFileSync(configFile, "utf8"));
-  fs.writeFileSync(configFile, JSON.stringify({ ...config, minConfidence: 0.95 }));
-  assert.equal((await compare("minConfidence 0.95")).reason, "low_confidence");
-  for (const minConfidence of [undefined, 1.5]) {
-    fs.writeFileSync(configFile, JSON.stringify({ ...config, minConfidence }));
-    assert.ok("error" in (await compare(`minConfidence ${minConfidence}`)));
-  }
-});
-
 // ---------------------------------------------------------------------------
 // Models, caps, and failure modes
 
-test("routing: worker/delegate route in-process; pinned roles keep their model; explicit model skips both", async (t) => {
-  const h = setup({ repo: "none", answers: routerAnswers("frontier") });
+test("model choice: pinned roles keep their model, an explicit model overrides the pin, and a role without a pin fails", async (t) => {
+  const h = setup({ repo: "none" });
   t.after(h.done);
-  const routed = await h.collab.spawn({ workers: [{ name: "w1", role: "worker", task: "fix a subtle bug" }] }, h.ctx);
-  assert.equal(h.fetches(), 1);
-  assert.equal(h.routerRequests[0]!.body.state.role, "worker", "the pane role is passed to the router");
-  assert.deepEqual([routed.panes[0]!.model, routed.panes[0]!.modelSource], ["litellm/model-frontier", "routed"]);
-  const decision = JSON.parse(fs.readFileSync(path.join(h.agentDir, "logs", "router.log"), "utf8").split("\n").find((line) => line.startsWith("{"))!);
-  assert.deepEqual([decision.lane, decision.provider, decision.id, decision.action, decision.changed, decision.escalated, decision.reason, decision.role],
-    ["FRONTIER", "litellm", "model-frontier", "herdr_recommend", false, false, null, "worker"]);
-  const argv = argvOf(h, `${routed.runId}-w1`);
-  assert.equal(argv[argv.indexOf("--model") + 1], "litellm/model-frontier");
+  const pinned = await h.collab.spawn({ workers: [{ name: "w1", role: "worker", task: "fix a subtle bug" }] }, h.ctx);
+  assert.deepEqual([pinned.panes[0]!.model, pinned.panes[0]!.modelSource], ["litellm/model-local", "pinned"]);
+  const argv = argvOf(h, `${pinned.runId}-w1`);
+  assert.equal(argv[argv.indexOf("--model") + 1], "litellm/model-local");
   const review = await h.collab.review({ target: "diff", reviewers: [{ name: "r1", lens: "correctness" }] }, h.ctx);
-  assert.equal(h.fetches(), 1, "pinned reviewer does not route");
   assert.deepEqual([review.panes[0]!.model, review.panes[0]!.modelSource], ["litellm/model-frontier", "pinned"]);
-  await h.collab.spawn({ workers: [{ name: "s2", role: "scout", task: "x", model: "litellm/model-local" }] }, h.ctx);
-  assert.equal(h.fetches(), 1, "explicit model skips the router");
-  const unpinned = await h.collab.spawn({ workers: [{ name: "s3", role: "scout", task: "map it" }] }, h.ctx);
-  assert.equal(h.fetches(), 2, "a role without a pinned model falls back to routing");
-  assert.equal(h.routerRequests[1]!.body.state.role, "scout");
-  assert.equal(unpinned.panes[0]!.modelSource, "routed-no-pin");
-  assert.match(unpinned.panes[0]!.modelNote!, /no pinned model/);
+  const explicit = await h.collab.spawn({ workers: [{ name: "s2", role: "scout", task: "x", model: "litellm/model-local" }] }, h.ctx);
+  assert.deepEqual([explicit.panes[0]!.model, explicit.panes[0]!.modelSource], ["litellm/model-local", "explicit"]);
+  await assert.rejects(h.collab.spawn({ workers: [{ name: "s3", role: "scout", task: "map it" }] }, h.ctx), /model required: pass model or pin one for this role/);
   await assert.rejects(h.collab.spawn({ workers: [{ name: "s4", role: "scout", task: "x", model: "litellm/unknown" }] }, h.ctx), /not registered/);
 });
 
-test("router failure fails the spawn loudly with no panes, workspaces, or run", async (t) => {
-  for (const options of [{ fetchFails: true }, { noKey: true }]) {
-    const h = setup({ repo: "none", ...options });
-    t.after(h.done);
-    await assert.rejects(h.collab.spawn({ workers: [{ name: "w1", role: "worker", task: "x" }] }, h.ctx), /model routing failed, nothing was spawned/);
-    assert.equal(h.state().calls.length, 0);
-    assert.ok(!fs.existsSync(h.deps.wsRoot));
-  }
+test("a role without a pinned model fails the spawn loudly with no panes, workspaces, or run", async (t) => {
+  const h = setup({ repo: "none" });
+  t.after(h.done);
+  await assert.rejects(h.collab.spawn({ workers: [{ name: "w1", role: "scout", task: "x" }] }, h.ctx), /model required: pass model or pin one for this role/);
+  assert.equal(h.state().calls.length, 0);
+  assert.ok(!fs.existsSync(h.deps.wsRoot));
 });
 
 test("caps: max 4 parallel workers, max 3 reviewers, distinct review lenses", async (t) => {
@@ -671,7 +539,7 @@ test("jj: lone worker uses the main checkout; parallel workers get workspaces; c
 });
 
 test("jj: conflicting workers keep workspaces, spawn one fixer, then merge after resolution", { skip: !hasJj }, async (t) => {
-  const h = setup({ repo: "jj", answers: routerAnswers("frontier") });
+  const h = setup({ repo: "jj" });
   t.after(h.done);
   const { runId, panes } = await h.collab.spawn({ workers: [worker("w1"), worker("w2")] }, h.ctx);
   fs.writeFileSync(path.join(panes[0]!.workspace!.path, "f.txt"), "ONE-w1\ntwo\nthree\n");
@@ -686,9 +554,7 @@ test("jj: conflicting workers keep workspaces, spawn one fixer, then merge after
   assert.equal(fixer.role, "worker");
   assert.equal(fixer.kind, "fixer");
   assert.equal(fixer.cwd, run.integration!.path);
-  assert.deepEqual([fixer.model, fixer.modelSource], ["litellm/model-frontier", "routed"], "fixer is routed like a normal worker");
-  assert.equal(h.fetches(), 1);
-  assert.equal(h.routerRequests[0]!.body.state.role, "worker");
+  assert.deepEqual([fixer.model, fixer.modelSource], ["litellm/model-local", "pinned"], "fixer uses the worker role's pinned model");
   const brief = h.state().prompts.find((p: any) => p.target === `${runId}-fixer`).text;
   assert.match(brief, /f\.txt \(touched by w1, w2\)/);
   assert.match(brief, /### w1 \(worker\)[\s\S]*task for w1[\s\S]*### w2 \(worker\)/);
@@ -709,39 +575,36 @@ test("jj: conflicting workers keep workspaces, spawn one fixer, then merge after
   assert.equal(conflicted.trim(), "no");
 });
 
-test("jj: a fixer routing failure is retried on re-check; an explicit fixerModel skips the router", { skip: !hasJj }, async (t) => {
-  const h = setup({ repo: "jj", fetchFails: true });
+test("jj: a fixer whose model cannot be resolved is retried on re-check; an explicit fixerModel skips the pin", { skip: !hasJj }, async (t) => {
+  const h = setup({ repo: "jj" });
   t.after(h.done);
+  const unregistered = { ...h.ctx, modelRegistry: { find: () => undefined, getAvailable: () => [] } };
   const { runId, panes } = await h.collab.spawn({ workers: [worker("w1"), worker("w2")] }, h.ctx);
   fs.writeFileSync(path.join(panes[0]!.workspace!.path, "f.txt"), "ONE-w1\ntwo\nthree\n");
   fs.writeFileSync(path.join(panes[1]!.workspace!.path, "f.txt"), "ONE-w2\ntwo\nthree\n");
-  const first = await h.collab.merge({ runId }, h.ctx) as any;
+  const first = await h.collab.merge({ runId }, unregistered) as any;
   assert.equal(first.status, "conflict");
   assert.equal(first.fixer, undefined);
-  assert.match(first.fixerError, /model routing failed/);
-  assert.equal(h.fetches(), 1);
-  const routedAgain = await h.collab.merge({ runId }, h.ctx) as any;
-  assert.equal(routedAgain.status, "conflict");
-  assert.match(routedAgain.fixerError, /model routing failed/, "a re-check retries the fixer");
-  assert.equal(h.fetches(), 2);
+  assert.match(first.fixerError, /model not registered: litellm\/model-local/);
+  const retriedAgain = await h.collab.merge({ runId }, unregistered) as any;
+  assert.match(retriedAgain.fixerError, /model not registered/, "a re-check retries the fixer");
   const noFixer = await h.collab.merge({ runId, spawnFixer: false }, h.ctx) as any;
-  assert.deepEqual([noFixer.fixer, noFixer.fixerError, h.fetches()], [undefined, undefined, 2]);
+  assert.deepEqual([noFixer.fixer, noFixer.fixerError], [undefined, undefined]);
   const retried = await h.collab.merge({ runId, fixerModel: "litellm/model-frontier" }, h.ctx) as any;
   assert.equal(retried.status, "conflict");
   assert.equal(retried.fixer, "fixer");
   assert.equal(retried.fixerError, undefined);
-  assert.equal(h.fetches(), 2, "explicit fixerModel skips the router");
   const fixer = h.run(runId).panes.find((p) => p.name === "fixer")!;
   assert.deepEqual([fixer.role, fixer.kind, fixer.model, fixer.modelSource], ["worker", "fixer", "litellm/model-frontier", "explicit"]);
   const brief = h.state().prompts.find((p: any) => p.target === `${runId}-fixer`).text;
   assert.match(brief, /f\.txt \(touched by w1, w2\)/);
   const open = await h.collab.merge({ runId }, h.ctx) as any;
-  assert.deepEqual([open.fixer, open.fixerError, h.fetches()], ["fixer", undefined, 2], "an open fixer is reused");
+  assert.deepEqual([open.fixer, open.fixerError], ["fixer", undefined], "an open fixer is reused");
   assert.equal(h.run(runId).panes.filter((p) => p.kind === "fixer").length, 1);
 });
 
-test("jj: an explicit fixerModel on the conflicting merge skips the router", { skip: !hasJj }, async (t) => {
-  const h = setup({ repo: "jj", answers: routerAnswers("frontier") });
+test("jj: an explicit fixerModel on the conflicting merge overrides the pinned worker model", { skip: !hasJj }, async (t) => {
+  const h = setup({ repo: "jj" });
   t.after(h.done);
   const { runId, panes } = await h.collab.spawn({ workers: [worker("w1"), worker("w2")] }, h.ctx);
   fs.writeFileSync(path.join(panes[0]!.workspace!.path, "f.txt"), "ONE-w1\ntwo\nthree\n");
@@ -750,7 +613,6 @@ test("jj: an explicit fixerModel on the conflicting merge skips the router", { s
   assert.equal(conflict.fixer, "fixer");
   const fixer = h.run(runId).panes.find((p) => p.name === "fixer")!;
   assert.deepEqual([fixer.role, fixer.model, fixer.modelSource], ["worker", M, "explicit"]);
-  assert.equal(h.fetches(), 0);
 });
 
 test("jj: an edit after the merge snapshot keeps the workspace; queued messages block merge", { skip: !hasJj }, async (t) => {
@@ -1028,7 +890,6 @@ test("parallel writers outside jj/git are refused before any side effect", async
   const h = setup({ repo: "none" });
   t.after(h.done);
   await assert.rejects(h.collab.spawn({ workers: [worker("w1"), worker("w2")] }, h.ctx), /need isolated workspaces/);
-  assert.equal(h.fetches(), 0);
   assert.equal(h.state().calls.length, 0);
 });
 
@@ -1125,7 +986,7 @@ test("messaging: reviewers stay isolated; the parent can still reach them", { sk
 });
 
 // ---------------------------------------------------------------------------
-// Extension registration (same vm evaluation style as tests/typesafe-router.test.ts)
+// Extension registration (vm-evaluated from the extension source)
 
 function loadExtension(env: Record<string, string | undefined>) {
   const source = fs.readFileSync(path.join(root, "extensions", "herdr-collab.ts"), "utf8");
@@ -1135,7 +996,7 @@ function loadExtension(env: Record<string, string | undefined>) {
   const Type = new Proxy({}, { get: (_t, kind) => (...args: unknown[]) => ({ kind, args }) });
   const register = vm.runInNewContext(`${js}\nregister;`, {
     ...core, Type, homedir: os.homedir, join: path.join, resolve: path.resolve,
-    __dirname: path.join(root, "extensions"), process: { env }, fetch,
+    __dirname: path.join(root, "extensions"), process: { env },
   });
   const tools: string[] = [];
   const events: string[] = [];

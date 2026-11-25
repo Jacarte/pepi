@@ -299,6 +299,8 @@ type DaggervalsEvalsOpts struct {
 	//
 	// Default: true
 	MemoryFixture bool
+	// Append the mandatory delegation section to the agent's AGENTS.md (implementation by a worker, review by a reviewer). The run id gets @forced.
+	ForceDelegation bool
 }
 
 func (r *Daggervals) Evals(auth *Secret, agentEnv *File, agentProfile string, cacheDir *Directory, opts ...DaggervalsEvalsOpts) *DaggervalsEvalResult {
@@ -350,6 +352,10 @@ func (r *Daggervals) Evals(auth *Secret, agentEnv *File, agentProfile string, ca
 		// `memoryFixture` optional argument
 		if !querybuilder.IsZeroValue(opts[i].MemoryFixture) {
 			q = q.Arg("memoryFixture", opts[i].MemoryFixture)
+		}
+		// `forceDelegation` optional argument
+		if !querybuilder.IsZeroValue(opts[i].ForceDelegation) {
+			q = q.Arg("forceDelegation", opts[i].ForceDelegation)
 		}
 	}
 	q = q.Arg("auth", auth)

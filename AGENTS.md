@@ -39,14 +39,15 @@ including `worker`, and subagent workflows.
 - `evidence-auditor` before you rely on important research.
 - `worker` to implement; see "Escalating a risky `worker` slice".
 - `reviewer` to check.
-- `oracle` when the decision itself feels risky.
+- `oracle` for a specific unanswered consequential question.
 
 The parent owns triage, orchestration, briefs, integration, and reporting.
 Implementation is done by `worker` subagents, in parallel when the work splits
 into independent slices. Trivial tasks (see Parent triage) may be done by the
 parent. For every nontrivial task the parent MUST: spawn `scout` before
 implementation, spawn `worker` for the change, spawn `reviewer` to check the
-result, and add `oracle` whenever a decision is risky or consequential. Spawn
+result, and add `oracle` when a specific consequential decision remains
+unanswered. Spawn
 `researcher` / `evidence-auditor` whenever external facts or research drive the
 outcome.
 
@@ -54,7 +55,7 @@ Default flow:
 
 ```text
 scout -> [researcher -> evidence-auditor] -> worker (parallel if independent)
-      -> parent integrates + runs checks -> reviewer -> (oracle if risky) -> worker fixes
+      -> parent integrates + runs checks -> reviewer -> (oracle for unresolved decision) -> worker fixes
 ```
 
 For non-code tasks, a worker or `delegate` produces the outcome when it is
@@ -75,8 +76,8 @@ orchestrates and integrates.
 - Treat open-ended discovery, coupled components, uncertain requirements,
   difficult verification, and significant security, data-loss, production, or
   architectural risk as nontrivial. Follow the rule of thumb: `scout`, then
-  `worker` slices, then `reviewer`, plus `oracle` when the
-  decision is risky.
+  `worker` slices, then `reviewer`, plus `oracle` for a specific unanswered
+  consequential question.
 - File count and tool-call count are signals, not automatic triggers. A few
   mechanical edits can be direct; a subtle one-line fix may need a specialist.
 - If a small direct task becomes nontrivial, pause, give `scout` the existing
@@ -88,61 +89,68 @@ orchestrates and integrates.
 
 ### Model and effort quality guardrail (parent and every subagent)
 
-- Routing is explicit through the `jev_route` tool. It does not run
-  automatically on user input. Model mappings remain in `models-router.json`
-  for `recommend`; effort classification does not use those mappings.
-- Before substantive work, the parent and **every subagent role** MUST call
-  `jev_route` with action `switch_effort` for its own assignment, passing its
-  own `role` and the task, context, and relevant file paths. This includes
-  scout, worker, deep-worker, reviewer, oracle, researcher, evidence-auditor,
-  and delegate. A parent's `recommend` call does not replace the child's
-  own effort call.
-- `switch_effort` makes a separate Jev request with a thinking-effort question,
-  not the model-lane or blast-radius questions. Jev selects the requested
-  level; Pi clamps it to the current model's capabilities and the tool reports
-  requested/actual effort and whether it changed. It never changes a model,
-  another session, tools, role, or permissions.
-- This is mandatory instruction-based policy, **not a runtime blocking gate**.
-  The tool description carries the requirement into children even when global
-  `AGENTS.md` is not inherited. Each role must load the router extension and
-  allow `jev_route`; inherited tool and extension restrictions still apply.
-- Before an authorized implementation delegation, call `jev_route` with
-  action `recommend`. Supply the complete assignment, relevant findings,
-  constraints, and acceptance checks. Set `role` to the subagent that will do
-  the work and `files` to the relevant paths (not contents). Pass the returned
-  `model` string unchanged as the `model` argument when launching the subagent.
-- Jev escalates to the `FRONTIER` lane when its lane confidence is below
-  `minConfidence` or the blast radius is critical with blast-radius confidence
-  at or above `minConfidence` (exactly equal counts as confident). A critical
-  blast radius below `minConfidence` and a cross-cutting one only raise a
-  `LOCAL` lane to `CHEAP`.
-- For `recommend`, set `requiresImages: true` when the selected model must
-  process images.
-  Do not send secrets in the task or context supplied to Jev.
-- Reconsider routing only when the assignment or evidence changes materially.
-  Do not repeatedly call the tool to obtain a preferred answer.
-- If routing fails, report the failure; do not treat it as a recommendation
-  or silently substitute a cheaper model.
+- Choose models explicitly for the actual assignment, following operator scope
+  and the active profile.
+- Every profile starts at `medium`; profiles with subagents also set
+  `defaultThinking` and enabled role `thinking` to `medium`, overriding bundled
+  role defaults. These are startup values. A role name alone does not determine
+  effort.
+- For the Codex profile, keep these model defaults:
+
+  | Assignment | Model |
+  | --- | --- |
+  | Parent | `gpt-6-astra` |
+  | Unpinned subagents | `gpt-6.1-sol` |
+  | Regular worker | `gpt-6.1-sol` |
+  | Reviewer or oracle judgment | `gpt-6-astra` |
+  | Researcher or evidence-auditor | `gpt-6.1-sol` |
+  | Bounded scout or delegate | `gpt-6-luna` |
+  | Mechanical writer | explicit `openai-codex/gpt-6-luna:medium` |
+  | Exploratory or coupled discovery when needed | explicit `openai-codex/gpt-6.1-sol:medium` |
+
+  Other profiles own their model defaults; do not impose Codex IDs on them.
+  Codex native roles set `fast: false` for standard child service by default;
+  an explicit per-run `fast: true` overrides that setting. This does not
+  establish the parent service tier.
+  For one launch, an effort suffix can set the thinking level (`:low`, `:medium`,
+  `:high`, or `:xhigh`); dispatch `thinking` is ignored.
+- In newly written Codex workflows, include the full provider/model on each
+  child launch, including reviewers. Select it anew for that assignment; do not
+  copy the last child's model or use a mutable shared "current model". Existing
+  shared workflow templates may use the active profile's role defaults.
+- Codex parent, reviewer, and oracle use Astra as mandatory profile defaults.
+  This is standing operator authorization for those configured roles; no
+  per-task permission is required. Other Astra assignments require user
+  authorization for a named, bounded assignment. Honor that authorization only
+  within its stated scope. Never infer an Astra worker exception from risk
+  keywords, a failed attempt, or a previous Astra assignment. Other children
+  select their own models; do not inherit Astra into later workers. Resume a
+  task-local Astra exception only for the same authorized assignment. Never
+  write global settings to make a task-local choice.
+- Reconsider model choice or effort only when the assignment or evidence changes
+  materially. After a failure, identify the specific missing capability or
+  evidence and correct the brief or task-local model choice accordingly; do
+  not automatically escalate to Astra or repeat advice to obtain a preferred
+  answer. If the needed capability exceeds authorized models, report it.
 - Use available model identity and explicit operator/profile guidance, not the
   parent's self-confidence, as evidence of capability. Do not invent rankings
   from model names or assume a child is stronger merely because it is a child.
 - If the parent's selected model is known to be weak or its capability is
   unknown, limit unaided work to straightforward evidence-backed answers and
-  mechanical low-risk edits. Use specialists (including workers) for
-  nontrivial reasoning, diagnosis, and implementation. If safe orchestration
-  still exceeds the selected model's supported capability, report the
-  limitation and ask for a model switch.
-- If a required specialist is unavailable, report the blocker rather than
-  silently skipping it. Never substitute confident prose or workflow ceremony
-  for adequate reasoning and verification.
-- Even a strong parent MUST follow the rule of thumb for nontrivial tasks and
-  use additional specialists when needed. Passing checks do not prove untested
-  behavior.
+  mechanical low-risk edits. Use specialists for nontrivial work. If safe
+  orchestration exceeds supported capability, report the limitation and ask
+  for a model switch within operator authorization.
+- If a required specialist or tool is unavailable, report the blocker rather
+  than silently skipping it. Even a strong parent follows mandatory discovery
+  and review; passing checks do not prove untested behavior.
 
 ### Delegated execution
 
 - Choose the smallest useful delegation shape. A single bounded child is valid;
-  do not wrap it in a multi-stage workflow without a concrete benefit.
+  do not wrap it in a multi-stage workflow without a concrete benefit. Ordinarily
+  use one focused review; add review lenses when a concrete gap or explicit
+  project requirement calls for them. Add oracle for a specific unanswered
+  consequential question, while preserving project-required reviews.
 - Use top-level `subagent` calls with `async: true` for specialist phases. Group
   multi-step or parallel specialist work into one workflow per phase; children
   launch only inside that workflow. Discovery, implementation, and review may
@@ -152,7 +160,9 @@ orchestrates and integrates.
 - Parallelize `worker` subagents across independent slices using separate managed
   worktrees; never let mutating workers edit the parent's checkout or
   overlapping files concurrently. Sequence slices that share files or contracts.
-- Never redo a child's investigation. If a child's result is insufficient,
+- Reuse evidence for unchanged source instead of repeating broad investigation.
+  Reviewers still inspect the relevant source and diff; security decisions need
+  primary evidence, not lossy summaries. If a child's result is insufficient,
   steer or resume that child. Exception: see "Stuck children: parent takeover".
 
 Do not impose a universal dollar, time, turn, or agent-count limit. Honor limits
@@ -327,14 +337,15 @@ first.
 
 - Tools: `herdr_spawn`, `herdr_wait`, `herdr_collect`, `herdr_merge`,
   `herdr_review`, `herdr_cleanup`, plus `herdr_peers` / `herdr_send`.
-- Panes use the same role definitions as pi-subagents. Without `model`, only
-  `worker`/`delegate` are routed like `jev_route recommend`; other roles keep
-  their pinned model. A routing failure fails the spawn.
-- For `scout`, omit `model` in `herdr_spawn` so its configured pin is used.
-  Do not pre-route a Herdr scout with `jev_route recommend` or pass a recommended
-  model: an explicit `model` overrides the pin. Other roles' routing is unchanged.
+- Panes use the same role definitions as pi-subagents. Without `model`, each
+  role uses its pinned model (or `subagents.defaultModel`); a role with neither
+  fails the spawn. Pass an explicit authorized model when the assignment needs a
+  different one, to preserve the model policy above.
+- For `scout`, omit `model` to use its configured pin for bounded discovery,
+  or pass an explicit authorized model for exploratory/coupled discovery.
+  An explicit model overrides the role pin.
 - The parent never edits code. It merges mechanically; conflicts go to one
-  routed `worker` fixer pane in the integration workspace. Merged panes stay alive;
+  explicitly selected `worker` fixer pane in the integration workspace. Merged panes stay alive;
   `herdr_cleanup` removes workspaces. A lone writer's main-checkout output is never
   merged by `herdr_merge`.
 - Run-owned workspaces get a best-effort `codegraph init` before pi starts there.
@@ -348,7 +359,7 @@ first.
 
 ## Default routing
 
-Apply parent triage first. Nontrivial tasks require `scout`, `worker`, and `reviewer`; add `oracle` for risky decisions.
+Apply parent triage first. Nontrivial tasks require `scout`, `worker`, and `reviewer`; add `oracle` for a specific unanswered consequential question.
 Spawn additional specialists whenever their expertise is needed for a material
 gap; do not substitute them for the mandatory roles. Implementation goes to
 `worker`, in parallel when slices are independent.
@@ -385,7 +396,7 @@ pi-subagents roles:
 
 ### Escalating a risky `worker` slice
 
-Every `worker` launch is routed per the model quality guardrail. A slice is
+Choose each `worker` model per the model and effort quality guardrail. A slice is
 risky when any trigger applies:
 
 - Touches concurrency, auth/security, data integrity or migrations, or
@@ -397,13 +408,12 @@ risky when any trigger applies:
   verification are harder to bound.
 - A prior `worker` attempt on the slice failed or was rejected by `reviewer`.
 
-For a risky slice, put the triggers and blast-radius evidence in the
-`jev_route recommend` context. After a failed or rejected attempt, call
-`recommend` again with the failure or review evidence (a material change) and
-launch a fresh `worker`; if the returned model equals the failed attempt's,
-pass a stronger configured one (e.g. the `FRONTIER` lane in
-`models-router.json`) instead of retrying the same model. Briefs for out-of-cwd
-work must name every external path explicitly as owned scope.
+For a risky slice, include the specific triggers and blast-radius evidence in
+its brief, acceptance criteria, and review question. A failure or rejected
+attempt requires evidence of what failed before another launch; refine the
+assignment or select an authorized task-local model for the missing capability.
+There is no automatic FRONTIER or Astra retry. Briefs for out-of-cwd work must
+name every external path explicitly as owned scope.
 
 Do not assume `explore` exists. The nontrivial-task baseline is mandatory:
 `scout` discovery, `worker` implementation, then `reviewer` check. `oracle`,
@@ -446,8 +456,9 @@ this rule; the discovery owner checks once if its status is unknown.
   checkout, edit the same files, or independently change a shared contract.
   If worktree isolation is unavailable, sequence conflicting work instead of
   risking concurrent edits. Integrate results only after the workers finish.
-- Give each child the outcome, starting paths, established facts, open questions,
-  owned scope, acceptance checks, and relevant constraints. Include the
+- Give each child the outcome, source identity (commit or current diff), exact
+  files and relevant line ranges, established facts, open questions, owned scope,
+  acceptance criteria/checks, and relevant constraints. Include the
   applicable working rules; do not assume they were inherited.
 - Children must challenge contradicted premises and report material blockers
   promptly. They must not edit files unless explicitly assigned authorized
@@ -493,8 +504,8 @@ this rule; the discovery owner checks once if its status is unknown.
   (the existing owner when practical); the parent reruns affected checks and
   obtains focused follow-up review when a correction changes a reviewed decision
   or leaves a material concern unresolved.
-- Add `oracle` when the decision itself is risky or consequential (security,
-  data loss, production, architecture, contradicted prior decisions). It
+- Add `oracle` for a specific unanswered consequential question involving
+  security, data loss, production, architecture, or contradicted prior decisions. It
   supplements, not replaces, `reviewer`. Findings must cite concrete evidence or
   a specific unresolved risk.
 - Fix demonstrated problems and rerun affected checks. Reopen broader review
@@ -506,6 +517,82 @@ this rule; the discovery owner checks once if its status is unknown.
 - Distinguish original defects, introduced regressions, and errors in the brief.
   Never weaken correct behavior or tests to satisfy an incorrect instruction.
   Report unrelated findings without silently absorbing them into the task.
+
+## Writing Wayfinder notes that Visor reads
+
+Visor (`~/DEV/visor`) is a read-only graph viewer for Wayfinder folders. It only
+trusts explicit, machine-readable frontmatter and never guesses readiness. Write
+every Wayfinder note in exactly the form below; other shapes are shown as
+unknown or not indexed.
+
+### Layout
+
+One folder per map: the map note at its root, tickets and other artifacts
+anywhere beneath it (`tickets/`, `specs/`, `impl-tickets/`, ...). Open the map
+folder in Visor; sibling map folders stay one level up.
+
+### Map note
+
+```yaml
+---
+title: <Map title>
+labels: [wayfinder:map]
+tags: [<project>, wayfinder]
+status: active
+---
+```
+
+### Decision ticket (research | prototype | grilling | task)
+
+```yaml
+---
+title: <Question as a title>
+labels: [wayfinder:research]     # or wayfinder:prototype | wayfinder:grilling | wayfinder:task
+parent: "[[<map-note-name>]]"    # quoted wikilink to the map; required
+status: open                     # exactly `open`, `closed` or `done`
+assignee:                        # empty = unassigned; a name = assigned
+blocked-by: []                   # always present; [] means none
+---
+```
+
+With blockers, always quote each wikilink:
+`blocked-by: ["[[t04-bulkhead-cap-design]]", "[[t05-rollout]]"]`.
+
+### Implementation ticket (a build slice, not a decision)
+
+```yaml
+---
+title: <Slice title>
+labels: [implementation:ticket]
+status: ready-for-agent          # free text; shown, never used for readiness
+blocked-by: []
+---
+```
+
+It is drawn with the ticket graph, but Visor deliberately infers no readiness
+from it. Put real dependencies in `blocked-by`, not only in the body text.
+
+### Everything else
+
+Specs, briefs, handoffs, indexes and session notes need no Wayfinder fields.
+Link them with `[[wikilinks]]` from the map or a ticket and they appear as
+context notes. Do not give them a ticket label or the tag `wayfinder-ticket`.
+
+### Rules that avoid the usual failures
+
+- Always quote YAML values that contain `:` (`title: "Agent image: tools"`);
+  an unquoted colon makes the whole note invisible to Visor.
+- `status` is exactly `open`, `closed` or `done` on decision tickets. Any other
+  value (`built-unmerged`, `active`, ...) makes the ticket and everything that
+  depends on it `unknown`. Track finer states in the body.
+- Blockers are wikilinks to notes inside the map folder. A bare slug, an
+  unquoted `[[[a]]]`, or a missing note is flagged "malformed blocker" and the
+  dependent can never show as ready.
+- `parent` points at exactly one map. Two maps in the same folder cannot be
+  told apart, so give each map its own folder.
+- `frontier` = open, unassigned, all blockers closed/done. `assigned` = same but
+  with an `assignee`. Cycles, unknown statuses and unavailable blockers make a
+  ticket `unknown`.
 
 ## PR descriptions
 

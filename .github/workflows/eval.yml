@@ -5,7 +5,7 @@
 # Only same-repo PRs; fork PRs do nothing. Only the eval and report jobs check out the PR head and
 # run its Dagger module, with the secrets of the `eval-pr` environment (required reviewer approval)
 # and a read-only token. The jobs that write to GitHub run no PR code and hold no secrets.
-# Environment secrets/variables: PI_AUTH, TYPESAFE_API_KEY, HIPPOCAMPUS_ENV; optional JEV_MODEL, PROFILE.
+# Environment secrets/variables: PI_AUTH, HIPPOCAMPUS_ENV; optional PROFILE.
 # Never put GitHub expressions inside `run:` scripts; pass values through `env:`.
 # Never print text written by an agent or the PR's module outside the `dagger call` steps
 # (those stop workflow commands): comment bodies go through files.
@@ -228,17 +228,11 @@ jobs:
       - name: Write secrets
         env:
           PI_AUTH: ${{ secrets.PI_AUTH }}
-          TYPESAFE_API_KEY: ${{ secrets.TYPESAFE_API_KEY }}
           HIPPOCAMPUS_ENV: ${{ secrets.HIPPOCAMPUS_ENV }}
-          JEV_MODEL: ${{ vars.JEV_MODEL }}
         run: |
           set -euo pipefail
           if [[ -z "$PI_AUTH" ]]; then
             echo "::error::Secret PI_AUTH is not set in the eval-pr environment."
-            exit 1
-          fi
-          if [[ -z "$TYPESAFE_API_KEY" ]]; then
-            echo "::error::Secret TYPESAFE_API_KEY is not set in the eval-pr environment."
             exit 1
           fi
           if [[ -z "$HIPPOCAMPUS_ENV" ]]; then
@@ -247,7 +241,6 @@ jobs:
           fi
           # GitHub masks a multi-line or JSON secret only as a whole: mask each value before
           # anything else (% is the workflow-command escape).
-          echo "::add-mask::${TYPESAFE_API_KEY//%/%25}"
           if ! auth_strings=$(jq -r '.. | strings | select(length >= 8) | gsub("%"; "%25") | gsub("\r"; "%0D") | gsub("\n"; "%0A")' <<< "$PI_AUTH"); then
             echo "::error::Secret PI_AUTH is not valid JSON."
             exit 1
@@ -255,17 +248,6 @@ jobs:
           while IFS= read -r value; do
             if [[ -n "$value" ]]; then echo "::add-mask::$value"; fi
           done <<< "$auth_strings"
-          # Dagger's env-file parser strips quotes and expands variables, so only allow
-          # characters it passes through unchanged. Never echo the values.
-          safe_env_value='^[A-Za-z0-9._~+/=-]+$'
-          if [[ ! "$TYPESAFE_API_KEY" =~ $safe_env_value ]]; then
-            echo "::error::Secret TYPESAFE_API_KEY contains characters outside [A-Za-z0-9._~+/=-]."
-            exit 1
-          fi
-          if [[ -n "$JEV_MODEL" && ! "$JEV_MODEL" =~ $safe_env_value ]]; then
-            echo "::error::Variable JEV_MODEL contains characters outside [A-Za-z0-9._~+/=-]."
-            exit 1
-          fi
           # HIPPOCAMPUS_ENV: KEY=VALUE lines only (blank lines allowed), URL-safe values.
           env_line='^[A-Za-z_][A-Za-z0-9_]*=[A-Za-z0-9._~+/=:@%?&,!*-]*$'
           line_number=0
@@ -281,10 +263,7 @@ jobs:
           umask 077
           mkdir -p "$RUNNER_TEMP/secrets"
           printf '%s' "$PI_AUTH" > "$RUNNER_TEMP/secrets/auth.json"
-          {
-            printf 'TYPESAFE_API_KEY=%s\n' "$TYPESAFE_API_KEY"
-            if [[ -n "$JEV_MODEL" ]]; then printf 'JEV_MODEL=%s\n' "$JEV_MODEL"; fi
-          } > "$RUNNER_TEMP/secrets/agent.env"
+          : > "$RUNNER_TEMP/secrets/agent.env"
           printf '%s\n' "$HIPPOCAMPUS_ENV" > "$RUNNER_TEMP/secrets/hippocampus.env"
 
       - name: Dagger ci-eval-run
@@ -371,21 +350,14 @@ jobs:
       - name: Write secrets
         env:
           PI_AUTH: ${{ secrets.PI_AUTH }}
-          TYPESAFE_API_KEY: ${{ secrets.TYPESAFE_API_KEY }}
-          JEV_MODEL: ${{ vars.JEV_MODEL }}
         run: |
           set -euo pipefail
           if [[ -z "$PI_AUTH" ]]; then
             echo "::error::Secret PI_AUTH is not set in the eval-pr environment."
             exit 1
           fi
-          if [[ -z "$TYPESAFE_API_KEY" ]]; then
-            echo "::error::Secret TYPESAFE_API_KEY is not set in the eval-pr environment."
-            exit 1
-          fi
           # GitHub masks a multi-line or JSON secret only as a whole: mask each value before
           # anything else (% is the workflow-command escape).
-          echo "::add-mask::${TYPESAFE_API_KEY//%/%25}"
           if ! auth_strings=$(jq -r '.. | strings | select(length >= 8) | gsub("%"; "%25") | gsub("\r"; "%0D") | gsub("\n"; "%0A")' <<< "$PI_AUTH"); then
             echo "::error::Secret PI_AUTH is not valid JSON."
             exit 1
@@ -394,22 +366,10 @@ jobs:
             if [[ -n "$value" ]]; then echo "::add-mask::$value"; fi
           done <<< "$auth_strings"
           # Same agent env file as the shards: its content is part of the setup hash.
-          safe_env_value='^[A-Za-z0-9._~+/=-]+$'
-          if [[ ! "$TYPESAFE_API_KEY" =~ $safe_env_value ]]; then
-            echo "::error::Secret TYPESAFE_API_KEY contains characters outside [A-Za-z0-9._~+/=-]."
-            exit 1
-          fi
-          if [[ -n "$JEV_MODEL" && ! "$JEV_MODEL" =~ $safe_env_value ]]; then
-            echo "::error::Variable JEV_MODEL contains characters outside [A-Za-z0-9._~+/=-]."
-            exit 1
-          fi
           umask 077
           mkdir -p "$RUNNER_TEMP/secrets"
           printf '%s' "$PI_AUTH" > "$RUNNER_TEMP/secrets/auth.json"
-          {
-            printf 'TYPESAFE_API_KEY=%s\n' "$TYPESAFE_API_KEY"
-            if [[ -n "$JEV_MODEL" ]]; then printf 'JEV_MODEL=%s\n' "$JEV_MODEL"; fi
-          } > "$RUNNER_TEMP/secrets/agent.env"
+          : > "$RUNNER_TEMP/secrets/agent.env"
 
       # The workspace is the evaluated head (its setup hash); the base checkout is a sibling.
       - name: Dagger ci-eval-report
