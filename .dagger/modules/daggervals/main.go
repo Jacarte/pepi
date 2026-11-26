@@ -378,7 +378,8 @@ func loadTasksSuite(ctx context.Context, tasksRepo, tasksRef, taskNames string, 
 
 // GradeTask grades a workspace with the hidden milestones of one task, without an agent
 // or an LLM, using the grader of the tasks suite. testbed plays the role of the agent's
-// /testbed. It returns one line per milestone ("m1-x PASS" or "m1-x FAIL: detail"), a score
+// /testbed. It returns one line per milestone ("m1-x PASS", "m1-x FAIL: detail" or
+// "<id> SKIP: graded only in evals" for skill milestones), a score
 // line and the tasks commit.
 func (m *Daggervals) GradeTask(
 	ctx context.Context,
