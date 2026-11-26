@@ -27,6 +27,7 @@ func TestTailBytes(t *testing.T) {
 type fakeMilestoneOracle struct {
 	scoring string
 	results []tasks.MilestoneResult
+	skill   []tasks.MilestoneResult
 	err     error
 }
 
@@ -34,8 +35,8 @@ func (f fakeMilestoneOracle) ValidateFinalAnswer(context.Context, *dagger.Contai
 	panic("the engine must use GradeMilestones")
 }
 func (f fakeMilestoneOracle) Scoring() string { return f.scoring }
-func (f fakeMilestoneOracle) GradeMilestones(context.Context, *dagger.Container, []string) ([]tasks.MilestoneResult, error) {
-	return f.results, f.err
+func (f fakeMilestoneOracle) GradeMilestones(context.Context, *dagger.Container, []string) ([]tasks.MilestoneResult, []tasks.MilestoneResult, error) {
+	return f.results, f.skill, f.err
 }
 
 func TestVerifyMilestoneOracle(t *testing.T) {
@@ -66,6 +67,37 @@ func TestVerifyMilestoneOracle(t *testing.T) {
 	// No milestones is never a pass.
 	if valid, _, _ := run(fakeMilestoneOracle{scoring: "count"}); valid {
 		t.Fatal("zero milestones must not be valid")
+	}
+}
+
+// Skill milestones are reported but neither scored nor part of the validity.
+func TestVerifySkillMilestonesAreNotScored(t *testing.T) {
+	e := &Engine{}
+	pass, fail := tasks.MilestoneResult{ID: "m1", Passed: true}, tasks.MilestoneResult{ID: "m1"}
+	skillLoaded := tasks.MilestoneResult{ID: "m3", Passed: false, Detail: "skill not loaded: demo"}
+	skillNotLoaded := tasks.MilestoneResult{ID: "m4", Passed: true}
+	run := func(o tasks.MilestoneOracle) (bool, milestoneGrade, error) {
+		return e.verify(context.Background(), tasks.FixTask{Env: tasks.GoTask{Repo: "tasks/demo"}, Oracle: o}, nil, nil)
+	}
+
+	// a failed skill milestone does not fail a task whose graded milestones pass
+	valid, grade, err := run(fakeMilestoneOracle{scoring: "count", results: []tasks.MilestoneResult{pass}, skill: []tasks.MilestoneResult{skillLoaded, skillNotLoaded}})
+	if !valid || err != nil || grade.score != 1 || grade.maxScore != 1 {
+		t.Fatalf("skill milestones must not gate: %v %+v %v", valid, grade, err)
+	}
+	if len(grade.results) != 1 || len(grade.skill) != 2 || grade.skill[0] != skillLoaded || grade.skill[1] != skillNotLoaded {
+		t.Fatalf("skill milestones must be recorded as reported: %+v", grade)
+	}
+
+	// a failed graded milestone still fails the task, whatever the skills
+	valid, grade, err = run(fakeMilestoneOracle{scoring: "count", results: []tasks.MilestoneResult{pass, fail}, skill: []tasks.MilestoneResult{skillNotLoaded}})
+	if valid || err == nil || grade.score != 1 || grade.maxScore != 2 || len(grade.skill) != 1 {
+		t.Fatalf("graded failure must fail: %v %+v %v", valid, grade, err)
+	}
+
+	// skill milestones alone are no graded milestones: never a pass
+	if valid, _, _ := run(fakeMilestoneOracle{scoring: "count", skill: []tasks.MilestoneResult{skillNotLoaded}}); valid {
+		t.Fatal("skill milestones alone must not be valid")
 	}
 }
 

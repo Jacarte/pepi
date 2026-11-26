@@ -43,7 +43,9 @@ type taskReport struct {
 	MaxScore   int                `json:"maxScore,omitempty"`
 	Scoring    string             `json:"scoring,omitempty"`
 	Milestones []milestoneSummary `json:"milestones,omitempty"`
-	TimedOut   bool               `json:"timedOut,omitempty"`
+	// SkillMilestones are reported only: they are not in score, maxScore or the validity.
+	SkillMilestones []milestoneSummary `json:"skillMilestones,omitempty"`
+	TimedOut        bool               `json:"timedOut,omitempty"`
 	// AgentExitCode and AgentError: the agent exited non-zero by itself (see TaskOutcome).
 	AgentExitCode int    `json:"agentExitCode,omitempty"`
 	AgentError    string `json:"agentError,omitempty"`
@@ -342,6 +344,9 @@ func buildReports(results []engine.TaskOutcome) []taskReport {
 		for _, m := range r.Milestones {
 			report.Milestones = append(report.Milestones, milestoneSummary{ID: m.ID, Title: m.Title, Passed: m.Passed, Detail: m.Detail})
 		}
+		for _, m := range r.SkillMilestones {
+			report.SkillMilestones = append(report.SkillMilestones, milestoneSummary{ID: m.ID, Title: m.Title, Passed: m.Passed, Detail: m.Detail})
+		}
 		reports = append(reports, report)
 	}
 	return reports
@@ -360,12 +365,16 @@ Each element describes one task:
   the task's tests after the agent finished; oracleError carries the reason it failed
   (failing tests, compile error, or missing test output).
 - score, maxScore, scoring, milestones (tasks suite only, absent otherwise): the hidden
-  milestone grading. milestones lists every milestone with id, title, passed and detail
+  milestone grading. milestones lists every scored milestone with id, title, passed and detail
   (the failure line when it did not pass). scoring is "prefix" (score = consecutive
   milestones passed from the first one, for ordered tasks) or "count" (score = milestones
   passed in any order, for independent milestones); maxScore is the number of milestones.
   The oracle is valid only when score equals maxScore. Quote the score as "score/maxScore"
   and name the failed milestones with their detail.
+- skillMilestones (tasks suite only, absent when the task has none): skill milestones, reported
+  only. passed says whether the parent read the skill (skill_loaded) or did not (skill_not_loaded).
+  They are not in score or maxScore, and they do not decide the validity: never count them in the
+  score. Read them with toolUsage.skillsLoaded.
 - timedOut: true means the agent hit its time limit and was cut off. It is not a completed
   attempt: the workspace was graded as it stood, agentStats and processStats may be
   partial, and agentOutput is probably not a final answer. Say so; never read it as a
@@ -557,7 +566,8 @@ Method:
    the verdict is INCONCLUSIVE.
 2. For each shared task, judge BEFORE and AFTER independently, from the evidence:
    - Correctness: for tasks with milestones, read score, maxScore, scoring and the failed
-     milestones first, then check the diff for integrity and scope. Otherwise compare
+     milestones first, then check the diff for integrity and scope. skillMilestones, when
+     present, are reported only: they are not in the score. Otherwise compare
      finalDiff with goldenPatch (root cause vs symptom, same
      behavior, scope creep) and read oracleValid / oracleError. Classify each side as
      FIXED, PARTIAL or NOT FIXED. Prefer the diff over the oracle's label, and say when

@@ -77,15 +77,14 @@ type RepoTaskOracle struct {
 
 func (o RepoTaskOracle) Scoring() string { return o.Spec.Scoring }
 
-// ValidateFinalAnswer is true when every milestone passes.
+// ValidateFinalAnswer is true when every graded milestone passes. Skill milestones are not graded.
 func (o RepoTaskOracle) ValidateFinalAnswer(ctx context.Context, container *dagger.Container) (bool, error) {
-	// No agent run is recorded here: skill_loaded milestones fail and skill_not_loaded ones pass.
-	// The engine grades with the skills its agent loaded.
-	results, err := o.GradeMilestones(ctx, container, nil)
+	// No agent run is recorded here, so the skills are unknown: the skill milestones are not graded anyway.
+	graded, _, err := o.GradeMilestones(ctx, container, nil)
 	if err != nil {
 		return false, err
 	}
-	for _, r := range results {
+	for _, r := range graded {
 		if !r.Passed {
 			return false, nil
 		}
@@ -93,9 +92,36 @@ func (o RepoTaskOracle) ValidateFinalAnswer(ctx context.Context, container *dagg
 	return true, nil
 }
 
-// GradeMilestones grades the agent's /testbed (without .git) and the skill milestones from skillsLoaded.
-func (o RepoTaskOracle) GradeMilestones(ctx context.Context, container *dagger.Container, skillsLoaded []string) ([]MilestoneResult, error) {
-	return o.GradeWorkspace(ctx, container.Directory(goWorkdir).WithoutDirectory(".git"), skillsLoaded)
+// GradeMilestones grades the agent's /testbed (without .git). It returns the graded milestones,
+// which the score and the validity count, and the skill milestones, graded from skillsLoaded,
+// which are only reported.
+func (o RepoTaskOracle) GradeMilestones(ctx context.Context, container *dagger.Container, skillsLoaded []string) (graded, skill []MilestoneResult, err error) {
+	results, err := o.GradeWorkspace(ctx, container.Directory(goWorkdir).WithoutDirectory(".git"), skillsLoaded)
+	if err != nil {
+		return nil, nil, err
+	}
+	return splitSkillResults(o.Spec.Milestones, results)
+}
+
+// splitSkillResults splits the results of the milestones into the graded ones and the skill ones
+// (the skill milestones of milestones, by SplitSkillMilestones). Order is kept within each list.
+func splitSkillResults(milestones []Milestone, results []MilestoneResult) (graded, skill []MilestoneResult, err error) {
+	_, skillMilestones, err := SplitSkillMilestones(milestones)
+	if err != nil {
+		return nil, nil, err
+	}
+	isSkill := make(map[string]bool, len(skillMilestones))
+	for _, m := range skillMilestones {
+		isSkill[m.ID] = true
+	}
+	for _, r := range results {
+		if isSkill[r.ID] {
+			skill = append(skill, r)
+		} else {
+			graded = append(graded, r)
+		}
+	}
+	return graded, skill, nil
 }
 
 const (

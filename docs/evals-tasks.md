@@ -111,7 +111,8 @@ Common grading rules:
   passed. A task is valid only when every milestone passes.
 - A milestone whose command is `skill_loaded:<name>` or `skill_not_loaded:<name>` is no `go test`.
   It is not run in the workspace: it passes when the parent read `<name>/SKILL.md` successfully (or
-  did not). See [Skill ablation](#skill-ablation).
+  did not). It is reported in the task result as `SkillMilestones`, but it is not scored and does not
+  decide the validity. See [Skill ablation](#skill-ablation).
 - The prompts are neutral: they never mention delegation, agents or this repo.
 
 ### kv-database
@@ -302,8 +303,9 @@ this task is not yet in the pin `eval-tasks.ref`, see [ci-eval.md](ci-eval.md).
 
 The skill ablation asks whether a global skill (a folder in `~/.agents/skills`) changes the outcome
 of a task. Two arms run the same task: `base` with the skill staged, and `noskill` without it
-(`--without-skill`). The outcome is graded as usual, and a skill milestone adds a deterministic
-check, with no LLM judging the trajectory.
+(`--without-skill`). The outcome is graded as usual by the graded milestones. A skill milestone is a deterministic
+check, with no LLM judging the trajectory, that is reported beside the score: it is not scored and
+it does not decide the validity, so both arms can be compared on the same milestones.
 
 - `--global-skills <dir>` stages each folder of `<dir>` at `~/.agents/skills` in the eval image
   (copied with the image, not mounted, and not part of the workspace hash). The run id gets
@@ -313,6 +315,9 @@ check, with no LLM judging the trajectory.
 - `milestones.yaml` takes `skill_loaded:<name>` (must be loaded) and `skill_not_loaded:<name>`
   (must not be loaded). The engine grades them from the skills the parent read
   (`toolUsage.skillsLoaded`, in `processStats.toolCalls` as `skill`), never from the workspace.
+  They are kept apart from the graded milestones: the outcome lists them in `SkillMilestones`, the
+  judge reads them as `skillMilestones`, and neither the score, the max score nor the validity counts
+  them. A skill arm that fails its skill milestone is not a lower score.
 - Reads by subagent children are not captured, so a skill milestone measures the parent only. A
   task whose parent delegates can fail it without the skill being at fault. The judge is told to
   check `skillsLoaded` before it blames a skill's content.

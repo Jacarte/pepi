@@ -41,3 +41,25 @@ func TestRepoTaskReusesGoTask(t *testing.T) {
 		t.Fatalf("install script does not use the task's Go: %s", env.installGoScript())
 	}
 }
+
+// splitSkillResults keeps the skill milestones out of the graded results, in order.
+func TestSplitSkillResults(t *testing.T) {
+	milestones := []Milestone{
+		{ID: "m1", Command: "go test ./a"},
+		{ID: "m2", Command: "skill_loaded:demo"},
+		{ID: "m3", Command: "go test ./b"},
+		{ID: "m4", Command: "skill_not_loaded:other"},
+	}
+	results := []MilestoneResult{{ID: "m1", Passed: true}, {ID: "m2"}, {ID: "m3"}, {ID: "m4", Passed: true}}
+	graded, skill, err := splitSkillResults(milestones, results)
+	if err != nil || len(graded) != 2 || graded[0].ID != "m1" || graded[1].ID != "m3" {
+		t.Fatalf("graded: %+v %v", graded, err)
+	}
+	if len(skill) != 2 || skill[0].ID != "m2" || skill[1].ID != "m4" || !skill[1].Passed {
+		t.Fatalf("skill: %+v", skill)
+	}
+
+	if _, _, err := splitSkillResults([]Milestone{{ID: "m5", Command: "skill_loaded:Bad"}}, nil); err == nil {
+		t.Fatal("an invalid skill milestone must be an error")
+	}
+}

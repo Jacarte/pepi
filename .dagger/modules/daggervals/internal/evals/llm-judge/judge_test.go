@@ -111,7 +111,8 @@ func TestBuildReportsMilestonesAndSkipped(t *testing.T) {
 		{
 			Task: "tasks/five-modules", Valid: false, ValidationError: "score 4/5", TimedOut: true,
 			Score: 4, MaxScore: 5, Scoring: "count",
-			Milestones: []tasks.MilestoneResult{{ID: "m1", Title: "One", Passed: true}, {ID: "m2", Title: "Two", Detail: "REJECT: m2"}},
+			Milestones:      []tasks.MilestoneResult{{ID: "m1", Title: "One", Passed: true}, {ID: "m2", Title: "Two", Detail: "REJECT: m2"}},
+			SkillMilestones: []tasks.MilestoneResult{{ID: "m3", Title: "Skill", Detail: "skill not loaded: demo"}},
 		},
 		{Task: "kv-database", Skipped: true, SkipReason: "multi-session not supported yet"},
 		{Task: "plain", Valid: true},
@@ -124,11 +125,14 @@ func TestBuildReportsMilestonesAndSkipped(t *testing.T) {
 	if r.Score == nil || *r.Score != 4 || r.MaxScore != 5 || r.Scoring != "count" || !r.TimedOut || len(r.Milestones) != 2 || r.Milestones[1].Detail != "REJECT: m2" {
 		t.Fatalf("milestone fields: %+v", r)
 	}
+	if len(r.SkillMilestones) != 1 || r.SkillMilestones[0].ID != "m3" || r.SkillMilestones[0].Passed {
+		t.Fatalf("skill milestones must be reported as is: %+v", r.SkillMilestones)
+	}
 	encoded, err := json.Marshal(reports[1])
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, key := range []string{"score", "maxScore", "scoring", "milestones", "timedOut"} {
+	for _, key := range []string{"score", "maxScore", "scoring", "milestones", "skillMilestones", "timedOut"} {
 		if strings.Contains(string(encoded), `"`+key+`"`) {
 			t.Fatalf("%s must be omitted for non-milestone tasks: %s", key, encoded)
 		}
@@ -137,7 +141,7 @@ func TestBuildReportsMilestonesAndSkipped(t *testing.T) {
 
 func TestPromptsDescribeMilestoneFields(t *testing.T) {
 	for name, prompt := range map[string]string{"JUDGE_PROMPT": JUDGE_PROMPT, "COMPARE_PROMPT": COMPARE_PROMPT} {
-		for _, want := range []string{"score", "maxScore", "scoring", "prefix", "count", "milestones", "passed", "detail", "timedOut", "skipped", "golden patch", "primary correctness signal", "cut short"} {
+		for _, want := range []string{"score", "maxScore", "scoring", "prefix", "count", "milestones", "skillMilestones", "passed", "detail", "timedOut", "skipped", "golden patch", "primary correctness signal", "cut short"} {
 			if !strings.Contains(prompt, want) {
 				t.Errorf("%s does not mention %q", name, want)
 			}

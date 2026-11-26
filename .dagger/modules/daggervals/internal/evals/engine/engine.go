@@ -170,6 +170,9 @@ type TaskOutcome struct {
 	Score      int                     `json:",omitempty"`
 	MaxScore   int                     `json:",omitempty"`
 	Scoring    string                  `json:",omitempty"`
+	// SkillMilestones are the skill milestones (tasks suite): reported whether the parent loaded
+	// the skill, but neither scored nor part of Valid.
+	SkillMilestones []tasks.MilestoneResult `json:",omitempty"`
 
 	// SkillsLoaded are the skills the parent read (see ToolCall.Skill), in order, each once.
 	// Subagent reads are not recorded. Sessions of a multi-session task are joined.
@@ -404,6 +407,7 @@ func (e *Engine) runTask(ctx context.Context, preparedEnv *dagger.Container, tas
 		Score:            grade.score,
 		MaxScore:         grade.maxScore,
 		Scoring:          grade.scoring,
+		SkillMilestones:  grade.skill,
 		SkillsLoaded:     skillsLoaded,
 		Memory:           memoryStats,
 		Profile:          profile,
@@ -629,26 +633,27 @@ func taskError(statsErr, validationErr error) error {
 	return nil
 }
 
-// milestoneGrade is the result of a MilestoneOracle; zero for other oracles.
+// milestoneGrade is the result of a MilestoneOracle; zero for other oracles. skill are not scored.
 type milestoneGrade struct {
 	results  []tasks.MilestoneResult
+	skill    []tasks.MilestoneResult
 	score    int
 	maxScore int
 	scoring  string
 }
 
-// verify asks the task's oracle for the verdict. A MilestoneOracle grades every milestone
-// (valid when all pass); other oracles give pass/fail. A failed verdict is returned as an
-// error, a HarnessError when the grading itself failed.
+// verify asks the task's oracle for the verdict. A MilestoneOracle grades every graded milestone
+// (valid when all pass; skill milestones are only reported); other oracles give pass/fail. A failed
+// verdict is returned as an error, a HarnessError when the grading itself failed.
 func (e *Engine) verify(ctx context.Context, task tasks.FixTask, container *dagger.Container, skillsLoaded []string) (bool, milestoneGrade, error) {
 	repo := task.Env.GetRepo()
 	if oracle, ok := task.Oracle.(tasks.MilestoneOracle); ok {
-		results, err := oracle.GradeMilestones(ctx, container, skillsLoaded)
+		results, skill, err := oracle.GradeMilestones(ctx, container, skillsLoaded)
 		if err != nil {
 			return false, milestoneGrade{scoring: oracle.Scoring()}, &HarnessError{Err: fmt.Errorf("task %s grading: %w", repo, err)}
 		}
 		score, maxScore, err := tasks.ScoreMilestones(oracle.Scoring(), results)
-		grade := milestoneGrade{results: results, score: score, maxScore: maxScore, scoring: oracle.Scoring()}
+		grade := milestoneGrade{results: results, skill: skill, score: score, maxScore: maxScore, scoring: oracle.Scoring()}
 		if err != nil {
 			return false, grade, &HarnessError{Err: fmt.Errorf("task %s grading: %w", repo, err)}
 		}
