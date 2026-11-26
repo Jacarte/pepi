@@ -79,7 +79,8 @@ func (o RepoTaskOracle) Scoring() string { return o.Spec.Scoring }
 
 // ValidateFinalAnswer is true when every milestone passes.
 func (o RepoTaskOracle) ValidateFinalAnswer(ctx context.Context, container *dagger.Container) (bool, error) {
-	// No agent run is recorded here, so a skill milestone fails: the engine grades with its capture.
+	// No agent run is recorded here: skill_loaded milestones fail and skill_not_loaded ones pass.
+	// The engine grades with the skills its agent loaded.
 	results, err := o.GradeMilestones(ctx, container, nil)
 	if err != nil {
 		return false, err

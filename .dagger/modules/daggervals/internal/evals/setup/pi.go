@@ -128,6 +128,10 @@ done
 find "${paths[@]}" -type f -not -path '*/node_modules/*' -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1
 `
 
+// skillsHashScript hashes, from the current directory, every file of the global skills. Unlike
+// Directory.Digest, its output does not change between Dagger releases.
+const skillsHashScript = `find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1`
+
 func (c *PiSetup) GetSetupId(ctx context.Context, container *dagger.Container) (string, error) {
 
 	withFilesContainer := container.WithDirectory("/root/.pi/agent", c.Workspace)
@@ -144,11 +148,12 @@ func (c *PiSetup) GetSetupId(ctx context.Context, container *dagger.Container) (
 	// The staged skills are not in the workspace: their digest joins the files hash.
 	filesHash := strings.TrimSpace(shaFolder)
 	if c.GlobalSkills != nil {
-		skillsDigest, err := c.GlobalSkills.Digest(ctx)
+		skillsDigest, err := container.WithDirectory("/skills", c.GlobalSkills).WithWorkdir("/skills").
+			WithExec([]string{"bash", "-c", skillsHashScript}).Stdout(ctx)
 		if err != nil {
 			return "", err
 		}
-		filesHash += skillsDigest
+		filesHash += strings.TrimSpace(skillsDigest)
 	}
 	// The final id is sha256(files hash + env content + profile name + ablation suffix), hex, no newline.
 	sum := sha256.Sum256([]byte(setupIdInput(filesHash, envContent, c.Profile, c.ablationSuffix())))

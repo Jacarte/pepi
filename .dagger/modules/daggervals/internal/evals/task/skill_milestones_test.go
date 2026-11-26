@@ -64,3 +64,26 @@ func TestParseMilestonesYAMLSkillChecks(t *testing.T) {
 		}
 	}
 }
+
+// SplitSkillMilestones keeps the skill milestones out of the graded list, in order.
+func TestSplitSkillMilestones(t *testing.T) {
+	milestones := []Milestone{
+		{ID: "m1", Command: "go test ./a"},
+		{ID: "m2", Command: "skill_loaded:grill-me"},
+		{ID: "m3", Command: "go test ./b"},
+		{ID: "m4", Command: "skill_not_loaded:handoff"},
+	}
+	graded, skill, err := SplitSkillMilestones(milestones)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(graded) != 2 || graded[0].ID != "m1" || graded[1].ID != "m3" {
+		t.Fatalf("graded = %+v", graded)
+	}
+	if len(skill) != 2 || skill[0].ID != "m2" || skill[1].ID != "m4" {
+		t.Fatalf("skill = %+v", skill)
+	}
+	if _, _, err := SplitSkillMilestones([]Milestone{{ID: "m5", Command: "skill_loaded:Bad"}}); err == nil || !strings.Contains(err.Error(), "milestone m5") {
+		t.Fatalf("invalid skill name: %v", err)
+	}
+}

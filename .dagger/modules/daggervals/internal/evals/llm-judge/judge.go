@@ -186,8 +186,9 @@ type toolSummary struct {
 	Nested int `json:"nested"`
 	// ByTool maps tool name to {calls, errors}.
 	ByTool map[string]toolCount `json:"byTool"`
-	// SkillsLoaded are the skills whose SKILL.md the parent read successfully, in order.
-	SkillsLoaded []string `json:"skillsLoaded"`
+	// SkillsLoaded are the skills whose SKILL.md the parent read successfully, in order. Absent when
+	// the calls predate skill capture (see engine.ToolCall.SkillCapture): the skills are unknown.
+	SkillsLoaded *[]string `json:"skillsLoaded,omitempty"`
 }
 
 type toolCount struct {
@@ -195,8 +196,26 @@ type toolCount struct {
 	Errors int `json:"errors"`
 }
 
+// skillsCaptured reports whether the calls know their skills: no calls (no skill could be read),
+// or at least one call recorded with skill capture.
+func skillsCaptured(calls []engine.ToolCall) bool {
+	if len(calls) == 0 {
+		return true
+	}
+	for _, c := range calls {
+		if c.SkillCapture {
+			return true
+		}
+	}
+	return false
+}
+
 func summarizeTools(calls []engine.ToolCall) toolSummary {
-	t := toolSummary{ByTool: map[string]toolCount{}, SkillsLoaded: engine.SkillsLoaded(calls)}
+	t := toolSummary{ByTool: map[string]toolCount{}}
+	if skillsCaptured(calls) {
+		skills := engine.SkillsLoaded(calls)
+		t.SkillsLoaded = &skills
+	}
 	for _, c := range calls {
 		t.Total++
 		n := t.ByTool[c.Tool]
@@ -399,7 +418,8 @@ Each element describes one task:
   Use it to say which tools the agent relied on and whether tool errors explain a failure.
 - toolUsage.skillsLoaded: the skills the parent read (their SKILL.md), in order. A skill that is
   not listed was not loaded, so before blaming a skill's content for a result, check that it
-  was loaded. Reads by subagent children are not recorded.
+  was loaded. Reads by subagent children are not recorded. When skillsLoaded is absent, the run
+  was recorded before skill capture: the skills are unknown, not "none"; do not infer either.
 - networkStats: passive packet accounting for the whole run, not a request log.
 - memory (when memory is enabled, by the flags or the auto-loaded env file): enabled (false
   means memory was off in the agent), fixture (memories were seeded before the agent

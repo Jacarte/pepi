@@ -73,6 +73,9 @@ type ToolCall struct {
 	Nested bool `json:"nested"`
 	// Skill is set on a successful read of a skill's SKILL.md: the skill's folder name.
 	Skill string `json:"skill,omitempty"`
+	// SkillCapture is set on every call recorded with skill capture. Runs recorded before it have
+	// no skill data, so their empty skill list is unknown, not "no skill loaded".
+	SkillCapture bool `json:"skillCapture,omitempty"`
 }
 
 // SkillsLoaded lists the skills the calls loaded, in first-read order, each once.

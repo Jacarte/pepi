@@ -18,6 +18,27 @@ const (
 // skillNamePattern matches the folder names of skills, as taskNamePattern does for tasks.
 var skillNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]*$`)
 
+// SkillNotGradedDetail is what GradeTask reports for a skill milestone: it grades no agent run, so
+// it cannot know the skills loaded, and the milestone is left out of the score.
+const SkillNotGradedDetail = "graded only in evals"
+
+// SplitSkillMilestones splits milestones into the ones GradeTask grades and the skill milestones
+// it leaves out (see SkillNotGradedDetail). Order is kept within each list.
+func SplitSkillMilestones(milestones []Milestone) (graded, skill []Milestone, err error) {
+	for _, m := range milestones {
+		_, isSkill, err := ParseSkillCheck(m.Command)
+		if err != nil {
+			return nil, nil, fmt.Errorf("milestone %s: %w", m.ID, err)
+		}
+		if isSkill {
+			skill = append(skill, m)
+		} else {
+			graded = append(graded, m)
+		}
+	}
+	return graded, skill, nil
+}
+
 // SkillCheck is a skill milestone: Loaded true requires the skill to be loaded, false that it is not.
 type SkillCheck struct {
 	Skill  string

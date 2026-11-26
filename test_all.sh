@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # Full local evals. Arms, all on profile bedrock:
 #   base    = profile bedrock (with SKILL set: the global skills of SKILLS_DIR staged, the skill's "with" arm)
-#   forced  = profile bedrock + --force-delegation (mandatory worker/reviewer rule; run id suffix @forced)
+#   forced  = profile bedrock + --force-delegation (mandatory worker/reviewer rule; run id suffix @forced).
+#             With SKILL set it also stages the skills, like base: the arms differ in delegation only.
 #   noskill = base without the skill SKILL (--without-skill; run id suffix @skills@noskill-<SKILL>)
 #
 # Skill ablation: SKILL=<name> ARMS="base noskill" ./test_all.sh <ref>. The global skills (SKILLS_DIR,
 # default ~/.agents/skills) are staged into the image; noskill removes SKILL. Local only: CI has no
-# host skills (see docs/evals-tasks.md, "Skill ablation"). noskill defaults to RUNS_NOSKILL=5 runs.
+# host skills (see docs/evals-tasks.md, "Skill ablation"). noskill runs RUNS_NOSKILL times (default RUNS).
 # Noise: a difference between two identical arms is noise. Run the base arm twice under different
 # FIXED_PREFIX values (e.g. FIXED_PREFIX=n1 ARMS=base RUN_ARMS=base, then FIXED_PREFIX=n2 ...), compare
 # the two sets, and read any skill effect against that spread.
@@ -16,7 +17,7 @@
 # fixed names and the tasks ref stable to reuse finished runs.
 #
 # Usage: ./test_all.sh [TASKS_REF]      env: RUNS=3  ARMS="base forced"  RUN_ARMS=forced  FIXED_PREFIX=v2
-#   SKILL=<name> SKILLS_DIR=~/.agents/skills RUNS_NOSKILL=5  (skill ablation, see above)
+#   SKILL=<name> SKILLS_DIR=~/.agents/skills RUNS_NOSKILL=$RUNS  (skill ablation, see above)
 #   FIXED_PREFIX=<p> prefixes every cache id (<p>-base, ...): a guaranteed fresh run, no cache reuse.
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -30,7 +31,7 @@ CACHE=./evals_cache
 COMPARE_ORDER="base forced noskill"   # first present arm = baseline
 SKILLS_DIR=${SKILLS_DIR:-$HOME/.agents/skills}   # host dir of the global skills (local runs only)
 SKILL=${SKILL:-}                              # skill of the ablation: noskill removes it
-RUNS_NOSKILL=${RUNS_NOSKILL:-5}
+RUNS_NOSKILL=${RUNS_NOSKILL:-$RUNS}
 
 # bash 3.2 (macOS) has no associative arrays: map arms with case.
 arm_check() { case $1 in base|forced|noskill) ;; *) echo "unknown arm: $1" >&2; exit 1;; esac; }
@@ -38,13 +39,13 @@ profile_of() { echo bedrock; }
 fixed_of()   { printf %s "${FIXED_PREFIX:+$FIXED_PREFIX-}$1"; }
 # The skill arms stage the global skills; noskill also removes SKILL. Empty SKILL: no skill staging.
 flags_of()   { case $1 in
-  forced) echo "--force-delegation";;
+  forced) if [[ -n $SKILL ]]; then echo "--force-delegation --global-skills=$SKILLS_DIR"; else echo "--force-delegation"; fi;;
   base) if [[ -n $SKILL ]]; then echo "--global-skills=$SKILLS_DIR"; fi;;
   noskill) echo "--global-skills=$SKILLS_DIR --without-skill=$SKILL";;
   *) echo "";; esac; }
 # Run id suffix the module appends for the flags.
 suffix_of()  { case $1 in
-  forced) echo "@forced";;
+  forced) if [[ -n $SKILL ]]; then echo "@forced@skills"; else echo "@forced"; fi;;
   base) if [[ -n $SKILL ]]; then echo "@skills"; fi;;
   noskill) echo "@skills@noskill-$SKILL";;
   *) echo "";; esac; }

@@ -328,3 +328,49 @@ func TestJudgeSetupDropsSkills(t *testing.T) {
 		t.Fatal("WithoutAblations changed the agent setup")
 	}
 }
+
+// The skills hash moves with any file of the global skills, and only with them.
+func TestSkillsHashScript(t *testing.T) {
+	for _, tool := range []string{"bash", "sha256sum"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skip(tool + " is not installed")
+		}
+	}
+	dir := t.TempDir()
+	write := func(path, content string) {
+		t.Helper()
+		full := filepath.Join(dir, path)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	hash := func() string {
+		t.Helper()
+		cmd := exec.Command("bash", "-c", skillsHashScript)
+		cmd.Dir = dir
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	write("grill-me/SKILL.md", "skill")
+	base := hash()
+	if len(base) != 64 {
+		t.Fatalf("not a sha256: %q", base)
+	}
+	if hash() != base {
+		t.Fatal("the skills hash is not stable")
+	}
+	write("grill-me/notes.md", "extra")
+	if hash() == base {
+		t.Fatal("a new skill file did not change the skills hash")
+	}
+	write("grill-me/SKILL.md", "changed")
+	if hash() == base {
+		t.Fatal("a changed skill file did not change the skills hash")
+	}
+}

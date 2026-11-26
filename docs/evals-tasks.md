@@ -487,7 +487,8 @@ dagger call daggervals compare-runs \
 another memory server image tag, and `--memory-fixture=false` the `nofx` arm.
 `--global-skills` and `--without-skill` add the skill ablation (see [Skill ablation](#skill-ablation)).
 `grade-task` grades a workspace against one task's hidden milestones without an agent and
-`task-agent-files` lists what the agent would get; both are for developing tasks. The CI calls
+`task-agent-files` lists what the agent would get; both are for developing tasks. A skill milestone
+is reported as `SKIP: graded only in evals` and left out of the score, since no agent ran. The CI calls
 (`ci-eval-run`, `ci-eval-report`, `ci-baseline-prepare`) are used by the workflow, not by hand.
 
 ## Where things live

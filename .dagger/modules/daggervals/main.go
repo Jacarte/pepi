@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 
 	"dagger/daggervals/internal/dagger"
@@ -404,6 +405,11 @@ func (m *Daggervals) GradeTask(
 	if err != nil {
 		return nil, err
 	}
+	graded, skill, err := task.SplitSkillMilestones(spec.Milestones)
+	if err != nil {
+		return nil, err
+	}
+	spec.Milestones = graded
 	oracle := task.RepoTaskOracle{Spec: spec, TasksRepo: tree, Base: rootImage()}
 	results, err := oracle.GradeWorkspace(ctx, testbed.WithoutDirectory(".git"), nil)
 	if err != nil {
@@ -412,6 +418,10 @@ func (m *Daggervals) GradeTask(
 	lines, err := task.FormatMilestoneLines(spec.Scoring, results)
 	if err != nil {
 		return nil, err
+	}
+	// The score line stays last: the skipped skill milestones come before it, outside the score.
+	for _, m := range skill {
+		lines = slices.Insert(lines, len(lines)-1, m.ID+" SKIP: "+task.SkillNotGradedDetail)
 	}
 	return append(lines, "tasks commit "+sha), nil
 }

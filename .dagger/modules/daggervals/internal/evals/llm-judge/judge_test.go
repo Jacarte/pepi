@@ -222,13 +222,33 @@ func TestReportCarriesProfile(t *testing.T) {
 // toolUsage.skillsLoaded lists the skills the parent loaded, in order, each once.
 func TestSummarizeToolsSkillsLoaded(t *testing.T) {
 	got := summarizeTools([]engine.ToolCall{
-		{Tool: "read", Status: "ok", Skill: "grill-me"}, {Tool: "bash", Status: "ok"},
-		{Tool: "read", Status: "ok", Skill: "handoff"}, {Tool: "read", Status: "ok", Skill: "grill-me"},
+		{Tool: "read", Status: "ok", Skill: "grill-me", SkillCapture: true}, {Tool: "bash", Status: "ok", SkillCapture: true},
+		{Tool: "read", Status: "ok", Skill: "handoff", SkillCapture: true}, {Tool: "read", Status: "ok", Skill: "grill-me", SkillCapture: true},
 	})
-	if want := []string{"grill-me", "handoff"}; !slices.Equal(got.SkillsLoaded, want) {
+	if want := []string{"grill-me", "handoff"}; got.SkillsLoaded == nil || !slices.Equal(*got.SkillsLoaded, want) {
 		t.Fatalf("skillsLoaded = %v, want %v", got.SkillsLoaded, want)
 	}
-	if empty := summarizeTools(nil); empty.SkillsLoaded == nil {
-		t.Fatal("no skill must be an empty list, not null")
+	if empty := summarizeTools(nil); empty.SkillsLoaded == nil || len(*empty.SkillsLoaded) != 0 {
+		t.Fatal("no calls: no skill was read, so an empty list, not unknown")
+	}
+	captured := summarizeTools([]engine.ToolCall{{Tool: "bash", Status: "ok", SkillCapture: true}})
+	if captured.SkillsLoaded == nil || len(*captured.SkillsLoaded) != 0 {
+		t.Fatal("calls with capture and no skill read: an empty list")
+	}
+}
+
+// Runs recorded before skill capture have calls without the marker: their skills are unknown, so
+// toolUsage omits skillsLoaded instead of saying no skill was loaded.
+func TestSummarizeToolsSkillsUnknownBeforeCapture(t *testing.T) {
+	got := summarizeTools([]engine.ToolCall{{Tool: "read", Status: "ok"}, {Tool: "bash", Status: "ok"}})
+	if got.SkillsLoaded != nil {
+		t.Fatalf("skills of a run without capture must be unknown: %v", *got.SkillsLoaded)
+	}
+	data, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "skillsLoaded") {
+		t.Fatalf("toolUsage must omit skillsLoaded: %s", data)
 	}
 }
