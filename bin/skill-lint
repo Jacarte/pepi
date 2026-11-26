@@ -1,0 +1,124 @@
+#!/usr/bin/env node
+// Lint SKILL.md files. Usage: bin/skill-lint [DIR ...]
+// Default dirs: ./skills and ~/.agents/skills. Exit 1 on errors only; warnings are printed.
+//
+// ERROR: frontmatter name != directory name; description missing or > 1024 chars;
+//        body >= 500 lines.
+// WARN:  description lacks "Use when" / "Use for"; no numbered steps; no
+//        troubleshooting/error-recovery section.
+'use strict';
+
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+
+const MAX_DESCRIPTION = 1024;
+const MAX_BODY_LINES = 500;
+
+function findSkillFiles(dir, out) {
+  let entries;
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch (err) {
+    return out;
+  }
+  for (const entry of entries) {
+    if (entry.name === 'node_modules' || entry.name.startsWith('.')) continue;
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) findSkillFiles(full, out);
+    else if (entry.isFile() && entry.name === 'SKILL.md') out.push(full);
+  }
+  return out;
+}
+
+// Minimal YAML frontmatter reader: top-level `key: value` pairs, quoted scalars,
+// and indented continuation lines (plain multi-line or `>` / `|` block scalars).
+function parseFrontmatter(lines) {
+  if (lines[0] !== '---') return null;
+  const end = lines.indexOf('---', 1);
+  if (end === -1) return null;
+  const fields = {};
+  let key = null;
+  for (const raw of lines.slice(1, end)) {
+    const top = /^([A-Za-z_][\w-]*):\s*(.*)$/.exec(raw);
+    if (top) {
+      key = top[1];
+      fields[key] = top[2].trim();
+    } else if (key && /^\s+\S/.test(raw)) {
+      fields[key] = (fields[key] ? fields[key] + ' ' : '') + raw.trim();
+    }
+  }
+  for (const k of Object.keys(fields)) {
+    const quoted = /^"(.*)"$/.exec(fields[k]) || /^'(.*)'$/.exec(fields[k]);
+    if (quoted) fields[k] = quoted[1];
+    else if (/^[>|][-+]?$/.test(fields[k])) fields[k] = '';
+  }
+  return { fields, end };
+}
+
+function lintFile(file) {
+  const errors = [];
+  const warnings = [];
+  const text = fs.readFileSync(file, 'utf8');
+  const lines = text.replace(/\r?\n$/, '').split('\n');
+  const dirName = path.basename(path.dirname(file));
+  const fm = parseFrontmatter(lines);
+
+  if (!fm) {
+    errors.push('missing YAML frontmatter');
+    return { errors, warnings };
+  }
+
+  const { fields, end } = fm;
+  if (!fields.name) errors.push('frontmatter name missing');
+  else if (fields.name !== dirName) errors.push(`frontmatter name "${fields.name}" != directory "${dirName}"`);
+
+  const description = fields.description || '';
+  if (!description) {
+    errors.push('description missing');
+  } else if (description.length > MAX_DESCRIPTION) {
+    errors.push(`description is ${description.length} chars (max ${MAX_DESCRIPTION})`);
+  }
+  if (description && !/use (when|for)\b/i.test(description)) {
+    warnings.push('description lacks "Use when" / "Use for"');
+  }
+
+  const body = lines.slice(end + 1);
+  if (body.length >= MAX_BODY_LINES) {
+    errors.push(`body is ${body.length} lines (max ${MAX_BODY_LINES - 1})`);
+  }
+
+  if (!body.some((l) => /^\s*\d+[.)]\s+\S/.test(l))) {
+    warnings.push('no numbered steps');
+  }
+
+  const headings = body.filter((l) => /^#{1,6}\s/.test(l));
+  if (!headings.some((h) => /troubleshoot|recover|error|failure|pitfall|gotcha/i.test(h))) {
+    warnings.push('no error-recovery/troubleshooting section');
+  }
+
+  return { errors, warnings };
+}
+
+function main(argv) {
+  const dirs = argv.length
+    ? argv
+    : [path.resolve('skills'), path.join(os.homedir(), '.agents', 'skills')];
+  const files = [];
+  for (const dir of dirs) findSkillFiles(dir, files);
+  files.sort();
+
+  let errorCount = 0;
+  let warnCount = 0;
+  for (const file of files) {
+    const { errors, warnings } = lintFile(file);
+    errorCount += errors.length;
+    warnCount += warnings.length;
+    for (const msg of errors) console.log(`ERROR ${file}: ${msg}`);
+    for (const msg of warnings) console.log(`WARN  ${file}: ${msg}`);
+  }
+  console.log(`skill-lint: ${files.length} files, ${errorCount} errors, ${warnCount} warnings`);
+  return errorCount > 0 ? 1 : 0;
+}
+
+process.exitCode = main(process.argv.slice(2));

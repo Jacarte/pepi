@@ -24,7 +24,10 @@ git/
 
 # --- Downloaded binaries ---------------------------------------------------
 # e.g. bundled `fd`; re-fetched by pi as needed
-bin/
+bin/*
+# our own helper scripts are tracked
+!bin/skill-lint
+!bin/papercut
 
 # --- Model catalogs / caches: large, machine-specific, auto-refreshed ------
 # ~8 MB catalog snapshot

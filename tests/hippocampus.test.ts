@@ -615,8 +615,8 @@ test("default recallEveryNTurns=1 recalls every turn and injects only newly seen
   assert.ok(calls.length > before + 1);
 });
 
-test("recallEveryNTurns is a bounded integer that defaults to 1", (t) => {
-  for (const [value, expected] of [[undefined, 1], [0, 1], [3, 3], [99, 50], ["4", 1]] as const) {
+test("recallEveryNTurns is a bounded integer that defaults to 3", (t) => {
+  for (const [value, expected] of [[undefined, 3], [0, 1], [5, 5], [99, 50], ["4", 3]] as const) {
     const directory = temporary(t);
     writeFileSync(join(directory, "settings.json"), JSON.stringify({ hippocampus: { enabled: false, recallEveryNTurns: value } }));
     assert.equal(readConfig(directory).recallEveryNTurns, expected, String(value));

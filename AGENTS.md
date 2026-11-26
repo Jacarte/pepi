@@ -331,30 +331,7 @@ create notes without frontmatter; change folder structure without documenting it
 
 ## Herdr collaboration mode
 
-Opt-in only: use it when the user asks for herdr mode and `HERDR_ENV=1`;
-otherwise pi-subagents stays the default. Read `~/.pi/agent/skills/herdr-mode/SKILL.md`
-first.
-
-- Tools: `herdr_spawn`, `herdr_wait`, `herdr_collect`, `herdr_merge`,
-  `herdr_review`, `herdr_cleanup`, plus `herdr_peers` / `herdr_send`.
-- Panes use the same role definitions as pi-subagents. Without `model`, each
-  role uses its pinned model (or `subagents.defaultModel`); a role with neither
-  fails the spawn. Pass an explicit authorized model when the assignment needs a
-  different one, to preserve the model policy above.
-- For `scout`, omit `model` to use its configured pin for bounded discovery,
-  or pass an explicit authorized model for exploratory/coupled discovery.
-  An explicit model overrides the role pin.
-- The parent never edits code. It merges mechanically; conflicts go to one
-  explicitly selected `worker` fixer pane in the integration workspace. Merged panes stay alive;
-  `herdr_cleanup` removes workspaces. A lone writer's main-checkout output is never
-  merged by `herdr_merge`.
-- Run-owned workspaces get a best-effort `codegraph init` before pi starts there.
-- Caps: 4 open worker panes, 3 read-only reviewers with distinct lenses, and
-  5 messages per pane pair and direction. Reviewers cannot use peer messaging.
-- `idle`/`done` is not success: read the pane tail with `herdr_collect`.
-- jj: one workspace per parallel writer under `~/.herdr-ws/<run>/`,
-  integrated with `jj new`; git worktrees only when `jj root` fails. Use
-  `--ignore-working-copy` for reads, and never push or create bookmarks.
+Opt-in only: use it when the user asks for herdr mode and `HERDR_ENV=1`; otherwise pi-subagents is the default. Read `~/.pi/agent/skills/herdr-mode/SKILL.md` first (tools, waves, merge, review, model choice, safety). The parent never edits code.
 
 
 ## Default routing
@@ -471,6 +448,10 @@ this rule; the discovery owner checks once if its status is unknown.
   or replacing a stalled child, inspect its findings and partial changes and
   explicitly transfer ownership. Do not restart from scratch by default.
 
+## Skill friction: papercuts
+
+When a skill flag is rejected, a command exits 0 on error, a result is empty when it should match, or a step repeats, log it per `~/.pi/agent/skills/papercut/SKILL.md`.
+
 ## Keep investigation productive
 
 - Start with supplied paths, symbols, failures, and existing handoffs. Broaden
@@ -520,79 +501,7 @@ this rule; the discovery owner checks once if its status is unknown.
 
 ## Writing Wayfinder notes that Visor reads
 
-Visor (`~/DEV/visor`) is a read-only graph viewer for Wayfinder folders. It only
-trusts explicit, machine-readable frontmatter and never guesses readiness. Write
-every Wayfinder note in exactly the form below; other shapes are shown as
-unknown or not indexed.
-
-### Layout
-
-One folder per map: the map note at its root, tickets and other artifacts
-anywhere beneath it (`tickets/`, `specs/`, `impl-tickets/`, ...). Open the map
-folder in Visor; sibling map folders stay one level up.
-
-### Map note
-
-```yaml
----
-title: <Map title>
-labels: [wayfinder:map]
-tags: [<project>, wayfinder]
-status: active
----
-```
-
-### Decision ticket (research | prototype | grilling | task)
-
-```yaml
----
-title: <Question as a title>
-labels: [wayfinder:research]     # or wayfinder:prototype | wayfinder:grilling | wayfinder:task
-parent: "[[<map-note-name>]]"    # quoted wikilink to the map; required
-status: open                     # exactly `open`, `closed` or `done`
-assignee:                        # empty = unassigned; a name = assigned
-blocked-by: []                   # always present; [] means none
----
-```
-
-With blockers, always quote each wikilink:
-`blocked-by: ["[[t04-bulkhead-cap-design]]", "[[t05-rollout]]"]`.
-
-### Implementation ticket (a build slice, not a decision)
-
-```yaml
----
-title: <Slice title>
-labels: [implementation:ticket]
-status: ready-for-agent          # free text; shown, never used for readiness
-blocked-by: []
----
-```
-
-It is drawn with the ticket graph, but Visor deliberately infers no readiness
-from it. Put real dependencies in `blocked-by`, not only in the body text.
-
-### Everything else
-
-Specs, briefs, handoffs, indexes and session notes need no Wayfinder fields.
-Link them with `[[wikilinks]]` from the map or a ticket and they appear as
-context notes. Do not give them a ticket label or the tag `wayfinder-ticket`.
-
-### Rules that avoid the usual failures
-
-- Always quote YAML values that contain `:` (`title: "Agent image: tools"`);
-  an unquoted colon makes the whole note invisible to Visor.
-- `status` is exactly `open`, `closed` or `done` on decision tickets. Any other
-  value (`built-unmerged`, `active`, ...) makes the ticket and everything that
-  depends on it `unknown`. Track finer states in the body.
-- Blockers are wikilinks to notes inside the map folder. A bare slug, an
-  unquoted `[[[a]]]`, or a missing note is flagged "malformed blocker" and the
-  dependent can never show as ready.
-- `parent` points at exactly one map. Two maps in the same folder cannot be
-  told apart, so give each map its own folder.
-- `frontier` = open, unassigned, all blockers closed/done. `assigned` = same but
-  with an `assignee`. Cycles, unknown statuses and unavailable blockers make a
-  ticket `unknown`.
+Read `~/.pi/agent/skills/wayfinder-notes/SKILL.md` before writing any Wayfinder map or ticket note; it has the exact frontmatter Visor reads.
 
 ## PR descriptions
 

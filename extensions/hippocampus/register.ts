@@ -57,6 +57,8 @@ export function registerHippocampus(pi: ExtensionAPI, dependencies: Dependencies
   // Per session: memory ids already injected (pi re-sends persisted recall messages every turn) and prompts seen.
   const injectedIds = new Map<string, Set<string>>();
   const promptTurns = new Map<string, number>();
+  const sessionStarts = new Map<string, number>();
+  const textKey = (text: string) => "t:" + createHash("sha256").update(text.toLowerCase().replace(/\s+/g, " ").trim()).digest("hex").slice(0, 16);
   let outcome: string | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let pumping: Promise<Delivery[]> | undefined;
@@ -163,18 +165,25 @@ export function registerHippocampus(pi: ExtensionAPI, dependencies: Dependencies
 
   pi.on("session_start", async (_event, ctx) => {
     context = ctx; stopped = false; evidence = new Evidence(); outcome = undefined;
-    injectedIds.clear(); promptTurns.clear();
+    injectedIds.clear(); promptTurns.clear(); sessionStarts.clear();
     // Resumed/forked sessions still carry earlier recall messages: rebuild state from them so nothing is re-injected.
     try {
       let recalls = 0, users = 0;
+      const sid = ctx.sessionManager.getSessionId();
+      const marks = new Set<string>();
+      let first = Date.now();
       for (const entry of (ctx.sessionManager.getEntries?.() ?? []) as Array<Record<string, any>>) {
         const message = entry?.message ?? entry;
+        const at = Date.parse(entry?.timestamp);
+        if (!Number.isNaN(at)) first = Math.min(first, at);
         if (message?.role === "user") users++;
         if (message?.customType !== "hippocampus-recall") continue;
         recalls++;
-        for (const row of message.details?.rows ?? []) if (typeof row?.id === "string") injectedIds.add(row.id);
+        for (const row of message.details?.rows ?? []) if (typeof row?.id === "string") { marks.add(row.id); if (typeof row.memory === "string") marks.add(textKey(row.memory)); }
       }
-      if (recalls) promptTurns.set(ctx.sessionManager.getSessionId(), users);
+      if (recalls) promptTurns.set(sid, users);
+      if (marks.size) injectedIds.set(sid, marks);
+      sessionStarts.set(sid, first);
     } catch { /* best effort */ }
     if (timer) clearTimeout(timer);
     try {
@@ -207,6 +216,9 @@ export function registerHippocampus(pi: ExtensionAPI, dependencies: Dependencies
         const cut = (text: string) => (text.length > w ? `${text.slice(0, w - 1)}…` : text);
         const query = typeof message.details?.query === "string" && message.details.query ? ` · query: "${message.details.query}"` : "";
         const lines = [paint("1;38;5;231", cut(`🧠 hippocampus: injected ${rows.length} memor${rows.length === 1 ? "y" : "ies"}${query}`))];
+        const skipped: { reason: string }[] = Array.isArray(message.details?.skipped) ? message.details.skipped : [];
+        const count = (reason: string) => skipped.filter((item) => item.reason === reason).length;
+        if (skipped.length) lines.push(paint("2;38;5;250", cut(`  ⊘ skipped ${skipped.length}: ${count("duplicate")} duplicate, ${count("same-session")} same-session`)));
         if (message.details?.bootstrap) lines.push(paint("38;5;231", cut("  📝 no project overview yet: asked the agent to save one")));
         rows.forEach((row, index) => {
           const text = `[${row.type ?? "untyped"}${ageOf(row.created_at) ? ` · ${ageOf(row.created_at)}` : ""}] ${oneLine(row.memory ?? "")}`;
@@ -245,18 +257,29 @@ export function registerHippocampus(pi: ExtensionAPI, dependencies: Dependencies
       const query = recallQuery(prompt);
       const scope = identity(ctx);
       const injected = injectedIds.get(sessionId) ?? new Set<string>();
-      const rows = (await recall(config, scope, query, fetcher)).filter((row) => !injected.has(row.id));
+      const startedAt = sessionStarts.get(sessionId) ?? (sessionStarts.set(sessionId, Date.now()), sessionStarts.get(sessionId)!);
+      // Skip already-injected ids/texts and memories captured during this session (already in the transcript).
+      const skipped: { id: string; reason: "duplicate" | "same-session" }[] = [];
+      const rows = (await recall(config, scope, query, fetcher)).filter((row) => {
+        const reason = injected.has(row.id) || injected.has(textKey(row.memory)) ? "duplicate"
+          : row.created_at && Date.parse(row.created_at) >= startedAt ? "same-session" : undefined;
+        if (reason) skipped.push({ id: row.id, reason });
+        return !reason;
+      });
       let bootstrap = false;
       if (!readOnly && compatible && config.autoCapture && !writesPaused() && !askedSessions.has(sessionId)) {
         askedSessions.add(sessionId);
         if (bootstrapDue(scope.projectId) && !(await hasOverview(config, scope, fetcher))) { bootstrap = true; markBootstrap(scope.projectId); }
       }
-      if (!rows.length && !bootstrap) return;
-      for (const row of rows) injected.add(row.id);
+      if (!rows.length && !bootstrap) {
+        if (skipped.length) ctx.ui?.setStatus("hippocampus", `memory: ${skipped.length} skipped (${skipped.map((s) => s.reason).join(", ")})`);
+        return;
+      }
+      for (const row of rows) { injected.add(row.id); injected.add(textKey(row.memory)); }
       injectedIds.set(sessionId, injected);
       return { message: { customType: "hippocampus-recall", display: true,
         content: [rows.length ? quoteRecall(rows) : "", bootstrap ? BOOTSTRAP_INSTRUCTION : ""].filter(Boolean).join("\n\n"),
-        details: { untrusted: true, rows, bootstrap, query: redact(query).replace(/\s+/g, " ").trim().slice(0, 50) } } };
+        details: { untrusted: true, rows, skipped, bootstrap, query: redact(query).replace(/\s+/g, " ").trim().slice(0, 50) } } };
     } catch { ctx.ui?.setStatus("hippocampus", "memory: recall unavailable"); }
   });
 
