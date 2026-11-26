@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -33,14 +34,14 @@ func (f fakeMilestoneOracle) ValidateFinalAnswer(context.Context, *dagger.Contai
 	panic("the engine must use GradeMilestones")
 }
 func (f fakeMilestoneOracle) Scoring() string { return f.scoring }
-func (f fakeMilestoneOracle) GradeMilestones(context.Context, *dagger.Container) ([]tasks.MilestoneResult, error) {
+func (f fakeMilestoneOracle) GradeMilestones(context.Context, *dagger.Container, []string) ([]tasks.MilestoneResult, error) {
 	return f.results, f.err
 }
 
 func TestVerifyMilestoneOracle(t *testing.T) {
 	e := &Engine{}
 	run := func(o tasks.MilestoneOracle) (bool, milestoneGrade, error) {
-		return e.verify(context.Background(), tasks.FixTask{Env: tasks.GoTask{Repo: "tasks/demo"}, Oracle: o}, nil)
+		return e.verify(context.Background(), tasks.FixTask{Env: tasks.GoTask{Repo: "tasks/demo"}, Oracle: o}, nil, nil)
 	}
 	pass, fail := tasks.MilestoneResult{ID: "m1", Passed: true}, tasks.MilestoneResult{ID: "m2"}
 
@@ -76,17 +77,17 @@ func TestGradingErrorsAreHarnessErrors(t *testing.T) {
 	var harness *HarnessError
 
 	// the grader could not run: a harness error, which must abort the run
-	_, _, err := e.verify(context.Background(), task(fakeMilestoneOracle{scoring: "count", err: errors.New("apt-get failed")}), nil)
+	_, _, err := e.verify(context.Background(), task(fakeMilestoneOracle{scoring: "count", err: errors.New("apt-get failed")}), nil, nil)
 	if !errors.As(err, &harness) || !strings.Contains(err.Error(), "apt-get failed") {
 		t.Fatalf("grading failure must be a HarnessError, got %v", err)
 	}
 	// an unknown scoring is a bug of the task or the harness, not a verdict on the agent
-	_, _, err = e.verify(context.Background(), task(fakeMilestoneOracle{scoring: "sum", results: []tasks.MilestoneResult{{ID: "m1", Passed: true}}}), nil)
+	_, _, err = e.verify(context.Background(), task(fakeMilestoneOracle{scoring: "sum", results: []tasks.MilestoneResult{{ID: "m1", Passed: true}}}), nil, nil)
 	if !errors.As(err, &harness) {
 		t.Fatalf("unknown scoring must be a HarnessError, got %v", err)
 	}
 	// failing milestones are a verdict on the agent: data, cached
-	_, _, err = e.verify(context.Background(), task(fakeMilestoneOracle{scoring: "count", results: []tasks.MilestoneResult{{ID: "m1"}}}), nil)
+	_, _, err = e.verify(context.Background(), task(fakeMilestoneOracle{scoring: "count", results: []tasks.MilestoneResult{{ID: "m1"}}}), nil, nil)
 	if err == nil || errors.As(err, &harness) {
 		t.Fatalf("a failed milestone must be a plain validation error, got %v", err)
 	}
@@ -220,5 +221,18 @@ func TestAddSessionsMulti(t *testing.T) {
 	}
 	if s2.Index != 2 || *s2.WallClockSec != 30 || s2.ToolCalls != 1 || !s2.TimedOut || s2.StatsError != "partial" || s2.Memory != nil {
 		t.Fatalf("session 2: %+v", s2)
+	}
+}
+
+// SkillsLoaded keeps the order of the first read and drops repeats and calls without a skill.
+func TestSkillsLoaded(t *testing.T) {
+	got := SkillsLoaded([]ToolCall{
+		{Tool: "read", Skill: "b"}, {Tool: "bash"}, {Tool: "read", Skill: "a"}, {Tool: "read", Skill: "b"},
+	})
+	if !slices.Equal(got, []string{"b", "a"}) {
+		t.Fatalf("skills = %v", got)
+	}
+	if none := SkillsLoaded(nil); none == nil || len(none) != 0 {
+		t.Fatalf("no skill must be an empty list, got %v", none)
 	}
 }

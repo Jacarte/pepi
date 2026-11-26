@@ -176,6 +176,7 @@ func ParseMilestonesYAML(data string) ([]Milestone, error) {
 	}
 	seen := map[string]bool{}
 	for i, m := range raw.Milestones {
+		_, isSkill, skillErr := ParseSkillCheck(m.Command)
 		switch {
 		case m.ID == "":
 			return nil, fmt.Errorf("milestones.yaml: milestone #%d: id missing", i+1)
@@ -185,8 +186,10 @@ func ParseMilestonesYAML(data string) ([]Milestone, error) {
 			return nil, fmt.Errorf("milestones.yaml: duplicate id %q", m.ID)
 		case m.Title == "":
 			return nil, fmt.Errorf("milestones.yaml: milestone %s: title missing", m.ID)
-		case !strings.HasPrefix(m.Command, "go test"):
-			return nil, fmt.Errorf("milestones.yaml: milestone %s: command must start with 'go test'", m.ID)
+		case skillErr != nil:
+			return nil, fmt.Errorf("milestones.yaml: milestone %s: %w", m.ID, skillErr)
+		case !isSkill && !strings.HasPrefix(m.Command, "go test"):
+			return nil, fmt.Errorf("milestones.yaml: milestone %s: command must start with 'go test', skill_loaded: or skill_not_loaded:", m.ID)
 		}
 		seen[m.ID] = true
 	}

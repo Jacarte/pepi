@@ -109,6 +109,9 @@ Common grading rules:
   user. The milestone count and the prefix or count scoring are in the table above.
 - `prefix` scoring counts consecutive milestones passed from the first; `count` counts all that
   passed. A task is valid only when every milestone passes.
+- A milestone whose command is `skill_loaded:<name>` or `skill_not_loaded:<name>` is no `go test`.
+  It is not run in the workspace: it passes when the parent read `<name>/SKILL.md` successfully (or
+  did not). See [Skill ablation](#skill-ablation).
 - The prompts are neutral: they never mention delegation, agents or this repo.
 
 ### kv-database
@@ -293,6 +296,39 @@ with memory: 5 tool calls against 7, about 127k tokens against 197k, cost $0.07 
 (about 30 to 40% less), but the ranges overlap. NO CHANGE, low confidence. The published commit of
 this task is not yet in the pin `eval-tasks.ref`, see [ci-eval.md](ci-eval.md).
 
+## Skill ablation
+
+The skill ablation asks whether a global skill (a folder in `~/.agents/skills`) changes the outcome
+of a task. Two arms run the same task: `base` with the skill staged, and `noskill` without it
+(`--without-skill`). The outcome is graded as usual, and a skill milestone adds a deterministic
+check, with no LLM judging the trajectory.
+
+- `--global-skills <dir>` stages each folder of `<dir>` at `~/.agents/skills` in the eval image
+  (copied with the image, not mounted, and not part of the workspace hash). The run id gets
+  `@skills`. Eval-only: a baked image cannot carry it.
+- `--without-skill <name>` removes `<name>` from that set. It needs `--global-skills`, and the
+  folder must hold a `SKILL.md`. The run id gets `@skills@noskill-<name>`.
+- `milestones.yaml` takes `skill_loaded:<name>` (must be loaded) and `skill_not_loaded:<name>`
+  (must not be loaded). The engine grades them from the skills the parent read
+  (`toolUsage.skillsLoaded`, in `processStats.toolCalls` as `skill`), never from the workspace.
+- Reads by subagent children are not captured, so a skill milestone measures the parent only. A
+  task whose parent delegates can fail it without the skill being at fault. The judge is told to
+  check `skillsLoaded` before it blames a skill's content.
+
+Local runs: `SKILL=<name> ARMS="base noskill" ./test_all.sh` (see the header of `test_all.sh`). It
+reads `SKILLS_DIR`, which defaults to `~/.agents/skills`. The host path is local only. CI cannot
+read it, so a CI skill task must carry its skill files in the tasks repo (see below).
+
+Layout of a skill task in [pepi-eval-tasks](https://github.com/Jacarte/pepi-eval-tasks), the same
+as the other tasks with a skill folder added: `tasks/skill-<name>/` holds `task.yaml`,
+`milestones.yaml` (with a `skill_loaded:<name>` milestone), `prompts/NN.md`, `seed/`, `hidden/` and
+`skills/<name>/SKILL.md`, the vendored skill. The vendored folder is the `--global-skills` source for that
+task; the harness does not stage it yet.
+
+Status: no skill task exists at the pinned tasks ref, and the harness does not yet take a task's
+`skills/` folder as the staging source in CI. The `tasks-skills` shard (in `internal/evals/ci/tiers.go`)
+is therefore not added. It needs a tasks-repo bump with the `skill-<name>` tasks, plus that staging.
+
 ## Architecture
 
 Components, from the command to the verdict.
@@ -449,6 +485,7 @@ dagger call daggervals compare-runs \
 `--dry-run` on `compare-runs` prints the aggregate and the prompt without calling a model.
 `--tasks-repo` and `--tasks-token` select another or a private tasks repo, `--hippocampus-ref`
 another memory server image tag, and `--memory-fixture=false` the `nofx` arm.
+`--global-skills` and `--without-skill` add the skill ablation (see [Skill ablation](#skill-ablation)).
 `grade-task` grades a workspace against one task's hidden milestones without an agent and
 `task-agent-files` lists what the agent would get; both are for developing tasks. The CI calls
 (`ci-eval-run`, `ci-eval-report`, `ci-baseline-prepare`) are used by the workflow, not by hand.

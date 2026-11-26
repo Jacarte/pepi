@@ -2,6 +2,7 @@ package judge
 
 import (
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 
@@ -215,5 +216,19 @@ func TestReportCarriesProfile(t *testing.T) {
 	}
 	if !strings.Contains(COMPARE_PROMPT, `profile "plain" means`) {
 		t.Fatal("COMPARE_PROMPT must explain the plain profile")
+	}
+}
+
+// toolUsage.skillsLoaded lists the skills the parent loaded, in order, each once.
+func TestSummarizeToolsSkillsLoaded(t *testing.T) {
+	got := summarizeTools([]engine.ToolCall{
+		{Tool: "read", Status: "ok", Skill: "grill-me"}, {Tool: "bash", Status: "ok"},
+		{Tool: "read", Status: "ok", Skill: "handoff"}, {Tool: "read", Status: "ok", Skill: "grill-me"},
+	})
+	if want := []string{"grill-me", "handoff"}; !slices.Equal(got.SkillsLoaded, want) {
+		t.Fatalf("skillsLoaded = %v, want %v", got.SkillsLoaded, want)
+	}
+	if empty := summarizeTools(nil); empty.SkillsLoaded == nil {
+		t.Fatal("no skill must be an empty list, not null")
 	}
 }

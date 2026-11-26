@@ -33,3 +33,20 @@ func TestParsePiStatsTurnsAsSessionEvidence(t *testing.T) {
 		t.Fatalf("exit before session_start: %+v %+v, %v", stats, ps, err)
 	}
 }
+
+// A successful read of a SKILL.md carries the skill's folder name; other calls carry none.
+func TestParsePiStatsSkillReads(t *testing.T) {
+	log := `{"type":"parent_start"}
+{"type":"agent","agentType":"parent","role":"parent","agentStats":{"turns":1},"instance":{"id":"parent","agent":"parent","resources":{"cpuTimeMs":1,"peakMemoryBytes":1},"startedAt":"2026-01-01T00:00:00Z","endedAt":"2026-01-01T00:00:01Z","durationMs":1000}}
+{"type":"tool_call","toolCall":{"id":"c1","tool":"read","status":"ok","durationMs":3,"nested":false,"skill":"grill-me"}}
+{"type":"tool_call","toolCall":{"id":"c2","tool":"read","status":"ok","durationMs":3,"nested":false}}
+{"type":"complete"}
+`
+	_, ps, err := parsePiStats(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ps.ToolCalls) != 2 || ps.ToolCalls[0].Skill != "grill-me" || ps.ToolCalls[1].Skill != "" {
+		t.Fatalf("skill reads = %+v", ps.ToolCalls)
+	}
+}

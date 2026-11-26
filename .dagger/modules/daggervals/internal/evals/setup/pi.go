@@ -24,6 +24,11 @@ type PiSetup struct {
 	// ForceDelegation appends the mandatory delegation section to AGENTS.md (see
 	// appendForcedDelegation). Resolve must run first.
 	ForceDelegation bool
+	// GlobalSkills are the skills staged at ~/.agents/skills, one folder per skill with a SKILL.md
+	// (see applySkills). Nil stages none. Eval-only, like ForceDelegation.
+	GlobalSkills *dagger.Directory
+	// WithoutSkill names the skill of GlobalSkills that is left out of the image (--without-skill).
+	WithoutSkill string
 	// ablationAgents is the AGENTS.md text Resolve computed for ForceDelegation.
 	ablationAgents *string
 }
@@ -85,6 +90,7 @@ func (c *PiSetup) Setup() dagger.WithContainerFunc {
 				WithExec([]string{"/root/.pi/agent/profile.sh", c.Profile})
 			// The eval-only ablation writes AGENTS.md after profile.sh; a baked image never has it.
 			container = c.applyAblations(container)
+			container = c.applySkills(container)
 			// TODO install ketch
 			// TODO install herdr
 		}
@@ -135,8 +141,17 @@ func (c *PiSetup) GetSetupId(ctx context.Context, container *dagger.Container) (
 	if err != nil {
 		return "", err
 	}
-	// The final id is sha256(workspace sha + env content + profile name + ablation suffix), hex, no newline.
-	sum := sha256.Sum256([]byte(setupIdInput(strings.TrimSpace(shaFolder), envContent, c.Profile, c.ForceDelegation)))
+	// The staged skills are not in the workspace: their digest joins the files hash.
+	filesHash := strings.TrimSpace(shaFolder)
+	if c.GlobalSkills != nil {
+		skillsDigest, err := c.GlobalSkills.Digest(ctx)
+		if err != nil {
+			return "", err
+		}
+		filesHash += skillsDigest
+	}
+	// The final id is sha256(files hash + env content + profile name + ablation suffix), hex, no newline.
+	sum := sha256.Sum256([]byte(setupIdInput(filesHash, envContent, c.Profile, c.ablationSuffix())))
 	return hex.EncodeToString(sum[:]), nil
 
 }

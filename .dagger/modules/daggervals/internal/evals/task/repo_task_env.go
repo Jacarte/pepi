@@ -79,7 +79,8 @@ func (o RepoTaskOracle) Scoring() string { return o.Spec.Scoring }
 
 // ValidateFinalAnswer is true when every milestone passes.
 func (o RepoTaskOracle) ValidateFinalAnswer(ctx context.Context, container *dagger.Container) (bool, error) {
-	results, err := o.GradeMilestones(ctx, container)
+	// No agent run is recorded here, so a skill milestone fails: the engine grades with its capture.
+	results, err := o.GradeMilestones(ctx, container, nil)
 	if err != nil {
 		return false, err
 	}
@@ -91,9 +92,9 @@ func (o RepoTaskOracle) ValidateFinalAnswer(ctx context.Context, container *dagg
 	return true, nil
 }
 
-// GradeMilestones grades the agent's /testbed (without .git).
-func (o RepoTaskOracle) GradeMilestones(ctx context.Context, container *dagger.Container) ([]MilestoneResult, error) {
-	return o.GradeWorkspace(ctx, container.Directory(goWorkdir).WithoutDirectory(".git"))
+// GradeMilestones grades the agent's /testbed (without .git) and the skill milestones from skillsLoaded.
+func (o RepoTaskOracle) GradeMilestones(ctx context.Context, container *dagger.Container, skillsLoaded []string) ([]MilestoneResult, error) {
+	return o.GradeWorkspace(ctx, container.Directory(goWorkdir).WithoutDirectory(".git"), skillsLoaded)
 }
 
 const (
@@ -169,10 +170,11 @@ func (o RepoTaskOracle) rejectAll(detail string) []MilestoneResult {
 	return results
 }
 
-// GradeWorkspace runs every milestone with scripts/check-milestone.sh, each in its own
-// exec from the same prepared container, so a milestone cannot affect another. A refused
-// workspace fails every milestone. Errors are harness problems, never an agent failure.
-func (o RepoTaskOracle) GradeWorkspace(ctx context.Context, workspace *dagger.Directory) ([]MilestoneResult, error) {
+// GradeWorkspace runs every go test milestone with scripts/check-milestone.sh, each in its own
+// exec from the same prepared container, so a milestone cannot affect another; a skill milestone
+// is graded from skillsLoaded without an exec. A refused workspace fails every milestone.
+// Errors are harness problems, never an agent failure.
+func (o RepoTaskOracle) GradeWorkspace(ctx context.Context, workspace *dagger.Directory, skillsLoaded []string) ([]MilestoneResult, error) {
 	taskDir := tasksMountPath + "/" + taskPath(o.Spec.Name)
 	withWork := o.gradingBase().WithDirectory("/work", workspace).WithWorkdir("/work")
 
@@ -217,6 +219,13 @@ func (o RepoTaskOracle) GradeWorkspace(ctx context.Context, workspace *dagger.Di
 
 	results := make([]MilestoneResult, 0, len(o.Spec.Milestones))
 	for _, m := range o.Spec.Milestones {
+		if skill, isSkill, err := ParseSkillCheck(m.Command); isSkill {
+			if err != nil {
+				return nil, fmt.Errorf("grade %s %s: %w", o.Spec.Name, m.ID, err)
+			}
+			results = append(results, skill.Grade(m, skillsLoaded))
+			continue
+		}
 		check := prepared.WithExec(
 			[]string{"sh", "-c", fmt.Sprintf(`timeout -k %d %d bash "$@" 2>&1`, gradeKillAfterSeconds, gradeCheckTimeoutSeconds), "check-milestone",
 				tasksMountPath + "/scripts/check-milestone.sh", taskDir, "/work", m.ID},

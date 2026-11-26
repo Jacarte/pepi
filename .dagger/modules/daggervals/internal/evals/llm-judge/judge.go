@@ -186,6 +186,8 @@ type toolSummary struct {
 	Nested int `json:"nested"`
 	// ByTool maps tool name to {calls, errors}.
 	ByTool map[string]toolCount `json:"byTool"`
+	// SkillsLoaded are the skills whose SKILL.md the parent read successfully, in order.
+	SkillsLoaded []string `json:"skillsLoaded"`
 }
 
 type toolCount struct {
@@ -194,7 +196,7 @@ type toolCount struct {
 }
 
 func summarizeTools(calls []engine.ToolCall) toolSummary {
-	t := toolSummary{ByTool: map[string]toolCount{}}
+	t := toolSummary{ByTool: map[string]toolCount{}, SkillsLoaded: engine.SkillsLoaded(calls)}
 	for _, c := range calls {
 		t.Total++
 		n := t.ByTool[c.Tool]
@@ -395,6 +397,9 @@ Each element describes one task:
   processStats.toolCalls without arguments or results. Calls made inside subagent
   children are not recorded, so an absent tool does not prove a child did not use it.
   Use it to say which tools the agent relied on and whether tool errors explain a failure.
+- toolUsage.skillsLoaded: the skills the parent read (their SKILL.md), in order. A skill that is
+  not listed was not loaded, so before blaming a skill's content for a result, check that it
+  was loaded. Reads by subagent children are not recorded.
 - networkStats: passive packet accounting for the whole run, not a request log.
 - memory (when memory is enabled, by the flags or the auto-loaded env file): enabled (false
   means memory was off in the agent), fixture (memories were seeded before the agent

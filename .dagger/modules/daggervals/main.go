@@ -171,6 +171,12 @@ func (m *Daggervals) Evals(
 	// Append the mandatory delegation section to the agent's AGENTS.md (implementation by a worker, review by a reviewer). The run id gets @forced.
 	// +optional
 	forceDelegation bool,
+	// Skills staged at ~/.agents/skills in the agent's container: one folder per skill, each with a SKILL.md. The run id gets @skills.
+	// +optional
+	globalSkills *dagger.Directory,
+	// Leave this skill of globalSkills out of the agent's image (the ablation arm; needs globalSkills). The run id gets @noskill-<name>.
+	// +optional
+	withoutSkill string,
 ) (*EvalResult, error) {
 	if err := engine.ValidateRuns(runs); err != nil {
 		return nil, err
@@ -204,7 +210,7 @@ func (m *Daggervals) Evals(
 		}
 		tasks = repoSuite.Tasks
 	}
-	piSetup := setup.PiSetup{Workspace: m.Source, Auth: auth, Env: agentEnv.AsEnvFile(), Profile: agentProfile, Memory: memoryConfig.Mode(), ForceDelegation: forceDelegation}
+	piSetup := setup.PiSetup{Workspace: m.Source, Auth: auth, Env: agentEnv.AsEnvFile(), Profile: agentProfile, Memory: memoryConfig.Mode(), ForceDelegation: forceDelegation, GlobalSkills: globalSkills, WithoutSkill: withoutSkill}
 	if err := piSetup.Resolve(ctx); err != nil {
 		return nil, err
 	}
@@ -227,6 +233,7 @@ func (m *Daggervals) Evals(
 		idSuffix = "@" + suite
 	}
 	idSuffix += setup.AblationRunIDSuffix(forceDelegation)
+	idSuffix += setup.SkillRunIDSuffix(globalSkills != nil, withoutSkill)
 	idSuffix += memoryConfig.RunIDSuffix()
 
 	result := &EvalResult{Cache: cacheDir}
@@ -398,7 +405,7 @@ func (m *Daggervals) GradeTask(
 		return nil, err
 	}
 	oracle := task.RepoTaskOracle{Spec: spec, TasksRepo: tree, Base: rootImage()}
-	results, err := oracle.GradeWorkspace(ctx, testbed.WithoutDirectory(".git"))
+	results, err := oracle.GradeWorkspace(ctx, testbed.WithoutDirectory(".git"), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -609,7 +616,7 @@ func (m *Daggervals) CiEvalRun(
 		}
 		repo, ref, names = tasksRepo, tasksRef, strings.Join(s.TaskNames, ",")
 	}
-	result, err := m.Evals(ctx, auth, agentEnv, agentProfile, dag.Directory(), t.FixedName(s), s.Suite, repo, ref, names, nil, t.Runs, hippocampusEnv, false, "", true, false)
+	result, err := m.Evals(ctx, auth, agentEnv, agentProfile, dag.Directory(), t.FixedName(s), s.Suite, repo, ref, names, nil, t.Runs, hippocampusEnv, false, "", true, false, nil, "")
 	if err != nil {
 		return nil, err
 	}

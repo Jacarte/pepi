@@ -45,7 +45,8 @@ type MilestoneResult struct {
 type MilestoneOracle interface {
 	Oracle
 	Scoring() string
-	GradeMilestones(ctx context.Context, container *dagger.Container) ([]MilestoneResult, error)
+	// skillsLoaded are the skills the agent's parent read, for the skill milestones (see SkillCheck).
+	GradeMilestones(ctx context.Context, container *dagger.Container, skillsLoaded []string) ([]MilestoneResult, error)
 }
 
 // The flow is

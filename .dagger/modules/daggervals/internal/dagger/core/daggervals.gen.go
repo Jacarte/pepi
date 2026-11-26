@@ -302,6 +302,10 @@ type DaggervalsEvalsOpts struct {
 	MemoryFixture bool
 	// Append the mandatory delegation section to the agent's AGENTS.md (implementation by a worker, review by a reviewer). The run id gets @forced.
 	ForceDelegation bool
+	// Skills staged at ~/.agents/skills in the agent's container: one folder per skill, each with a SKILL.md. The run id gets @skills.
+	GlobalSkills *Directory
+	// Leave this skill of globalSkills out of the agent's image (the ablation arm; needs globalSkills). The run id gets @noskill-<name>.
+	WithoutSkill string
 }
 
 func (r *Daggervals) Evals(auth *Secret, agentEnv *File, agentProfile string, cacheDir *Directory, opts ...DaggervalsEvalsOpts) *DaggervalsEvalResult {
@@ -357,6 +361,14 @@ func (r *Daggervals) Evals(auth *Secret, agentEnv *File, agentProfile string, ca
 		// `forceDelegation` optional argument
 		if !querybuilder.IsZeroValue(opts[i].ForceDelegation) {
 			q = q.Arg("forceDelegation", opts[i].ForceDelegation)
+		}
+		// `globalSkills` optional argument
+		if !querybuilder.IsZeroValue(opts[i].GlobalSkills) {
+			q = q.Arg("globalSkills", opts[i].GlobalSkills)
+		}
+		// `withoutSkill` optional argument
+		if !querybuilder.IsZeroValue(opts[i].WithoutSkill) {
+			q = q.Arg("withoutSkill", opts[i].WithoutSkill)
 		}
 	}
 	q = q.Arg("auth", auth)
