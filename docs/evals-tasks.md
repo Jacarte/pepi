@@ -298,6 +298,8 @@ this task is not yet in the pin `eval-tasks.ref`, see [ci-eval.md](ci-eval.md).
 
 ## Skill ablation
 
+`test_all.sh` merges `~/.agents/skills` with this repo's `skills/` (the repo wins on a name clash) into the staged `--global-skills` directory, so `SKILL` can name either. `--without-skill=<name>` also drops `skills/<name>` from the workspace copy in the image.
+
 The skill ablation asks whether a global skill (a folder in `~/.agents/skills`) changes the outcome
 of a task. Two arms run the same task: `base` with the skill staged, and `noskill` without it
 (`--without-skill`). The outcome is graded as usual, and a skill milestone adds a deterministic

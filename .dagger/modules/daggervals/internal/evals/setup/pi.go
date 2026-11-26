@@ -85,7 +85,12 @@ func (c *PiSetup) Setup() dagger.WithContainerFunc {
 				WithExec([]string{"/root/.pi/agent/profile.sh", c.Profile})
 		} else {
 			// Copy the workspace to the container
-			container = container.WithMountedDirectory("/root/.pi/agent", c.Workspace).
+			// A repo skill (workspace skills/<name>) is ablated too: --without-skill drops it from the workspace.
+			workspace := c.Workspace
+			if c.WithoutSkill != "" {
+				workspace = workspace.WithoutDirectory("skills/" + c.WithoutSkill)
+			}
+			container = container.WithMountedDirectory("/root/.pi/agent", workspace).
 				WithMountedSecret("/root/.pi/agent/auth.json", c.Auth).
 				WithExec([]string{"/root/.pi/agent/profile.sh", c.Profile})
 			// The eval-only ablation writes AGENTS.md after profile.sh; a baked image never has it.

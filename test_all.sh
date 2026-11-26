@@ -5,7 +5,7 @@
 #             With SKILL set it also stages the skills, like base: the arms differ in delegation only.
 #   noskill = base without the skill SKILL (--without-skill; run id suffix @skills@noskill-<SKILL>)
 #
-# Skill ablation: SKILL=<name> ARMS="base noskill" ./test_all.sh <ref>. The global skills (SKILLS_DIR,
+# Skill ablation (SKILL = a global skill or a repo skills/<name>; the repo wins on a name clash): SKILL=<name> ARMS="base noskill" ./test_all.sh <ref>. The global skills (SKILLS_DIR,
 # default ~/.agents/skills) are staged into the image; noskill removes SKILL. Local only: CI has no
 # host skills (see docs/evals-tasks.md, "Skill ablation"). noskill runs RUNS_NOSKILL times (default RUNS).
 # Noise: a difference between two identical arms is noise. Run the base arm twice under different
@@ -30,6 +30,7 @@ RUN_ARMS=${RUN_ARMS:-$ARMS}   # arms to execute (cached ones are skipped by the 
 CACHE=./evals_cache
 COMPARE_ORDER="base forced noskill"   # first present arm = baseline
 SKILLS_DIR=${SKILLS_DIR:-$HOME/.agents/skills}   # host dir of the global skills (local runs only)
+REPO_SKILLS_DIR=${REPO_SKILLS_DIR:-$PWD/skills}  # this repo's skills: merged over SKILLS_DIR, so SKILL may be either
 SKILL=${SKILL:-}                              # skill of the ablation: noskill removes it
 RUNS_NOSKILL=${RUNS_NOSKILL:-$RUNS}
 
@@ -54,7 +55,12 @@ runs_of()    { case $1 in noskill) echo "$RUNS_NOSKILL";; *) echo "$RUNS";; esac
 [[ -f auth.json && -f .env ]] || { echo "need auth.json and .env here" >&2; exit 1; }
 for a in $ARMS $RUN_ARMS; do arm_check "$a"; [[ -d profiles/$(profile_of "$a") ]] || { echo "missing profiles/$(profile_of "$a")" >&2; exit 1; }; done
 if [[ " $ARMS $RUN_ARMS " == *" noskill "* || -n $SKILL ]]; then
-  [[ -n $SKILL && -f $SKILLS_DIR/$SKILL/SKILL.md ]] || { echo "SKILL=<name> with $SKILLS_DIR/<name>/SKILL.md is needed for the skill arms" >&2; exit 1; }
+  [[ -n $SKILL && ( -f $REPO_SKILLS_DIR/$SKILL/SKILL.md || -f $SKILLS_DIR/$SKILL/SKILL.md ) ]] || { echo "SKILL=<name> with $REPO_SKILLS_DIR/<name>/SKILL.md or $SKILLS_DIR/<name>/SKILL.md is needed for the skill arms" >&2; exit 1; }
+  # One staged dir: global skills, then this repo's skills over them (same name = repo wins).
+  MERGED_SKILLS=$(mktemp -d); trap 'rm -rf "$MERGED_SKILLS"' EXIT
+  cp -RL "$SKILLS_DIR/." "$MERGED_SKILLS/" 2>/dev/null || true
+  cp -RL "$REPO_SKILLS_DIR/." "$MERGED_SKILLS/"
+  SKILLS_DIR=$MERGED_SKILLS
 fi
 echo "tasks ref: $REF (cache suffix @tasks@$SHA12), runs: $RUNS (noskill: $RUNS_NOSKILL), arms: $ARMS"
 # Skill lint (./skills and ~/.agents/skills): non-fatal, so lint errors never block the evals.
