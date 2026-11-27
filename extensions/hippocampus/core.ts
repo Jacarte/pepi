@@ -226,8 +226,16 @@ function eligibleForRecall(record: any): boolean {
     source.type === "compaction-archive" || source.tier === "cold" || source.tier === "archive" || source.inject === false);
 }
 
-export async function recall(config: Config, identity: Identity, query: string | undefined, fetcher = fetch) {
-  const all: { id: string; memory: string; user_id: string; type?: string; created_at?: string }[] = [];
+export interface RecalledMemory { id: string; memory: string; user_id: string; type?: string; created_at?: string; session_id?: string }
+export interface SkippedMemory { id: string; reason: string }
+export interface RecallOptions {
+  /** Returns a reason to drop a row before the recallLimit cut, so skipped rows never occupy a slot. */
+  skip?: (row: RecalledMemory) => string | undefined;
+  /** Collects every row dropped by `skip` (cross-scope duplicates are dropped silently, as before). */
+  skipped?: SkippedMemory[];
+}
+
+export async function recall(config: Config, identity: Identity, query: string | undefined, fetcher = fetch, options: RecallOptions = {}) {
   const scopes = await Promise.all(identity.readUserIds.map(async (userId) => {
     const payload = query === undefined
       ? await requestJson(`${config.baseUrl}/memories?user_id=${encodeURIComponent(userId)}`, config.requestTimeoutMs, {}, fetcher)
@@ -237,19 +245,30 @@ export async function recall(config: Config, identity: Identity, query: string |
         { method: "POST", body: JSON.stringify({ query: redact(query).slice(0, 4_000), scopes: ["project"], filters: { scope: null }, limit: 20, user_id: userId, project: identity.projectId }) }, fetcher);
     return { userId, payload };
   }));
-  for (const { userId, payload } of scopes) {
+  const seen = new Set<string>();
+  const perScope = scopes.map(({ userId, payload }) => {
+    const rows: RecalledMemory[] = [];
     for (const row of memoryRows(payload)) {
-      if (!eligibleForRecall(row)) continue;
-      if (!all.some((prior) => prior.id === row.id)) {
-        const type = [row.type, row.metadata?.type].find((value) => typeof value === "string" && value.trim());
-        all.push({
-          id: row.id, memory: redact(row.memory).slice(0, 2_000), user_id: userId, ...(type ? { type: type.trim().slice(0, 40) } : {}),
-          ...(typeof row.created_at === "string" && !Number.isNaN(Date.parse(row.created_at)) ? { created_at: row.created_at } : {})
-        });
-      }
+      if (!eligibleForRecall(row) || seen.has(row.id)) continue;
+      seen.add(row.id);
+      const type = [row.type, row.metadata?.type].find((value) => typeof value === "string" && value.trim());
+      const sessionId = typeof row.metadata?.session_id === "string" ? row.metadata.session_id : undefined;
+      const memory: RecalledMemory = {
+        id: row.id, memory: redact(row.memory).slice(0, 2_000), user_id: userId, ...(type ? { type: type.trim().slice(0, 40) } : {}),
+        ...(typeof row.created_at === "string" && !Number.isNaN(Date.parse(row.created_at)) ? { created_at: row.created_at } : {}),
+        ...(sessionId ? { session_id: sessionId } : {})
+      };
+      const reason = options.skip?.(memory);
+      if (reason) { options.skipped?.push({ id: memory.id, reason }); continue; }
+      rows.push(memory);
     }
-  }
-  return all.slice(0, config.recallLimit);
+    return rows;
+  });
+  // Rank-based scores are not comparable across calls, so interleave scopes by rank (project scope first within a rank).
+  const merged: RecalledMemory[] = [];
+  const deepest = Math.max(0, ...perScope.map((rows) => rows.length));
+  for (let rank = 0; rank < deepest; rank++) for (const rows of perScope) if (rank < rows.length) merged.push(rows[rank]);
+  return merged.slice(0, config.recallLimit);
 }
 
 export function supportsSettlement(version: string) {
