@@ -1,0 +1,22 @@
+name: skill-lint
+
+on:
+  pull_request:
+    paths:
+      - "skills/**"
+      - "bin/skill-lint"
+      - ".github/workflows/skill-lint.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  skill-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # Errors fail the job (exit 1); warnings are printed only.
+      - run: bin/skill-lint skills
