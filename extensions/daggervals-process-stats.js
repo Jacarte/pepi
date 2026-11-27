@@ -9,6 +9,15 @@ const iso = value => number(value) !== null && value <= 8640000000000000 ? new D
 const terminal = status => ['complete', 'completed', 'failed', 'stopped', 'rejected', 'partial'].includes(status);
 const model = value => typeof value === 'string' && value.length > 0 && value.length <= 256 ? value : null;
 const MAX_TOOL_CALLS = 2000;
+const skillNamePattern = /^[a-z0-9][a-z0-9._-]*$/;
+// A skill is loaded when the parent reads its SKILL.md: the skill is the folder that holds it.
+// A bare SKILL.md or a folder that is not a skill name (such as '.') is not a skill.
+const skillOf = event => {
+  if (event?.toolName !== 'read' || typeof event.args?.path !== 'string') return null;
+  const parts = event.args.path.split('/');
+  const folder = parts.at(-2);
+  return parts.length >= 2 && parts.at(-1) === 'SKILL.md' && identity(folder) && skillNamePattern.test(folder) ? folder : null;
+};
 const emptyUsage = () => ({ turns: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost_usd: 0 });
 
 function sessionUsage(entries) {
@@ -60,15 +69,27 @@ class Collector {
     this.background = new Map();
     this.warnings = new Set();
     this.toolCalls = [];
+    this.readSkills = new Map();
+  }
+
+  // Remembers which skill a read targets: the end event carries the result, not the path.
+  toolStart(event) {
+    const skill = skillOf(event);
+    if (skill !== null && identity(event.toolCallId)) this.readSkills.set(event.toolCallId, skill);
   }
 
   // Metadata only: never arguments or results. Capped so a runaway loop cannot bloat the log.
+  // skill is set only for a read of a SKILL.md that succeeded. skillCapture marks every call
+  // recorded with skill capture, so the judge can tell an empty skill list from runs without it.
   toolCall(event) {
     if (!identity(event?.toolName) || !identity(event?.toolCallId)) return;
+    const skill = this.readSkills.get(event.toolCallId);
+    this.readSkills.delete(event.toolCallId);
     if (this.toolCalls.length >= MAX_TOOL_CALLS) { this.warnings.add(`Tool calls beyond ${MAX_TOOL_CALLS} were not recorded.`); return; }
     this.toolCalls.push({
       id: event.toolCallId, tool: event.toolName, status: event.isError ? 'error' : 'ok',
-      durationMs: number(event.durationMs), nested: identity(event.parentToolCallId) !== null,
+      durationMs: number(event.durationMs), nested: identity(event.parentToolCallId) !== null, skillCapture: true,
+      ...(skill !== undefined && !event.isError ? { skill } : {}),
     });
   }
 
@@ -262,6 +283,7 @@ export default function processStats(pi) {
     fs.appendFileSync(logPath, JSON.stringify({ type: 'parent_start', startedAt: iso(startedAt), resources: parentResources() }) + '\n', { mode: 0o600 });
   });
   pi.on('tool_execution_update', event => collector.details(event.partialResult?.details));
+  pi.on('tool_execution_start', event => collector.toolStart(event));
   pi.on('tool_execution_end', event => {
     collector.toolCall(event);
     collector.details(event.result?.details);

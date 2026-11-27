@@ -77,13 +77,14 @@ type RepoTaskOracle struct {
 
 func (o RepoTaskOracle) Scoring() string { return o.Spec.Scoring }
 
-// ValidateFinalAnswer is true when every milestone passes.
+// ValidateFinalAnswer is true when every graded milestone passes. Skill milestones are not graded.
 func (o RepoTaskOracle) ValidateFinalAnswer(ctx context.Context, container *dagger.Container) (bool, error) {
-	results, err := o.GradeMilestones(ctx, container)
+	// No agent run is recorded here, so the skills are unknown: the skill milestones are not graded anyway.
+	graded, _, err := o.GradeMilestones(ctx, container, nil)
 	if err != nil {
 		return false, err
 	}
-	for _, r := range results {
+	for _, r := range graded {
 		if !r.Passed {
 			return false, nil
 		}
@@ -91,9 +92,36 @@ func (o RepoTaskOracle) ValidateFinalAnswer(ctx context.Context, container *dagg
 	return true, nil
 }
 
-// GradeMilestones grades the agent's /testbed (without .git).
-func (o RepoTaskOracle) GradeMilestones(ctx context.Context, container *dagger.Container) ([]MilestoneResult, error) {
-	return o.GradeWorkspace(ctx, container.Directory(goWorkdir).WithoutDirectory(".git"))
+// GradeMilestones grades the agent's /testbed (without .git). It returns the graded milestones,
+// which the score and the validity count, and the skill milestones, graded from skillsLoaded,
+// which are only reported.
+func (o RepoTaskOracle) GradeMilestones(ctx context.Context, container *dagger.Container, skillsLoaded []string) (graded, skill []MilestoneResult, err error) {
+	results, err := o.GradeWorkspace(ctx, container.Directory(goWorkdir).WithoutDirectory(".git"), skillsLoaded)
+	if err != nil {
+		return nil, nil, err
+	}
+	return splitSkillResults(o.Spec.Milestones, results)
+}
+
+// splitSkillResults splits the results of the milestones into the graded ones and the skill ones
+// (the skill milestones of milestones, by SplitSkillMilestones). Order is kept within each list.
+func splitSkillResults(milestones []Milestone, results []MilestoneResult) (graded, skill []MilestoneResult, err error) {
+	_, skillMilestones, err := SplitSkillMilestones(milestones)
+	if err != nil {
+		return nil, nil, err
+	}
+	isSkill := make(map[string]bool, len(skillMilestones))
+	for _, m := range skillMilestones {
+		isSkill[m.ID] = true
+	}
+	for _, r := range results {
+		if isSkill[r.ID] {
+			skill = append(skill, r)
+		} else {
+			graded = append(graded, r)
+		}
+	}
+	return graded, skill, nil
 }
 
 const (
@@ -169,10 +197,11 @@ func (o RepoTaskOracle) rejectAll(detail string) []MilestoneResult {
 	return results
 }
 
-// GradeWorkspace runs every milestone with scripts/check-milestone.sh, each in its own
-// exec from the same prepared container, so a milestone cannot affect another. A refused
-// workspace fails every milestone. Errors are harness problems, never an agent failure.
-func (o RepoTaskOracle) GradeWorkspace(ctx context.Context, workspace *dagger.Directory) ([]MilestoneResult, error) {
+// GradeWorkspace runs every go test milestone with scripts/check-milestone.sh, each in its own
+// exec from the same prepared container, so a milestone cannot affect another; a skill milestone
+// is graded from skillsLoaded without an exec. A refused workspace fails every milestone.
+// Errors are harness problems, never an agent failure.
+func (o RepoTaskOracle) GradeWorkspace(ctx context.Context, workspace *dagger.Directory, skillsLoaded []string) ([]MilestoneResult, error) {
 	taskDir := tasksMountPath + "/" + taskPath(o.Spec.Name)
 	withWork := o.gradingBase().WithDirectory("/work", workspace).WithWorkdir("/work")
 
@@ -217,6 +246,13 @@ func (o RepoTaskOracle) GradeWorkspace(ctx context.Context, workspace *dagger.Di
 
 	results := make([]MilestoneResult, 0, len(o.Spec.Milestones))
 	for _, m := range o.Spec.Milestones {
+		if skill, isSkill, err := ParseSkillCheck(m.Command); isSkill {
+			if err != nil {
+				return nil, fmt.Errorf("grade %s %s: %w", o.Spec.Name, m.ID, err)
+			}
+			results = append(results, skill.Grade(m, skillsLoaded))
+			continue
+		}
 		check := prepared.WithExec(
 			[]string{"sh", "-c", fmt.Sprintf(`timeout -k %d %d bash "$@" 2>&1`, gradeKillAfterSeconds, gradeCheckTimeoutSeconds), "check-milestone",
 				tasksMountPath + "/scripts/check-milestone.sh", taskDir, "/work", m.ID},

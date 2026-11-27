@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 
 	"dagger/daggervals/internal/dagger"
@@ -171,6 +172,12 @@ func (m *Daggervals) Evals(
 	// Append the mandatory delegation section to the agent's AGENTS.md (implementation by a worker, review by a reviewer). The run id gets @forced.
 	// +optional
 	forceDelegation bool,
+	// Skills staged at ~/.agents/skills in the agent's container: one folder per skill, each with a SKILL.md. The run id gets @skills.
+	// +optional
+	globalSkills *dagger.Directory,
+	// Leave this skill of globalSkills out of the agent's image (the ablation arm; needs globalSkills). The run id gets @noskill-<name>.
+	// +optional
+	withoutSkill string,
 ) (*EvalResult, error) {
 	if err := engine.ValidateRuns(runs); err != nil {
 		return nil, err
@@ -204,7 +211,7 @@ func (m *Daggervals) Evals(
 		}
 		tasks = repoSuite.Tasks
 	}
-	piSetup := setup.PiSetup{Workspace: m.Source, Auth: auth, Env: agentEnv.AsEnvFile(), Profile: agentProfile, Memory: memoryConfig.Mode(), ForceDelegation: forceDelegation}
+	piSetup := setup.PiSetup{Workspace: m.Source, Auth: auth, Env: agentEnv.AsEnvFile(), Profile: agentProfile, Memory: memoryConfig.Mode(), ForceDelegation: forceDelegation, GlobalSkills: globalSkills, WithoutSkill: withoutSkill}
 	if err := piSetup.Resolve(ctx); err != nil {
 		return nil, err
 	}
@@ -227,6 +234,7 @@ func (m *Daggervals) Evals(
 		idSuffix = "@" + suite
 	}
 	idSuffix += setup.AblationRunIDSuffix(forceDelegation)
+	idSuffix += setup.SkillRunIDSuffix(globalSkills != nil, withoutSkill)
 	idSuffix += memoryConfig.RunIDSuffix()
 
 	result := &EvalResult{Cache: cacheDir}
@@ -370,7 +378,8 @@ func loadTasksSuite(ctx context.Context, tasksRepo, tasksRef, taskNames string, 
 
 // GradeTask grades a workspace with the hidden milestones of one task, without an agent
 // or an LLM, using the grader of the tasks suite. testbed plays the role of the agent's
-// /testbed. It returns one line per milestone ("m1-x PASS" or "m1-x FAIL: detail"), a score
+// /testbed. It returns one line per milestone ("m1-x PASS", "m1-x FAIL: detail" or
+// "<id> SKIP: graded only in evals" for skill milestones), a score
 // line and the tasks commit.
 func (m *Daggervals) GradeTask(
 	ctx context.Context,
@@ -397,14 +406,23 @@ func (m *Daggervals) GradeTask(
 	if err != nil {
 		return nil, err
 	}
+	graded, skill, err := task.SplitSkillMilestones(spec.Milestones)
+	if err != nil {
+		return nil, err
+	}
+	spec.Milestones = graded
 	oracle := task.RepoTaskOracle{Spec: spec, TasksRepo: tree, Base: rootImage()}
-	results, err := oracle.GradeWorkspace(ctx, testbed.WithoutDirectory(".git"))
+	results, err := oracle.GradeWorkspace(ctx, testbed.WithoutDirectory(".git"), nil)
 	if err != nil {
 		return nil, err
 	}
 	lines, err := task.FormatMilestoneLines(spec.Scoring, results)
 	if err != nil {
 		return nil, err
+	}
+	// The score line stays last: the skipped skill milestones come before it, outside the score.
+	for _, m := range skill {
+		lines = slices.Insert(lines, len(lines)-1, m.ID+" SKIP: "+task.SkillNotGradedDetail)
 	}
 	return append(lines, "tasks commit "+sha), nil
 }
@@ -609,7 +627,7 @@ func (m *Daggervals) CiEvalRun(
 		}
 		repo, ref, names = tasksRepo, tasksRef, strings.Join(s.TaskNames, ",")
 	}
-	result, err := m.Evals(ctx, auth, agentEnv, agentProfile, dag.Directory(), t.FixedName(s), s.Suite, repo, ref, names, nil, t.Runs, hippocampusEnv, false, "", true, false)
+	result, err := m.Evals(ctx, auth, agentEnv, agentProfile, dag.Directory(), t.FixedName(s), s.Suite, repo, ref, names, nil, t.Runs, hippocampusEnv, false, "", true, false, nil, "")
 	if err != nil {
 		return nil, err
 	}

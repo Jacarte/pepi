@@ -43,7 +43,9 @@ type taskReport struct {
 	MaxScore   int                `json:"maxScore,omitempty"`
 	Scoring    string             `json:"scoring,omitempty"`
 	Milestones []milestoneSummary `json:"milestones,omitempty"`
-	TimedOut   bool               `json:"timedOut,omitempty"`
+	// SkillMilestones are reported only: they are not in score, maxScore or the validity.
+	SkillMilestones []milestoneSummary `json:"skillMilestones,omitempty"`
+	TimedOut        bool               `json:"timedOut,omitempty"`
 	// AgentExitCode and AgentError: the agent exited non-zero by itself (see TaskOutcome).
 	AgentExitCode int    `json:"agentExitCode,omitempty"`
 	AgentError    string `json:"agentError,omitempty"`
@@ -186,6 +188,9 @@ type toolSummary struct {
 	Nested int `json:"nested"`
 	// ByTool maps tool name to {calls, errors}.
 	ByTool map[string]toolCount `json:"byTool"`
+	// SkillsLoaded are the skills whose SKILL.md the parent read successfully, in order. Absent when
+	// the calls predate skill capture (see engine.ToolCall.SkillCapture): the skills are unknown.
+	SkillsLoaded *[]string `json:"skillsLoaded,omitempty"`
 }
 
 type toolCount struct {
@@ -193,8 +198,26 @@ type toolCount struct {
 	Errors int `json:"errors"`
 }
 
+// skillsCaptured reports whether the calls know their skills: no calls (no skill could be read),
+// or at least one call recorded with skill capture.
+func skillsCaptured(calls []engine.ToolCall) bool {
+	if len(calls) == 0 {
+		return true
+	}
+	for _, c := range calls {
+		if c.SkillCapture {
+			return true
+		}
+	}
+	return false
+}
+
 func summarizeTools(calls []engine.ToolCall) toolSummary {
 	t := toolSummary{ByTool: map[string]toolCount{}}
+	if skillsCaptured(calls) {
+		skills := engine.SkillsLoaded(calls)
+		t.SkillsLoaded = &skills
+	}
 	for _, c := range calls {
 		t.Total++
 		n := t.ByTool[c.Tool]
@@ -321,6 +344,9 @@ func buildReports(results []engine.TaskOutcome) []taskReport {
 		for _, m := range r.Milestones {
 			report.Milestones = append(report.Milestones, milestoneSummary{ID: m.ID, Title: m.Title, Passed: m.Passed, Detail: m.Detail})
 		}
+		for _, m := range r.SkillMilestones {
+			report.SkillMilestones = append(report.SkillMilestones, milestoneSummary{ID: m.ID, Title: m.Title, Passed: m.Passed, Detail: m.Detail})
+		}
 		reports = append(reports, report)
 	}
 	return reports
@@ -339,12 +365,16 @@ Each element describes one task:
   the task's tests after the agent finished; oracleError carries the reason it failed
   (failing tests, compile error, or missing test output).
 - score, maxScore, scoring, milestones (tasks suite only, absent otherwise): the hidden
-  milestone grading. milestones lists every milestone with id, title, passed and detail
+  milestone grading. milestones lists every scored milestone with id, title, passed and detail
   (the failure line when it did not pass). scoring is "prefix" (score = consecutive
   milestones passed from the first one, for ordered tasks) or "count" (score = milestones
   passed in any order, for independent milestones); maxScore is the number of milestones.
   The oracle is valid only when score equals maxScore. Quote the score as "score/maxScore"
   and name the failed milestones with their detail.
+- skillMilestones (tasks suite only, absent when the task has none): skill milestones, reported
+  only. passed says whether the parent read the skill (skill_loaded) or did not (skill_not_loaded).
+  They are not in score or maxScore, and they do not decide the validity: never count them in the
+  score. Read them with toolUsage.skillsLoaded.
 - timedOut: true means the agent hit its time limit and was cut off. It is not a completed
   attempt: the workspace was graded as it stood, agentStats and processStats may be
   partial, and agentOutput is probably not a final answer. Say so; never read it as a
@@ -395,6 +425,10 @@ Each element describes one task:
   processStats.toolCalls without arguments or results. Calls made inside subagent
   children are not recorded, so an absent tool does not prove a child did not use it.
   Use it to say which tools the agent relied on and whether tool errors explain a failure.
+- toolUsage.skillsLoaded: the skills the parent read (their SKILL.md), in order. A skill that is
+  not listed was not loaded, so before blaming a skill's content for a result, check that it
+  was loaded. Reads by subagent children are not recorded. When skillsLoaded is absent, the run
+  was recorded before skill capture: the skills are unknown, not "none"; do not infer either.
 - networkStats: passive packet accounting for the whole run, not a request log.
 - memory (when memory is enabled, by the flags or the auto-loaded env file): enabled (false
   means memory was off in the agent), fixture (memories were seeded before the agent
@@ -532,7 +566,8 @@ Method:
    the verdict is INCONCLUSIVE.
 2. For each shared task, judge BEFORE and AFTER independently, from the evidence:
    - Correctness: for tasks with milestones, read score, maxScore, scoring and the failed
-     milestones first, then check the diff for integrity and scope. Otherwise compare
+     milestones first, then check the diff for integrity and scope. skillMilestones, when
+     present, are reported only: they are not in the score. Otherwise compare
      finalDiff with goldenPatch (root cause vs symptom, same
      behavior, scope creep) and read oracleValid / oracleError. Classify each side as
      FIXED, PARTIAL or NOT FIXED. Prefer the diff over the oracle's label, and say when

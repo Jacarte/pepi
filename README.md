@@ -442,6 +442,13 @@ One eval-only ablation flag on `evals`: `--force-delegation` appends a mandatory
 rejects it. The run id gets `@forced`, and the setup id changes with it, so those runs never share a cache
 entry with the default ones.
 
+Skill ablation (see [Skill ablation](docs/evals-tasks.md#skill-ablation)): `--global-skills <dir>` stages
+skills at `~/.agents/skills` in the eval image, and `--without-skill <name>` removes one, giving a
+with/without pair for the same task. `skill_loaded:<name>` milestones report whether the agent read the
+skill; they are not scored. Local run: `SKILL=<name> ARMS="base noskill" ./test_all.sh` (the skill can be a
+global one or a folder of this repo's `skills/`). Skill tasks live in pepi-eval-tasks (`tasks/skill-*`);
+CI cannot stage skills yet, so they run locally only and `eval-tasks.ref` is not bumped for them.
+
 ## What is deliberately not tracked
 
 See `.gitignore` for the full list:

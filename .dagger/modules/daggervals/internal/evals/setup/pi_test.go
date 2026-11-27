@@ -172,10 +172,10 @@ func TestAblationRunIDSuffix(t *testing.T) {
 func TestSetupIdWithoutAblationIsUnchanged(t *testing.T) {
 	filesHash, envContent, profile := "0123abcd", "KEY=value\n", "bedrock"
 	before := sha256.Sum256([]byte(filesHash + envContent + profile))
-	if got := sha256.Sum256([]byte(setupIdInput(filesHash, envContent, profile, false))); got != before {
+	if got := sha256.Sum256([]byte(setupIdInput(filesHash, envContent, profile, AblationRunIDSuffix(false)))); got != before {
 		t.Fatal("setup id with the flag off changed")
 	}
-	if forced := sha256.Sum256([]byte(setupIdInput(filesHash, envContent, profile, true))); forced == before {
+	if forced := sha256.Sum256([]byte(setupIdInput(filesHash, envContent, profile, AblationRunIDSuffix(true)))); forced == before {
 		t.Fatal("setup id with the flag on is the id without it")
 	}
 }
@@ -259,5 +259,118 @@ func TestJudgeSetupHasNoAblations(t *testing.T) {
 	}
 	if err := judge.validateAblations(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// --without-skill and --global-skills are eval-only, and the skill to remove must be staged.
+func TestSkillFlagChecks(t *testing.T) {
+	for _, tt := range []struct {
+		name            string
+		force, staged   bool
+		without         string
+		bake, wantError bool
+	}{
+		{"flags off", false, false, "", false, false},
+		{"skills staged", false, true, "", false, false},
+		{"skill removed", false, true, "grill-me", false, false},
+		{"skill removed without staged skills", false, false, "grill-me", false, true},
+		{"invalid skill name", false, true, "../grill-me", false, true},
+		{"baked skills", false, true, "", true, true},
+		{"baked without-skill", false, true, "grill-me", true, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			err := checkAblationFlags(tt.force, tt.staged, tt.without, tt.bake)
+			if (err != nil) != tt.wantError {
+				t.Fatalf("error %v, want error %v", err, tt.wantError)
+			}
+		})
+	}
+}
+
+// The skill suffix names the staged skills, and the removed one when there is one.
+func TestSkillRunIDSuffix(t *testing.T) {
+	for _, tt := range []struct {
+		staged        bool
+		without, want string
+	}{
+		{false, "", ""},
+		{true, "", "@skills"},
+		{true, "grill-me", "@skills@noskill-grill-me"},
+	} {
+		if got := SkillRunIDSuffix(tt.staged, tt.without); got != tt.want {
+			t.Fatalf("staged=%v without=%q: %q, want %q", tt.staged, tt.without, got, tt.want)
+		}
+	}
+}
+
+// The setup id moves with the skill suffix and the staged skills digest, and not without them.
+func TestSkillsChangeSetupId(t *testing.T) {
+	filesHash, envContent, profile := "0123abcd", "KEY=value\n", "bedrock"
+	before := sha256.Sum256([]byte(setupIdInput(filesHash, envContent, profile, "")))
+	if got := sha256.Sum256([]byte(setupIdInput(filesHash, envContent, profile, (&PiSetup{}).ablationSuffix()))); got != before {
+		t.Fatal("setup id without skills changed")
+	}
+	staged := sha256.Sum256([]byte(setupIdInput(filesHash, envContent, profile, SkillRunIDSuffix(true, ""))))
+	removed := sha256.Sum256([]byte(setupIdInput(filesHash, envContent, profile, SkillRunIDSuffix(true, "grill-me"))))
+	if staged == before || removed == staged {
+		t.Fatal("staged and removed skills must have their own setup ids")
+	}
+}
+
+// The judge drops the skill flags with the ablations: it grades without them.
+func TestJudgeSetupDropsSkills(t *testing.T) {
+	agent := &PiSetup{Profile: "bedrock", GlobalSkills: new(dagger.Directory), WithoutSkill: "grill-me"}
+	judge := agent.WithoutAblations()
+	if judge.GlobalSkills != nil || judge.WithoutSkill != "" {
+		t.Fatalf("judge keeps the skills: %v %q", judge.GlobalSkills != nil, judge.WithoutSkill)
+	}
+	if agent.GlobalSkills == nil || agent.WithoutSkill != "grill-me" {
+		t.Fatal("WithoutAblations changed the agent setup")
+	}
+}
+
+// The skills hash moves with any file of the global skills, and only with them.
+func TestSkillsHashScript(t *testing.T) {
+	for _, tool := range []string{"bash", "sha256sum"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skip(tool + " is not installed")
+		}
+	}
+	dir := t.TempDir()
+	write := func(path, content string) {
+		t.Helper()
+		full := filepath.Join(dir, path)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	hash := func() string {
+		t.Helper()
+		cmd := exec.Command("bash", "-c", skillsHashScript)
+		cmd.Dir = dir
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	write("grill-me/SKILL.md", "skill")
+	base := hash()
+	if len(base) != 64 {
+		t.Fatalf("not a sha256: %q", base)
+	}
+	if hash() != base {
+		t.Fatal("the skills hash is not stable")
+	}
+	write("grill-me/notes.md", "extra")
+	if hash() == base {
+		t.Fatal("a new skill file did not change the skills hash")
+	}
+	write("grill-me/SKILL.md", "changed")
+	if hash() == base {
+		t.Fatal("a changed skill file did not change the skills hash")
 	}
 }

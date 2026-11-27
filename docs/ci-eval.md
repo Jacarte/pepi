@@ -139,6 +139,14 @@ comment results. The rust, go and tasks-memory shards still run their 3 runs, ro
 up to 2 h, and their files stay in the run's shard artifacts. Don't use `eval-full` until then.
 The fast tier is not affected.
 
+### Skill tasks (not in CI yet)
+
+A `tasks-skills` shard for the skill ablation (see `evals-tasks.md`, "Skill ablation") is not in
+`ci/tiers.go`. Its tasks, `skill-<name>`, must exist in the tasks repo at the pinned commit, and the
+CI must stage each task's vendored skill (`--global-skills`). Add the shard, with both, in the PR
+that bumps `eval-tasks.ref`. Until then the shard would fail at start with `unknown task`, as
+`memory-carryover` does now.
+
 ## Manual GitHub setup (once)
 
 The existing `evals` environment of `daggervals.yml` stays as it is. Adding reviewers there would

@@ -39,13 +39,16 @@ type MilestoneResult struct {
 }
 
 // MilestoneOracle is an Oracle that grades milestones instead of one pass/fail. The
-// engine prefers it: Score counts the passed milestones according to Scoring (prefix or
-// count) and the task is valid when all pass. Grading must happen in a fresh container
-// that is built from the agent's files only, never in the agent's container.
+// engine prefers it: Score counts the passed graded milestones according to Scoring (prefix or
+// count) and the task is valid when all of them pass. Skill milestones are not scored. Grading
+// must happen in a fresh container that is built from the agent's files only, never in the
+// agent's container.
 type MilestoneOracle interface {
 	Oracle
 	Scoring() string
-	GradeMilestones(ctx context.Context, container *dagger.Container) ([]MilestoneResult, error)
+	// graded are the milestones the score and the validity count; skill are the skill milestones,
+	// graded from skillsLoaded (the skills the agent's parent read, see SkillCheck) and only reported.
+	GradeMilestones(ctx context.Context, container *dagger.Container, skillsLoaded []string) (graded, skill []MilestoneResult, err error)
 }
 
 // The flow is
