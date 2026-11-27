@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# Append one papercut record (one JSON object per line) to the papercut log. No jq.
+#
+# Usage: bin/papercut --skill NAME --tried TEXT --expected TEXT --happened TEXT --fix TEXT [--cwd DIR]
+# Log:   $PAPERCUT_LOG, default ~/.pi/agent/logs/papercuts.jsonl
+# Exit:  0 written, 2 usage error, 1 write failed.
+set -u
+
+usage() {
+  echo "usage: papercut --skill NAME --tried TEXT --expected TEXT --happened TEXT --fix TEXT [--cwd DIR]" >&2
+  exit 2
+}
+
+# JSON string literal for $1: escape backslash, quote, and tab/CR/LF; drop other control bytes.
+json_string() {
+  local s=$1
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  s=${s//$'\t'/\\t}
+  s=${s//$'\r'/\\r}
+  s=${s//$'\n'/\\n}
+  s=$(printf '%s' "$s" | LC_ALL=C tr -d '\000-\010\013\014\016-\037\177')
+  printf '"%s"' "$s"
+}
+
+skill="" tried="" expected="" happened="" fix="" cwd="$PWD"
+while [ $# -gt 0 ]; do
+  [ $# -ge 2 ] || usage
+  case $1 in
+    --skill) skill=${2-}; shift 2 ;;
+    --tried) tried=${2-}; shift 2 ;;
+    --expected) expected=${2-}; shift 2 ;;
+    --happened) happened=${2-}; shift 2 ;;
+    --fix) fix=${2-}; shift 2 ;;
+    --cwd) cwd=${2-}; shift 2 ;;
+    *) usage ;;
+  esac
+done
+
+for value in "$skill" "$tried" "$expected" "$happened" "$fix"; do
+  [ -n "$value" ] || usage
+done
+
+log=${PAPERCUT_LOG:-$HOME/.pi/agent/logs/papercuts.jsonl}
+ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+line="{\"ts\":\"$ts\",\"skill\":$(json_string "$skill"),\"cwd\":$(json_string "$cwd"),\"tried\":$(json_string "$tried"),\"expected\":$(json_string "$expected"),\"happened\":$(json_string "$happened"),\"fix_suggestion\":$(json_string "$fix")}"
+
+if ! mkdir -p "$(dirname "$log")" || ! printf '%s\n' "$line" >> "$log"; then
+  echo "papercut: could not append to $log" >&2
+  exit 1
+fi
+echo "papercut: logged to $log"

@@ -1,6 +1,6 @@
 ---
 name: herdr-mode
-description: Run opt-in herdr collaboration mode, where the parent pi session spawns interactive pi worker panes beside itself, waits on herdr agent state, reads pane tails, and integrates their jj workspaces mechanically. Use only when the user explicitly asks for herdr mode and HERDR_ENV=1; pi-subagents stays the default otherwise.
+description: Run opt-in herdr collaboration mode, where the parent pi session spawns interactive pi worker panes beside itself, waits on herdr agent state, reads pane tails, and integrates their jj workspaces mechanically. Use when the user explicitly asks for herdr mode and HERDR_ENV=1; pi-subagents stays the default otherwise.
 ---
 
 # Herdr collaboration mode
@@ -16,7 +16,7 @@ for herdr mode, use pi-subagents as usual. The tools come from
    researcher, evidence-auditor, delegate) with the same prompts, tools, skills, and
    extensions. Without `model`, every role uses its pinned settings model; a role with
    no pin fails the spawn and nothing is created. An explicit `model` overrides the pin.
-   For `scout`, omit `model` in `herdr_spawn` so its configured pin is used.
+   For `scout`, see the Model section below.
    Layout: the parent pane is split once, side by side, and keeps the full-height left
    half. Every later pane (workers, reviewers, fixer) splits the run pane with the
    largest on-screen area (oldest on ties), to the right if it looks wide (width ≥ 2 ×
@@ -32,6 +32,14 @@ for herdr mode, use pi-subagents as usual. The tools come from
 
 `herdr_peers` / `herdr_send` show panes and the message log, and deliver a message
 when the target is idle (never mid-turn).
+
+## Model and effort
+
+Each pane follows the model and effort guardrail in AGENTS.md. Pass an explicit,
+authorized `model` when the assignment needs one. For `scout`, omit `model` for
+bounded discovery (configured pin), or pass an explicit authorized model for
+exploratory or coupled discovery. An explicit model overrides the role pin. A
+role with neither a pin nor an explicit model fails the spawn.
 
 ## Waves, merge, conflicts
 
@@ -58,6 +66,7 @@ when the target is idle (never mid-turn).
     retries it; pass `fixerModel` to set its model.
   - jj: merge refuses while the integration working copy has edits after the
     sealed head (e.g. a late fixer turn); `jj squash` them in there, then merge again.
+- Read-only jj commands in a workspace use `--ignore-working-copy`.
 - Merging creates a new, empty working-copy commit in each merged worker's workspace
   (the merged work sits in `@-`), so a post-merge `jj diff` there looks empty.
 - The next wave (`herdr_spawn` with the same run) starts from the sealed change;
@@ -86,6 +95,18 @@ Self-sends and unknown targets are refused. Every message is logged in
 `~/.herdr-ws/<run>/run.json`; `unconfirmed` means the text reached the screen but no
 turn was observed. Direct mutual waits are refused; longer cycles (A→B→C→A) are only
 bounded by each send's timeout, so keep messages one-way.
+
+## Troubleshooting
+
+- Spawn fails with no model: the role has no pin; pass an explicit authorized `model`.
+- `herdr_wait` returns `timeout`: the pane is still working; wait again or collect its tail.
+- `idle`/`done` but no `STATUS: done` in the tail: not successful; read more with `herdr_collect` before merging.
+- Review tail truncated with no `VERDICT:`: ask that reviewer to repeat its verdict with `herdr_send`.
+- `herdr_merge` refuses a pane with a queued message: wait for delivery, then merge again.
+- `herdr_merge` refuses after a late fixer edit: `jj squash` the edits in the integration workspace, then merge again.
+- Writer guard refuses a parallel wave after a main-checkout writer: pass `base` (commit or describe that work first) or start a new run.
+- Conflict fixer did not start (`fixerError`): pass `fixerModel` on the re-check `herdr_merge`.
+- Cleanup keeps a workspace with unmerged content: run `herdr_merge` again, then clean up.
 
 ## Safety
 

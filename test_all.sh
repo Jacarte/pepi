@@ -31,6 +31,8 @@ suffix_of()  { case $1 in forced) echo "@forced";; *) echo "";; esac; }
 [[ -f auth.json && -f .env ]] || { echo "need auth.json and .env here" >&2; exit 1; }
 for a in $ARMS $RUN_ARMS; do arm_check "$a"; [[ -d profiles/$(profile_of "$a") ]] || { echo "missing profiles/$(profile_of "$a")" >&2; exit 1; }; done
 echo "tasks ref: $REF (cache suffix @tasks@$SHA12), runs: $RUNS, arms: $ARMS"
+# Skill lint (./skills and ~/.agents/skills): non-fatal, so lint errors never block the evals.
+bin/skill-lint || echo "skill-lint reported errors (non-fatal; see above)"
 
 evals() { # $1=profile $2=fixed id $3=flags (word-split on purpose), rest = extra args
   local p=$1 id=$2 flags=$3; shift 3
