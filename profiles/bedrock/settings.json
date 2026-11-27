@@ -12,6 +12,9 @@
   ],
   "defaultModel": "bedrock-claude-sonnet-5-5",
   "defaultProvider": "litellm",
+  "defaultTools": [
+    "+codemode"
+  ],
   "defaultThinkingLevel": "medium",
   "subagents": {
     "projectRootResolution": "git-root",
@@ -40,7 +43,8 @@
           "codegraph_callees",
           "codegraph_impact",
           "codegraph_explore",
-          "codegraph_status"
+          "codegraph_status",
+          "codemode"
         ],
         "subagentOnlyExtensions": [
           "/Users/javier.cabrera/.pi/agent/extensions/prompt-logger.ts",
@@ -69,7 +73,8 @@
           "codegraph_callees",
           "codegraph_impact",
           "codegraph_explore",
-          "codegraph_status"
+          "codegraph_status",
+          "codemode"
         ],
         "subagentOnlyExtensions": [
           "/Users/javier.cabrera/.pi/agent/extensions/prompt-logger.ts",
@@ -97,7 +102,8 @@
           "codegraph_callees",
           "codegraph_impact",
           "codegraph_explore",
-          "codegraph_status"
+          "codegraph_status",
+          "codemode"
         ],
         "subagentOnlyExtensions": [
           "/Users/javier.cabrera/.pi/agent/extensions/prompt-logger.ts",
@@ -124,7 +130,8 @@
           "codegraph_callees",
           "codegraph_impact",
           "codegraph_explore",
-          "codegraph_status"
+          "codegraph_status",
+          "codemode"
         ],
         "subagentOnlyExtensions": [
           "/Users/javier.cabrera/.pi/agent/extensions/prompt-logger.ts",
@@ -152,7 +159,8 @@
           "codegraph_callees",
           "codegraph_impact",
           "codegraph_explore",
-          "codegraph_status"
+          "codegraph_status",
+          "codemode"
         ],
         "subagentOnlyExtensions": [
           "/Users/javier.cabrera/.pi/agent/extensions/prompt-logger.ts",
