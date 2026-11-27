@@ -13,10 +13,20 @@ const skillNamePattern = /^[a-z0-9][a-z0-9._-]*$/;
 // A skill is loaded when the parent reads its SKILL.md: the skill is the folder that holds it.
 // A bare SKILL.md or a folder that is not a skill name (such as '.') is not a skill.
 const skillOf = event => {
+  if (event?.toolName === 'bash') return bashSkillOf(event.args?.command);
   if (event?.toolName !== 'read' || typeof event.args?.path !== 'string') return null;
   const parts = event.args.path.split('/');
   const folder = parts.at(-2);
   return parts.length >= 2 && parts.at(-1) === 'SKILL.md' && identity(folder) && skillNamePattern.test(folder) ? folder : null;
+};
+// An agent may read a skill with a shell command such as `cat ~/.agents/skills/<name>/SKILL.md`.
+// Only the skill name is kept, never the command. Globs (`*/SKILL.md`) are not a skill name.
+const bashSkillOf = command => {
+  if (typeof command !== 'string' || command.length > 4096) return null;
+  for (const match of command.matchAll(/(?:^|[\s'"=\/])([a-z0-9][a-z0-9._-]*)\/SKILL\.md(?=$|[\s'";|&)])/g)) {
+    if (skillNamePattern.test(match[1])) return match[1];
+  }
+  return null;
 };
 const emptyUsage = () => ({ turns: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost_usd: 0 });
 
